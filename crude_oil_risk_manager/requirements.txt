@@ -1,0 +1,16 @@
+dash>=2.14.0
+dash-ag-grid>=31.0.0
+plotly>=5.18.0
+pandas>=2.1.0
+numpy>=1.26.0
+scipy>=1.11.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+sqlalchemy>=2.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+pyarrow>=14.0.0
+statsmodels>=0.14.0
+gunicorn>=21.2.0
+pytest>=7.4.0
+pytest-mock>=3.12.0

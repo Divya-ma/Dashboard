@@ -1,0 +1,1 @@
+-- Database schema for the crude oil risk manager. Defined in a later phase.

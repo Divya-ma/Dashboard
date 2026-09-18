@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  crude-oil-risk-manager:
+    build: .
+    container_name: crude-oil-risk-manager
+    ports:
+      - "8050:8050"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./db:/app/db
+    restart: always
