@@ -83,11 +83,14 @@ def pnl_payload(total, **extra):
 # ---------- routing ----------
 
 
-def test_render_page_unbuilt_tabs_show_placeholder():
-    for path in ["/archive"]:
+def test_render_page_every_tab_has_a_real_layout():
+    expected = {
+        "/structures": "structures-active-grid", "/correlation": "corr-heatmap", "/exposure": "exposure-bar-chart",
+        "/var-scenario": "var-histogram", "/trade-analyzer": "idea-analyze-btn", "/archive": "archive-table",
+    }
+    for path, marker in expected.items():
         page, _ = cb.render_page(path, True)
-        assert page.children == "🚧 This tab is under construction", path
-        assert page.style["color"] == COLORS["TEXT_PRIMARY"]
+        assert marker in str(page), path
 
 
 def test_render_page_home_and_settings_use_real_layouts(env):
