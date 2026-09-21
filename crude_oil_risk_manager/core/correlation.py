@@ -11,14 +11,19 @@ All data access goes through DataLoader; this module does no file I/O.
 """
 
 import logging
+import re
+from dataclasses import dataclass, field
 from datetime import date
 
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
 
+from adapters.base import PRODUCT_TO_API_CODE, SymbolTranslator
 from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError, InsufficientDataError
+from core.models import Structure
+from core.structure_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +212,173 @@ def get_correlation_with_portfolio(
         entry["window_used"] = window
 
     return results
+
+
+# ----------------------------------------------------------------------
+# Watchlist correlation (Correlation Heatmap tab)
+# ----------------------------------------------------------------------
+
+# Fewest common daily observations a heatmap will be computed from.
+MIN_OBSERVATIONS = 5
+
+_TENOR_RE = re.compile(r"[FGHJKMNQUVXZ]\d{2}")
+
+
+def normalize_instrument_symbol(symbol: str | None) -> str:
+    """Upper-case an instrument symbol and accept the long spread form.
+
+    "clz25-clh26" -> "CLZ25-H26": a later leg may repeat the product code, which is
+    dropped so the symbol matches the exchange-quoted format used everywhere else.
+    """
+    sym = normalize_symbol(symbol)
+    try:
+        product, rest = SymbolTranslator._match_product_prefix(sym, PRODUCT_TO_API_CODE)
+    except ValueError:
+        return sym
+    parts = re.split(r"([-+])", rest)
+    out = [parts[0]]
+    for separator, token in zip(parts[1::2], parts[2::2]):
+        if token.startswith(product) and _TENOR_RE.fullmatch(token[len(product):]):
+            token = token[len(product):]
+        out += [separator, token]
+    return product + "".join(out)
+
+
+def build_correlation_matrix_from_series(
+    series_by_label: dict[str, pd.Series], window: int
+) -> tuple[pd.DataFrame, int]:
+    """Pearson correlation matrix of pre-built price-difference series.
+
+    Series are inner-joined on date and the most recent `window` common days are used
+    (fewer if that is all there is). Returns (matrix, observations_used). A pair whose
+    series has zero variance over the window is NaN, like the symbol-based matrix.
+    Raises InsufficientDataError if there are fewer than 2 series or fewer than
+    MIN_OBSERVATIONS common days.
+    """
+    _validate_window(window)
+    if len(series_by_label) < 2:
+        raise InsufficientDataError("Need at least 2 valid series to compute a correlation matrix.")
+    aligned = pd.concat(list(series_by_label.values()), axis=1, join="inner", keys=list(series_by_label))
+    aligned = aligned.dropna().sort_index()
+    if len(aligned) < MIN_OBSERVATIONS:
+        raise InsufficientDataError(
+            f"Only {len(aligned)} common days across the selected series; at least {MIN_OBSERVATIONS} are needed."
+        )
+    used = aligned.iloc[-window:]
+    n = len(used)
+    labels = list(series_by_label)
+    values = np.full((len(labels), len(labels)), np.nan)
+    for i, a in enumerate(labels):
+        for j, b in enumerate(labels):
+            if j < i:
+                values[i, j] = values[j, i]
+            elif i == j:
+                values[i, j] = 1.0 if np.std(used[a].to_numpy(dtype=float)) > 0 else np.nan
+            else:
+                try:
+                    values[i, j] = _pearson_last_window(used[a], used[b], n, a, b)
+                except InsufficientDataError:
+                    pass  # zero variance: leave NaN
+    return pd.DataFrame(values, index=labels, columns=labels), n
+
+
+def structure_difference_series(structure: Structure, data_loader: DataLoader) -> pd.Series:
+    """Daily synthetic PnL-difference series of a structure, in point x lots.
+
+    structure_diff[t] = sum(leg_diff[t] * ratio * side * lots) over the legs, where side is
+    +1 for a buy and -1 for a sell. `ratio` keeps the leg's own sign and size (a fly's -2
+    body) so it agrees with the PnL engine. Legs are inner-joined on date. Raises
+    CrudeOilRiskError if any leg has no usable local price history.
+    """
+    terms = []
+    for leg in structure.legs:
+        diffs = _load_local_differences(leg.contract.symbol, data_loader)
+        side = 1 if leg.direction == "buy" else -1
+        terms.append(diffs * (leg.ratio * side * leg.lots))
+    combined = pd.concat(terms, axis=1, join="inner").sum(axis=1)
+    combined.name = structure.name
+    return combined
+
+
+def _load_local_differences(symbol: str, data_loader: DataLoader) -> pd.Series:
+    """Price differences from the local Parquet only; never triggers an API backfill."""
+    if data_loader.get_available_date_range(symbol) is None:
+        raise CrudeOilRiskError(f"no local price data for {symbol}")
+    return data_loader.load_price_differences(symbol, min_rows=MIN_OBSERVATIONS)
+
+
+def _safe_range(symbol: str, data_loader: DataLoader):
+    try:
+        return data_loader.get_available_date_range(symbol)
+    except CrudeOilRiskError:
+        return None
+
+
+def watchlist_item_warning(
+    item: dict, structures_by_id: dict[str, Structure], data_loader: DataLoader
+) -> str | None:
+    """Why a watchlist item cannot be computed (missing data, unknown symbol), or None if it can."""
+    if item["type"] == "structure":
+        structure = structures_by_id.get(item["key"])
+        if structure is None:
+            return "structure not found or no longer open"
+        missing = [leg.contract.symbol for leg in structure.legs if _safe_range(leg.contract.symbol, data_loader) is None]
+        return f"missing price data for {', '.join(missing)}" if missing else None
+    return None if _safe_range(item["key"], data_loader) is not None else "no price data found for this symbol"
+
+
+@dataclass
+class WatchlistResult:
+    """Outcome of a watchlist correlation run: a matrix, or an error message."""
+
+    matrix: pd.DataFrame | None = None
+    observations: int = 0
+    requested: int = 0
+    skipped: dict[str, str] = field(default_factory=dict)
+    error: str | None = None
+
+
+def compute_watchlist_correlation(
+    items: list[dict],
+    structures_by_id: dict[str, Structure],
+    lookback_days: int,
+    data_loader: DataLoader,
+) -> WatchlistResult:
+    """Correlation matrix of watchlist items ({"type": instrument|structure, "key", "label"}).
+
+    Instruments use their own exchange-quoted price differences; structures use
+    `structure_difference_series`. Items with missing data are skipped (and reported in
+    `skipped`) rather than failing the run.
+    """
+    result = WatchlistResult(requested=lookback_days)
+    if len(items) < 2:
+        result.error = "Add at least 2 items to compute"
+        return result
+
+    series: dict[str, pd.Series] = {}
+    for item in items:
+        label = item["label"]
+        try:
+            if item["type"] == "structure":
+                structure = structures_by_id.get(item["key"])
+                if structure is None:
+                    raise CrudeOilRiskError("structure not found or no longer open")
+                series[label] = structure_difference_series(structure, data_loader)
+            else:
+                series[label] = _load_local_differences(item["key"], data_loader)
+        except (CrudeOilRiskError, ValueError) as exc:
+            result.skipped[label] = str(exc)
+
+    if not series:
+        result.error = "No valid data to compute — check symbols"
+    elif len(series) < 2:
+        result.error = "Need at least 2 valid series"
+    else:
+        try:
+            result.matrix, result.observations = build_correlation_matrix_from_series(series, lookback_days)
+        except InsufficientDataError as exc:
+            result.error = str(exc)
+    return result
 
 
 # TODO: Structure-vs-structure correlation.

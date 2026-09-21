@@ -50,7 +50,7 @@ _OPEN_STATUSES = [StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
 _ROUTES = {
     "/": ("home", "home_layout"),
     "/structures": ("structures", "structures_layout"),
-    "/correlation": ("correlation", "correlation_layout"),
+    "/correlation": ("correlation_tab", "correlation_layout"),
     "/exposure": ("exposure", "exposure_layout"),
     "/var-scenario": ("var_scenario", "var_scenario_layout"),
     "/trade-analyzer": ("trade_analyzer", "trade_analyzer_layout"),

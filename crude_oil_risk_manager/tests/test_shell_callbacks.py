@@ -84,7 +84,7 @@ def pnl_payload(total, **extra):
 
 
 def test_render_page_unbuilt_tabs_show_placeholder():
-    for path in ["/correlation", "/exposure", "/var-scenario", "/trade-analyzer", "/archive"]:
+    for path in ["/exposure", "/var-scenario", "/trade-analyzer", "/archive"]:
         page, _ = cb.render_page(path, True)
         assert page.children == "🚧 This tab is under construction", path
         assert page.style["color"] == COLORS["TEXT_PRIMARY"]
@@ -95,6 +95,11 @@ def test_render_page_home_and_settings_use_real_layouts(env):
     assert "home-structures-table" in str(home)
     settings_page, _ = cb.render_page("/settings", True)
     assert "settings-api-token" in str(settings_page)
+
+
+def test_render_page_correlation_uses_real_layout():
+    page, _ = cb.render_page("/correlation", True)
+    assert "corr-heatmap" in str(page)
 
 
 def test_render_page_structure_detail_path_routes_to_structures_page():
