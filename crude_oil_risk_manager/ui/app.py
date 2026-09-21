@@ -27,10 +27,12 @@ from core.data_loader import DataLoader  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_STALENESS  # noqa: E402
 from db.repository import Repository  # noqa: E402
 from ui.callbacks.correlation_callbacks import register_correlation_callbacks  # noqa: E402
+from ui.callbacks.exposure_callbacks import register_exposure_callbacks  # noqa: E402
 from ui.callbacks.home_callbacks import register_home_callbacks  # noqa: E402
 from ui.callbacks.settings_callbacks import register_settings_callbacks  # noqa: E402
 from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
 from ui.callbacks.structure_detail_callbacks import register_structure_detail_callbacks  # noqa: E402
+from ui.callbacks.var_callbacks import register_var_callbacks  # noqa: E402
 from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
 from ui.container import container  # noqa: E402
@@ -178,6 +180,8 @@ register_structures_callbacks(app)
 register_structure_builder_callbacks(app)
 register_structure_detail_callbacks(app)
 register_correlation_callbacks(app)
+register_exposure_callbacks(app)
+register_var_callbacks(app)
 
 
 if __name__ == "__main__":

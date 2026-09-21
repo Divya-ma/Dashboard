@@ -23,6 +23,7 @@ implemented; per-structure VaR here is standalone (the structure in
 isolation).
 """
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import numpy as np
@@ -273,6 +274,114 @@ def calculate_portfolio_var(
         "data_warnings": data_warnings,
         "calculated_at": datetime.now(timezone.utc),
     }
+
+
+# ----------------------------------------------------------------------
+# Portfolio PnL series VaR (VaR & Scenarios tab)
+# ----------------------------------------------------------------------
+
+# Below this many daily observations the result is still shown, with a warning.
+RELIABLE_OBSERVATIONS = 10
+_SERIES_MIN_DIFF_ROWS = 2
+
+
+def leg_dollar_weights(structures: list[Structure]) -> dict[str, float]:
+    """Dollar PnL per 1.0 point move, per leg symbol, summed over the open structures' traded legs.
+
+    weight[symbol] = sum(ratio * side * lots * multiplier) with side +1 for a buy and -1
+    for a sell (the leg ratio carries the leg's own side within the structure). Leg symbols
+    are exchange-quoted instruments and are used as they are, never decomposed. Symbols
+    whose legs cancel exactly are dropped.
+    """
+    weights: dict[str, float] = {}
+    for structure in filter_open_structures(structures):
+        for leg in structure.legs:
+            if not leg.is_traded:
+                continue
+            side = 1 if leg.direction == "buy" else -1
+            symbol = leg.contract.symbol
+            weights[symbol] = weights.get(symbol, 0.0) + leg.ratio * side * leg.lots * leg.contract.multiplier
+    return {symbol: weight for symbol, weight in weights.items() if abs(weight) > 1e-9}
+
+
+@dataclass
+class PortfolioVarResult:
+    """VaR of a pre-built portfolio PnL series, or why there is none."""
+
+    pnl: pd.Series | None = None
+    var: dict[float, float] = field(default_factory=dict)  # confidence -> VaR (positive loss)
+    cutoff: dict[float, float] = field(default_factory=dict)  # confidence -> percentile PnL (negative in a loss)
+    observations: int = 0
+    requested: int = 0
+    skipped: dict[str, str] = field(default_factory=dict)  # symbol -> why it was left out
+    warnings: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
+def var_from_pnl_series(pnl: pd.Series, confidences: tuple[float, ...] = (0.95, 0.99)) -> tuple[dict, dict]:
+    """(var, cutoff) by confidence for a daily PnL series, using the engine's percentile rule.
+
+    VaR is the negative of the (1 - confidence) percentile, floored at 0. Historical
+    simulation only; the series is used as given (no scaling, no smoothing).
+    """
+    values = pnl.to_numpy(dtype=float)
+    if values.size == 0:
+        raise InsufficientDataError("The portfolio PnL series is empty.")
+    var, cutoff = {}, {}
+    for confidence in confidences:
+        _validate_inputs(confidence, 1)
+        var[confidence], cutoff[confidence] = _var_from_scenarios(values, confidence)
+    return var, cutoff
+
+
+def portfolio_pnl_var(
+    structures: list[Structure],
+    lookback_days: int,
+    data_loader: DataLoader,
+    confidences: tuple[float, ...] = (0.95, 0.99),
+) -> PortfolioVarResult:
+    """1-day historical VaR of the open structures over the last `lookback_days` common days.
+
+    portfolio_pnl[t] = sum over leg symbols of price_diff[t] * leg_dollar_weights[symbol],
+    with the symbols inner-joined on date. Symbols without local Parquet history are
+    skipped and reported (this understates VaR); nothing is backfilled. Fewer common days
+    than requested uses them all; fewer than RELIABLE_OBSERVATIONS still returns a result
+    with a warning.
+    """
+    if lookback_days < 1:
+        raise ValueError(f"lookback_days must be >= 1, got {lookback_days}")
+    result = PortfolioVarResult(requested=lookback_days)
+    weights = leg_dollar_weights(structures)
+    if not weights:
+        result.error = "No open structures — nothing to analyze"
+        return result
+
+    series: dict[str, pd.Series] = {}
+    for symbol, weight in weights.items():
+        try:
+            if data_loader.get_available_date_range(symbol) is None:
+                raise CrudeOilRiskError("no price data in the local Parquet")
+            series[symbol] = data_loader.load_price_differences(symbol, min_rows=_SERIES_MIN_DIFF_ROWS) * weight
+        except CrudeOilRiskError as exc:
+            result.skipped[symbol] = str(exc)
+    if result.skipped:
+        result.warnings.append(
+            f"Skipped (no usable price data): {', '.join(result.skipped)}. VaR excludes these legs and is understated."
+        )
+    if not series:
+        result.error = "No price data for any open leg — cannot compute VaR"
+        return result
+
+    combined = _combine_scenarios(series).dropna().sort_index()
+    if combined.empty:
+        result.error = "The open legs share no common trading days — cannot compute VaR"
+        return result
+    result.pnl = combined.iloc[-lookback_days:]
+    result.observations = len(result.pnl)
+    result.var, result.cutoff = var_from_pnl_series(result.pnl, confidences)
+    if result.observations < RELIABLE_OBSERVATIONS:
+        result.warnings.append("Insufficient data for reliable VaR")
+    return result
 
 
 def get_var_term_structure(

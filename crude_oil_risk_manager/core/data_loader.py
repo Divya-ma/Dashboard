@@ -206,6 +206,22 @@ class DataLoader:
             )
         return series_a.loc[common], series_b.loc[common]
 
+    def load_daily_ohlc(self, symbol: str) -> pd.DataFrame | None:
+        """Local daily candles [open, high, low, close] indexed by midnight-UTC date.
+
+        None if the symbol has no Parquet file. Never backfills (used by the VaR &
+        Scenarios tab, which must not trigger API calls).
+        """
+        path = self._parquet_path(symbol)
+        if not path.exists():
+            return None
+        df = pd.read_parquet(path, columns=["timestamp", "open", "high", "low", "close"])
+        if df.empty:
+            return None
+        index = pd.DatetimeIndex(pd.to_datetime(df["timestamp"], utc=True)).normalize()
+        frame = df[["open", "high", "low", "close"]].astype(float).set_axis(index).sort_index()
+        return frame[~frame.index.duplicated(keep="last")].dropna()
+
     def get_available_date_range(self, symbol: str) -> tuple[date, date] | None:
         """(earliest_date, latest_date) in the local Parquet, or None if no data exists."""
         series = self._read_series(symbol)
