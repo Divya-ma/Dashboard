@@ -336,8 +336,10 @@ class Repository:
                 },
             )
 
-    def update_structure_legs(self, structure_id: str, legs: list[Leg]) -> None:
-        """Upsert all legs for a structure and append an audit note."""
+    def update_structure_legs(
+        self, structure_id: str, legs: list[Leg], audit_note: str = "legs updated"
+    ) -> None:
+        """Upsert all legs for a structure and append a timestamped audit line to its notes."""
         now = _utcnow_iso()
         with self._engine.begin() as conn:
             for order, leg in enumerate(legs):
@@ -352,7 +354,7 @@ class Repository:
                     """
                 ),
                 {
-                    "audit_note": f"\n[{now}] legs updated",
+                    "audit_note": f"\n[{now}] {audit_note}",
                     "last_modified_at": now,
                     "structure_id": structure_id,
                 },

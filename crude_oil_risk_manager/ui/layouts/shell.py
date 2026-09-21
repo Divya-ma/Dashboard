@@ -93,6 +93,14 @@ body {{ background-color: {DARK_BG}; color: {TEXT_PRIMARY}; }}
     border-color: {BORDER_COLOR};
 }}
 .form-control::placeholder {{ color: {TEXT_SECONDARY}; }}
+.table {{
+    --bs-table-bg: {CARD_BG};
+    --bs-table-color: {TEXT_PRIMARY};
+    --bs-table-striped-bg: {SIDEBAR_BG};
+    --bs-table-striped-color: {TEXT_PRIMARY};
+    --bs-table-border-color: {BORDER_COLOR};
+}}
+.table thead th {{ color: {TEXT_SECONDARY}; font-weight: normal; }}
 .template-card {{ cursor: pointer; transition: transform 0.1s; }}
 .template-card:hover {{ transform: translateY(-2px); }}
 .template-card:hover .card {{ border-color: {TEXT_SECONDARY}; }}

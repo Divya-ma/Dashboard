@@ -52,7 +52,11 @@ class Structure(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc),
         description="Auto-set to UTC now; updated on every change.",
     )
-    notes: str = Field(default="", max_length=500, description="Optional trader notes.")
+    notes: str = Field(
+        default="",
+        max_length=20000,
+        description="Trader notes; the repository also appends one audit line per edit/trade here.",
+    )
     close_trigger: str | None = Field(
         default=None, description="'manual' | 'alert' | None. Set on full close."
     )

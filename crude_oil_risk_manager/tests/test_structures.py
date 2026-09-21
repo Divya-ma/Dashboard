@@ -208,20 +208,15 @@ def cell(action, sid="abc"):
 
 def test_handle_structure_action():
     assert sc.handle_structure_action(cell("view")) == (True, "abc")
-    is_open, sid = sc.handle_structure_action(cell("exit"))
-    assert is_open is sc.no_update and sid == "abc"
+    assert sc.handle_structure_action(cell("exit")) == (True, "abc")  # Enter Trade / Exit open the detail modal too
+    assert sc.handle_structure_action(cell("enter_trade")) == (True, "abc")
     assert sc.handle_structure_action({"value": {"action": "view"}, "rowId": "row1"}) == (True, "row1")
     for bad in (None, {}, cell("bogus"), {"value": {"action": "view"}}):
         with pytest.raises(PreventUpdate):
             sc.handle_structure_action(bad)
 
 
-def test_close_and_render_detail(repo):
+def test_close_detail_modal():
     assert sc.close_detail_modal(1) is False
     with pytest.raises(PreventUpdate):
         sc.close_detail_modal(None)
-    s = make_structure("Detail me")
-    save(repo, s)
-    assert "Detail me" in str(sc.render_structure_detail(s.structure_id))
-    assert "not found" in str(sc.render_structure_detail("missing"))
-    assert sc.render_structure_detail(None) == ""

@@ -29,6 +29,7 @@ from db.repository import Repository  # noqa: E402
 from ui.callbacks.home_callbacks import register_home_callbacks  # noqa: E402
 from ui.callbacks.settings_callbacks import register_settings_callbacks  # noqa: E402
 from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
+from ui.callbacks.structure_detail_callbacks import register_structure_detail_callbacks  # noqa: E402
 from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
 from ui.container import container  # noqa: E402
@@ -168,6 +169,7 @@ register_home_callbacks(app)
 register_settings_callbacks(app)
 register_structures_callbacks(app)
 register_structure_builder_callbacks(app)
+register_structure_detail_callbacks(app)
 
 
 if __name__ == "__main__":

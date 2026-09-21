@@ -82,14 +82,9 @@ def structure_live_price(structure: Structure, prices: dict[str, float]) -> floa
 
 
 def structure_exit_price(structure: Structure, trades: list[Trade]) -> float | None:
-    """Composite exit price from each leg's latest exit trade; None if a leg has none."""
-    latest: dict[str, Trade] = {}
-    for trade in sorted(trades, key=lambda t: t.timestamp):
-        if trade.event_type in _EXIT_EVENTS:
-            latest[trade.leg_id] = trade
-    return _composite(
-        structure.legs, lambda leg: latest[leg.leg_id].price if leg.leg_id in latest else None
-    )
+    """Structure-level exit price: the latest exit trade's price (exits are recorded once per structure)."""
+    exits = [t for t in trades if t.event_type in _EXIT_EVENTS]
+    return max(exits, key=lambda t: t.timestamp).price if exits else None
 
 
 def _products(structure: Structure) -> list[str]:

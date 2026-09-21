@@ -4,9 +4,7 @@ Row building lives in core.structure_view; PnL comes from `store-portfolio-pnl`
 (written by shell_callbacks.refresh_portfolio_pnl) and is never recalculated here.
 """
 
-import logging
-
-from dash import Input, Output, State, html, no_update
+from dash import Input, Output, State
 from dash.exceptions import PreventUpdate
 
 from core.models import StructureStatus
@@ -17,9 +15,6 @@ from core.structure_view import (
     statuses_for_filter,
 )
 from ui.container import container
-from ui.layouts.shell import COLORS
-
-logger = logging.getLogger(__name__)
 
 ACTION_VIEW = "view"
 ACTION_ENTER_TRADE = "enter_trade"
@@ -50,48 +45,20 @@ def toggle_closed(n_clicks, is_open):
 
 
 def handle_structure_action(cell_data):
-    """Row button clicks. 'view' opens the detail modal; trade entry / exit modals arrive in later phases."""
+    """Row button clicks. View, Enter Trade and Exit all open the detail modal, which holds the trade forms."""
     payload = (cell_data or {}).get("value") or {}
     action = payload.get("action")
     structure_id = payload.get("structure_id") or (cell_data or {}).get("rowId")
     if action not in _ACTIONS or not structure_id:
         raise PreventUpdate
 
-    if action == ACTION_VIEW:
-        return True, structure_id
-    logger.info("Structure action %r requested for %s (no modal built yet)", action, structure_id)
-    return no_update, structure_id
+    return True, structure_id
 
 
 def close_detail_modal(n_clicks):
     if not n_clicks:
         raise PreventUpdate
     return False
-
-
-def render_structure_detail(structure_id):
-    """Placeholder detail body (name, type, status, legs); the full view arrives in Phase 5.3."""
-    if not structure_id:
-        return ""
-    structure = container.repository.get_structure(structure_id)
-    if structure is None:
-        return html.Div("Structure not found.", style={"color": COLORS["ACCENT_RED"]})
-
-    legs = [
-        html.Li(f"{leg.ratio:+d} × {leg.contract.display_name}  ·  {leg.lots:g} lots")
-        for leg in structure.legs
-    ]
-    return html.Div(
-        [
-            html.H4(structure.name, style={"color": COLORS["TEXT_PRIMARY"]}),
-            html.Div(
-                f"{structure.structure_type.value.capitalize()} · {structure.status.value.upper()}",
-                style={"color": COLORS["TEXT_SECONDARY"], "marginBottom": "12px"},
-            ),
-            html.Ul(legs),
-            html.Div("Full detail view coming in Phase 5.3.", style={"color": COLORS["TEXT_SECONDARY"]}),
-        ]
-    )
 
 
 def register_structures_callbacks(app) -> None:
@@ -134,7 +101,3 @@ def register_structures_callbacks(app) -> None:
         prevent_initial_call=True,
     )(close_detail_modal)
 
-    app.callback(
-        Output("modal-structure-detail-body", "children"),
-        Input("store-selected-structure-id", "data"),
-    )(render_structure_detail)
