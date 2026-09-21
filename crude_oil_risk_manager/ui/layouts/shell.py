@@ -56,6 +56,20 @@ def build_global_css() -> str:
     """Global CSS built from COLORS so the palette stays defined in one place."""
     return f"""
 body {{ background-color: {DARK_BG}; color: {TEXT_PRIMARY}; }}
+:root {{
+    --Dash-Stroke-Strong: {BORDER_COLOR};
+    --Dash-Stroke-Weak: {BORDER_COLOR};
+    --Dash-Fill-Interactive-Strong: {ACCENT_GREEN};
+    --Dash-Fill-Interactive-Weak: {SIDEBAR_BG};
+    --Dash-Fill-Inverse-Strong: {SIDEBAR_BG};
+    --Dash-Text-Primary: {TEXT_PRIMARY};
+    --Dash-Text-Strong: {TEXT_PRIMARY};
+    --Dash-Text-Weak: {TEXT_SECONDARY};
+    --Dash-Text-Disabled: {TEXT_SECONDARY};
+    --Dash-Fill-Primary-Hover: {ACCENT_BLUE};
+    --Dash-Fill-Primary-Active: {ACCENT_BLUE};
+    --Dash-Fill-Disabled: {CARD_BG};
+}}
 .sidebar-link {{ color: {TEXT_SECONDARY} !important; border-radius: 6px; margin-bottom: 4px; }}
 .sidebar-link:hover {{ color: {TEXT_PRIMARY} !important; background-color: {CARD_BG}; }}
 .sidebar-link.active {{
@@ -79,6 +93,10 @@ body {{ background-color: {DARK_BG}; color: {TEXT_PRIMARY}; }}
     border-color: {BORDER_COLOR};
 }}
 .form-control::placeholder {{ color: {TEXT_SECONDARY}; }}
+.template-card {{ cursor: pointer; transition: transform 0.1s; }}
+.template-card:hover {{ transform: translateY(-2px); }}
+.template-card:hover .card {{ border-color: {TEXT_SECONDARY}; }}
+.template-card.selected .card {{ border: 2px solid {ACCENT_GREEN}; }}
 """
 
 

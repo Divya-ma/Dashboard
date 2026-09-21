@@ -23,14 +23,17 @@ from adapters.historical.vendor import VendorHistoricalAdapter  # noqa: E402
 from adapters.live.vendor import VendorLiveAdapter  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
+from core.data_loader import DataLoader  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_STALENESS  # noqa: E402
 from db.repository import Repository  # noqa: E402
 from ui.callbacks.home_callbacks import register_home_callbacks  # noqa: E402
 from ui.callbacks.settings_callbacks import register_settings_callbacks  # noqa: E402
 from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
+from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
 from ui.container import container  # noqa: E402
 from ui.layouts.shell import build_alert_container, build_global_css, build_shell  # noqa: E402
+from ui.layouts.structure_builder import builder_save_toast, new_structure_modal  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -80,6 +83,7 @@ container.repository = repository
 container.live_adapter = live_adapter
 container.historical_adapter = historical_adapter
 container.alert_manager = alert_manager
+container.data_loader = DataLoader(_resolve_path(settings.HISTORICAL_DATA_DIR), historical_adapter)
 
 
 def _run_morning_sync() -> None:
@@ -143,11 +147,17 @@ def serve_layout() -> html.Div:
             dcc.Store(id="store-live-prices", data={}),
             dcc.Store(id="store-portfolio-pnl", data={}),
             dcc.Store(id="store-selected-structure-id", data=None),
+            dcc.Store(id="store-builder-template", data=None),
+            dcc.Store(id="store-builder-legs", data=[]),
+            dcc.Store(id="store-builder-step", data=1),
+            dcc.Store(id="store-builder-correlation", data=[]),
             dcc.Interval(id="interval-live-poll", interval=LIVE_POLL_INTERVAL_MS, n_intervals=0),
             dcc.Interval(id="interval-pnl-refresh", interval=PNL_REFRESH_INTERVAL_MS, n_intervals=0),
             dcc.Interval(id="interval-countdown", interval=COUNTDOWN_INTERVAL_MS, n_intervals=0),
             build_alert_container(),
             build_shell(token_configured),
+            new_structure_modal(),
+            builder_save_toast(),
         ]
     )
 
@@ -157,6 +167,7 @@ register_callbacks(app)
 register_home_callbacks(app)
 register_settings_callbacks(app)
 register_structures_callbacks(app)
+register_structure_builder_callbacks(app)
 
 
 if __name__ == "__main__":

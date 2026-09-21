@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from adapters.base import HistoricalDataAdapter, LiveDataAdapter
 from core.alerts import AlertManager
+from core.data_loader import DataLoader
 from db.repository import Repository
 
 NO_UPDATE_LABEL = "Last: --:--:--"
@@ -32,6 +33,7 @@ class Container:
     live_adapter: LiveDataAdapter | None = None
     historical_adapter: HistoricalDataAdapter | None = None
     alert_manager: AlertManager | None = None
+    data_loader: DataLoader | None = None
     live_cache: LivePriceCache = field(default_factory=LivePriceCache)
     pnl_stop_alert_active: bool = False
     sync_thread: threading.Thread | None = None  # latest morning-sync thread (startup or manual)
