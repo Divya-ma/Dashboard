@@ -123,6 +123,14 @@ def build_alert_container() -> html.Div:
     )
 
 
+def build_price_alert_container() -> html.Div:
+    """Fixed container for stop-loss / target toasts, stacked top-right below the alert toasts."""
+    return html.Div(
+        id="price-alert-toast-container",
+        style={"position": "fixed", "top": "80px", "right": "20px", "zIndex": 9999, "width": "380px"},
+    )
+
+
 def build_sidebar() -> html.Div:
     """Fixed 260px sidebar: title, navigation, and a pinned data-status footer."""
     header = html.Div(

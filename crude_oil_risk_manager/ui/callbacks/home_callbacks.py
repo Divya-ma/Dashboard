@@ -11,7 +11,7 @@ from dash.exceptions import PreventUpdate
 from config.settings import settings
 from core.user_settings import KEY_MARGIN_LIMIT
 from ui.container import container
-from ui.layouts.home import MAX_TABLE_ROWS
+from ui.layouts.home import MAX_TABLE_ROWS, REALIZED_VALUE_STYLE
 from ui.layouts.shell import COLORS
 
 _STATUS_LABELS = {"open": "Open", "partially_closed": "Partially Closed"}
@@ -43,13 +43,20 @@ def _structure_summary(entry: dict | None, per_structure: dict):
     return [html.Div(name, style={"color": COLORS["TEXT_PRIMARY"]}), _pnl_span(entry["pnl"])]
 
 
-def _net_lots(net_lots_by_product: dict) -> list | str:
+def _net_lots(net_lots_by_product: dict) -> str:
+    """Compact 'CL: +5 | BRN: -3' breakdown."""
     if not net_lots_by_product:
         return "—"
-    return [
-        html.Div(f"{product}  {lots:+,g}", style={"color": COLORS["TEXT_PRIMARY"]})
-        for product, lots in sorted(net_lots_by_product.items())
-    ]
+    return " | ".join(f"{product}: {lots:+,g}" for product, lots in sorted(net_lots_by_product.items()))
+
+
+def _realized_value(value: float | None) -> tuple[str, dict]:
+    """Text and style for a realized-PnL bar value: green if positive, red if negative."""
+    style = {**REALIZED_VALUE_STYLE}
+    if value is None:
+        return "—", style
+    style["color"] = COLORS["TEXT_PRIMARY"] if value == 0 else pnl_color(value)
+    return format_pnl(value), style
 
 
 def _margin_card() -> list:
@@ -83,21 +90,30 @@ def _stale_banner(portfolio_pnl: dict) -> tuple[dict, list | str]:
 
 
 def update_home_metrics(portfolio_pnl):
-    """Render all metric cards from the portfolio PnL store."""
+    """Render the realized-PnL bar and the metric cards from the portfolio PnL store.
+
+    The store is built by shell_callbacks.refresh_portfolio_pnl, which already loads
+    open and closed structures, so the all-time and today's realized PnL arrive with it.
+    """
     if not portfolio_pnl:
-        return ("—", "—", "—", "—", "—", "—", "—", "—", _HIDDEN, "")
+        empty_text, empty_style = _realized_value(None)
+        return (empty_text, empty_style, empty_text, empty_style, "—", "—", "—", "—", "—", "—", "—", _HIDDEN, "")
 
     per_structure = portfolio_pnl.get("per_structure", {})
-    todays_pnl = portfolio_pnl.get("todays_pnl")
     banner_style, banner_children = _stale_banner(portfolio_pnl)
+    total_text, total_style = _realized_value(portfolio_pnl.get("total_realized_all_time"))
+    today_text, today_style = _realized_value(portfolio_pnl.get("todays_realized_pnl"))
 
     return (
-        _pnl_span(portfolio_pnl["total_pnl"]),
-        "—" if todays_pnl is None else _pnl_span(todays_pnl),
+        total_text,
+        total_style,
+        today_text,
+        today_style,
+        _pnl_span(portfolio_pnl["total_unrealized"]),
         str(portfolio_pnl["open_structure_count"]),
         str(portfolio_pnl["open_leg_count"]),
-        _margin_card(),
         _net_lots(portfolio_pnl.get("net_lots_by_product", {})),
+        _margin_card(),
         _structure_summary(portfolio_pnl.get("largest_winner"), per_structure),
         _structure_summary(portfolio_pnl.get("largest_loser"), per_structure),
         banner_style,
@@ -138,12 +154,15 @@ def navigate_to_structure(cell_clicked):
 def register_home_callbacks(app) -> None:
     """Attach the Home tab callbacks to the Dash app."""
     app.callback(
-        Output("home-card-total-pnl", "children"),
-        Output("home-card-today-pnl", "children"),
+        Output("home-total-realized-pnl", "children"),
+        Output("home-total-realized-pnl", "style"),
+        Output("home-today-realized-pnl", "children"),
+        Output("home-today-realized-pnl", "style"),
+        Output("home-card-unrealized-pnl", "children"),
         Output("home-card-open-structures", "children"),
         Output("home-card-open-legs", "children"),
-        Output("home-card-margin-used", "children"),
         Output("home-card-net-lots", "children"),
+        Output("home-card-margin-used", "children"),
         Output("home-winner-card", "children"),
         Output("home-loser-card", "children"),
         Output("home-stale-banner", "style"),

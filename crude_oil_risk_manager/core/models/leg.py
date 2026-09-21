@@ -39,6 +39,18 @@ class Leg(BaseModel):
         ),
     )
 
+    direction: str = Field(
+        default="buy",
+        description="'buy' or 'sell': the side the position was entered on. Flips the PnL sign.",
+    )
+
+    @field_validator("direction")
+    @classmethod
+    def validate_direction(cls, v: str) -> str:
+        if v not in ("buy", "sell"):
+            raise ValueError(f"direction must be 'buy' or 'sell', got {v!r}")
+        return v
+
     @field_validator("ratio")
     @classmethod
     def validate_ratio(cls, v: int) -> int:

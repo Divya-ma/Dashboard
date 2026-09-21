@@ -20,7 +20,7 @@ from core.structure_builder import StructureBuildError
 from core.structure_edit import apply_leg_edits
 from core.structure_view import prices_from_store, structure_entry_price, structure_live_price
 from core.trade_entry import TradeError, enter_trade, exit_structure, structure_open_lots, structure_pnl
-from ui.callbacks.structures_callbacks import update_active_structures
+from ui.callbacks.structures_callbacks import reuse_closed_structure, toast_update as _toast, update_active_structures
 from ui.container import container
 from ui.layouts.shell import COLORS
 from ui.layouts.structure_detail import (
@@ -50,12 +50,6 @@ _TOAST_OUTPUTS = (
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-
-
-def _toast(message, ok: bool = True, header: str | None = None) -> tuple:
-    if isinstance(message, list):
-        message = [html.Div(m) for m in message]
-    return True, message, "success" if ok else "danger", header or ("Done" if ok else "Could not complete")
 
 
 def _render_body(structure_id, live_prices, edit_mode: bool = False):
@@ -111,7 +105,7 @@ def update_live_labels(live_prices, structure_id):
         raise PreventUpdate
     live = structure_live_price(_load(structure_id), prices_from_store(live_prices))
     label = f"Live: {format_price(live)}"
-    return label, label
+    return label, label, f"Current live price: {format_price(live)}"
 
 
 def toggle_add_trade(n_clicks, is_open):
@@ -125,8 +119,8 @@ def toggle_add_trade(n_clicks, is_open):
 # ----------------------------------------------------------------------
 
 
-def preview_entry_pnl(entry_price, lots, structure_id, live_prices):
-    """PnL the position would show right now if entered at `entry_price` (structure prices)."""
+def preview_entry_pnl(entry_price, lots, direction, structure_id, live_prices):
+    """PnL the position would show right now if entered at `entry_price` on `direction`."""
     if not structure_id or entry_price is None or lots is None:
         return ""
     structure = container.repository.get_structure(structure_id)
@@ -136,7 +130,7 @@ def preview_entry_pnl(entry_price, lots, structure_id, live_prices):
     if live is None:
         return "Live price unavailable; PnL preview needs a live price."
     try:
-        pnl = structure_pnl(structure, entry_price, live, lots)
+        pnl = structure_pnl(structure, entry_price, live, lots, direction)
     except ValueError:
         return ""
     return [f"At {entry_price:g}, current PnL would be: ", pnl_span(pnl)]
@@ -162,7 +156,7 @@ def preview_exit_pnl(exit_price, lots, structure_id):
 
 
 def confirm_trade_entry(
-    n_clicks, price, lots, direction, notes, structure_id, live_prices,
+    n_clicks, price, lots, direction, notes, stop_loss_price, target_price, structure_id, live_prices,
     status_filter, product_filter, sort_by, portfolio_pnl, grid_live_prices,
 ):
     """Enter a trade at one structure price; the system derives the per-leg entries."""
@@ -171,7 +165,10 @@ def confirm_trade_entry(
     repository = container.repository
     structure = _load(structure_id)
     try:
-        result = enter_trade(structure, price, lots, direction, notes, prices_from_store(live_prices))
+        result = enter_trade(
+            structure, price, lots, direction, notes, prices_from_store(live_prices),
+            stop_loss_price=stop_loss_price, target_price=target_price,
+        )
         # Legs first (with the audit line), then status, then the trade record.
         repository.update_structure_legs(structure_id, result.legs, result.audit_note)
         if structure.status != result.status:
@@ -241,6 +238,31 @@ def execute_full_exit(
     message = f"{structure.name} closed at {exit_price:g}. Realized PnL: {format_pnl(result.realized_pnl)}"
     # The portfolio PnL stop is re-checked on the next 5s PnL refresh (shell_callbacks.check_alerts).
     return (False, rows, *_toast(message, header="Structure closed"), False)
+
+
+# ----------------------------------------------------------------------
+# Reuse a closed structure
+# ----------------------------------------------------------------------
+
+
+def toggle_reuse_panel(n_clicks, is_open):
+    if not n_clicks:
+        raise PreventUpdate
+    return not is_open
+
+
+def reuse_structure(n_clicks, structure_id, new_name):
+    """Save a fresh shell copy of the closed structure (optionally renamed) and close the modal."""
+    if not n_clicks:
+        raise PreventUpdate
+    _load(structure_id)
+    shell = reuse_closed_structure(structure_id)
+    if shell is None:
+        return (no_update, *_toast("Only a closed structure can be reused.", ok=False))
+    if (new_name or "").strip():
+        shell = shell.model_copy(update={"name": new_name.strip()[:100]})
+        container.repository.save_structure(shell)
+    return (False, *_toast(f"Structure '{shell.name}' ready as new shell", header="Structure reused"))
 
 
 # ----------------------------------------------------------------------
@@ -335,6 +357,7 @@ def register_structure_detail_callbacks(app) -> None:
     app.callback(
         Output("trade-live-price-label", "children"),
         Output("exit-live-price-label", "children"),
+        Output("trade-alert-live-reference", "children"),
         Input("store-live-prices", "data"),
         State("store-selected-structure-id", "data"),
         prevent_initial_call=True,
@@ -351,6 +374,7 @@ def register_structure_detail_callbacks(app) -> None:
         Output("trade-pnl-preview", "children"),
         Input("trade-entry-price", "value"),
         Input("trade-entry-lots", "value"),
+        Input("trade-direction", "value"),
         State("store-selected-structure-id", "data"),
         State("store-live-prices", "data"),
     )(preview_entry_pnl)
@@ -371,6 +395,8 @@ def register_structure_detail_callbacks(app) -> None:
         State("trade-entry-lots", "value"),
         State("trade-direction", "value"),
         State("trade-entry-notes", "value"),
+        State("trade-stop-loss-price", "value"),
+        State("trade-target-price", "value"),
         State("store-selected-structure-id", "data"),
         State("store-live-prices", "data"),
         *_GRID_STATES[:4],
@@ -408,6 +434,22 @@ def register_structure_detail_callbacks(app) -> None:
         *_GRID_STATES,
         prevent_initial_call=True,
     )(execute_full_exit)
+
+    app.callback(
+        Output("reuse-collapse", "is_open"),
+        Input("btn-reuse-structure", "n_clicks"),
+        State("reuse-collapse", "is_open"),
+        prevent_initial_call=True,
+    )(toggle_reuse_panel)
+
+    app.callback(
+        Output("modal-structure-detail", "is_open", allow_duplicate=True),
+        *_TOAST_OUTPUTS,
+        Input("btn-confirm-reuse", "n_clicks"),
+        State("store-selected-structure-id", "data"),
+        State("reuse-structure-name", "value"),
+        prevent_initial_call=True,
+    )(reuse_structure)
 
     app.callback(
         Output("modal-confirm-edit", "is_open"),

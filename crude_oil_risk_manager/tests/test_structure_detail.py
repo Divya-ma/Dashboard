@@ -105,7 +105,7 @@ def test_exit_short_structure_direction():
     s = outright(StructureStatus.OPEN, lots=1, entry=75.0)
     s = s.model_copy(update={"legs": [s.legs[0].model_copy(update={"ratio": -1})]})
     result = exit_structure(s, 74.0, 1, None)
-    assert result.realized_pnl == pytest.approx(1000.0) and result.trade.direction == "buy"
+    assert result.realized_pnl == pytest.approx(1000.0) and result.trade.direction == "sell"  # closes a buy
 
 
 def test_exit_rejects_partial_and_wrong_status():
@@ -243,7 +243,7 @@ def test_render_and_helpers(repo):
     assert "not found" in str(dc.render_structure_detail("missing", {}))
     assert dc.fill_live_price(1, sid, LIVE_STORE) == 76.0
     assert dc.fill_exit_all_lots(1, sid) == 10
-    assert dc.update_live_labels(LIVE_STORE, sid) == ("Live: 76.00", "Live: 76.00")
+    assert dc.update_live_labels(LIVE_STORE, sid) == ("Live: 76.00", "Live: 76.00", "Current live price: 76.00")
     for bad in (lambda: dc.fill_live_price(None, sid, LIVE_STORE), lambda: dc.fill_live_price(1, sid, {}),
                 lambda: dc.fill_exit_all_lots(1, "missing"), lambda: dc.toggle_add_trade(None, False)):
         with pytest.raises(PreventUpdate):
@@ -253,16 +253,17 @@ def test_render_and_helpers(repo):
 
 def test_pnl_previews(repo):
     sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
-    assert "+$10,000" in str(dc.preview_entry_pnl(75.0, 10, sid, LIVE_STORE))
-    assert dc.preview_entry_pnl(None, 10, sid, LIVE_STORE) == ""
-    assert "unavailable" in dc.preview_entry_pnl(75.0, 10, sid, {})
+    assert "+$10,000" in str(dc.preview_entry_pnl(75.0, 10, "buy", sid, LIVE_STORE))
+    assert "-$10,000" in str(dc.preview_entry_pnl(75.0, 10, "sell", sid, LIVE_STORE))
+    assert dc.preview_entry_pnl(None, 10, "buy", sid, LIVE_STORE) == ""
+    assert "unavailable" in dc.preview_entry_pnl(75.0, 10, "buy", sid, {})
     assert "+$20,000" in str(dc.preview_exit_pnl(77.0, 10, sid))
     assert dc.preview_exit_pnl(77.0, None, sid) == ""
 
 
 def test_confirm_trade_entry_opens_shell_and_writes_audit(repo):
     sid = save(repo, outright())
-    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(1, 75.0, 10, "buy", "n", sid, LIVE_STORE, *GRID)
+    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(1, 75.0, 10, "buy", "n", None, None, sid, LIVE_STORE, *GRID)
     saved = repo.get_structure(sid)
     assert saved.status == StructureStatus.OPEN and saved.legs[0].lots == 10 and saved.legs[0].entry_price == 75.0
     assert "trade entered: 10 lots at 75" in saved.notes
@@ -274,14 +275,14 @@ def test_confirm_trade_entry_opens_shell_and_writes_audit(repo):
 
 def test_confirm_trade_entry_validation_error_saves_nothing(repo):
     sid = save(repo, outright())
-    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(1, 75.0, 0, "buy", None, sid, LIVE_STORE, *GRID)
+    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(1, 75.0, 0, "buy", None, None, None, sid, LIVE_STORE, *GRID)
     assert body is dc.no_update and rows is dc.no_update and icon == "danger"
     assert repo.get_trades_for_structure(sid) == [] and repo.get_structure(sid).status == StructureStatus.SHELL
 
 
 def test_multi_leg_trade_entry_persists_consistent_legs(repo):
     sid = save(repo, spread())
-    dc.confirm_trade_entry(1, 1.25, 5, "buy", None, sid, LIVE_STORE, *GRID)
+    dc.confirm_trade_entry(1, 1.25, 5, "buy", None, None, None, sid, LIVE_STORE, *GRID)
     saved = repo.get_structure(sid)
     assert structure_entry_price(saved) == pytest.approx(1.25)
     assert calculate_portfolio_pnl([saved], {}, {"CLX26": 75.0, "CLZ26": 73.75}, [])["total_unrealized"] == pytest.approx(0.0)
@@ -344,3 +345,107 @@ def test_audit_notes_can_accumulate_beyond_500_chars(repo):
     for i in range(12):
         repo.update_structure_legs(sid, repo.get_structure(sid).legs, f"audit line number {i} " + "x" * 30)
     assert len(repo.get_structure(sid).notes) > 500
+
+
+# ---------- direction, stop / target, reuse ----------
+
+
+def test_sell_entry_stores_direction_on_legs_and_flips_pnl():
+    result = enter_trade(outright(), 0.45, 10, "sell", None, {})
+    assert result.legs[0].direction == "sell" and result.trade.direction == "sell"
+    sold = outright().model_copy(update={"legs": result.legs, "status": StructureStatus.OPEN})
+    assert structure_pnl(sold, 0.45, 0.37, 10) == pytest.approx(800.0)
+    assert structure_pnl(sold, 0.45, 0.50, 10) == pytest.approx(-500.0)
+    engine = calculate_portfolio_pnl([sold], {}, {"CLZ26": 0.37}, [])["total_unrealized"]
+    assert engine == pytest.approx(800.0)
+
+
+def test_sell_exit_realizes_profit_and_closes_with_a_buy():
+    result = enter_trade(outright(), 0.45, 10, "sell", None, {})
+    sold = outright().model_copy(update={"legs": result.legs, "status": StructureStatus.OPEN})
+    closed = exit_structure(sold, 0.37, 10, None)
+    assert closed.realized_pnl == pytest.approx(800.0)
+    assert closed.trade.direction == "buy" and closed.trade.realized_pnl == pytest.approx(800.0)
+
+
+def test_add_must_match_the_position_direction():
+    s = outright(StructureStatus.OPEN, lots=10, entry=75.0)
+    with pytest.raises(TradeError, match="an add must be a buy"):
+        enter_trade(s, 76.0, 5, "sell", None, {})
+
+
+def test_stop_and_target_are_stored_and_validated_by_direction():
+    result = enter_trade(outright(), 75.0, 10, "buy", None, {}, stop_loss_price=73.0, target_price=80.0)
+    assert (result.trade.stop_loss_price, result.trade.target_price) == (73.0, 80.0)
+    sell = enter_trade(outright(), 75.0, 10, "sell", None, {}, stop_loss_price=77.0, target_price=70.0)
+    assert (sell.trade.stop_loss_price, sell.trade.target_price) == (77.0, 70.0)
+    with pytest.raises(TradeError, match="stop loss must be below"):
+        enter_trade(outright(), 75.0, 10, "buy", None, {}, stop_loss_price=76.0)
+    with pytest.raises(TradeError, match="target must be below"):
+        enter_trade(outright(), 75.0, 10, "sell", None, {}, target_price=76.0)
+
+
+def test_trade_entry_persists_direction_and_alert_levels(repo):
+    sid = save(repo, outright())
+    dc.confirm_trade_entry(1, 0.45, 10, "sell", None, 0.5, 0.37, sid, LIVE_STORE, *GRID)
+    saved = repo.get_structure(sid)
+    assert saved.legs[0].direction == "sell"
+    (trade,) = repo.get_trades_for_structure(sid)
+    assert (trade.stop_loss_price, trade.target_price, trade.direction) == (0.5, 0.37, "sell")
+
+
+def test_detail_layout_has_price_alert_inputs():
+    layout = structure_detail_layout(outright(), {"CLZ26": {"price": 76.0}}, [], None)
+    for component_id in ("trade-stop-loss-price", "trade-target-price", "trade-alert-live-reference"):
+        assert find(layout, component_id) is not None
+    assert "Current live price: 76.00" in str(layout)
+
+
+def closed_structure(repo):
+    s = outright(StructureStatus.CLOSED, lots=0.0, entry=75.0).model_copy(update={"close_trigger": "manual"})
+    return save(repo, s)
+
+
+def test_detail_layout_offers_reuse_only_for_closed_structures():
+    closed = outright(StructureStatus.CLOSED, 0, 75.0)
+    layout = structure_detail_layout(closed, {}, [], None)
+    for component_id in ("btn-reuse-structure", "reuse-structure-name", "btn-confirm-reuse", "reuse-collapse"):
+        assert find(layout, component_id) is not None
+    assert find(structure_detail_layout(outright(), {}, [], None), "btn-reuse-structure") is None
+
+
+def test_reuse_structure_from_detail_creates_shell_and_closes_modal(repo):
+    sid = closed_structure(repo)
+    is_open, toast_open, message, icon, header = dc.reuse_structure(1, sid, "Fresh copy")
+    assert is_open is False and icon == "success" and "Fresh copy" in message
+    shells = repo.get_all_structures(status_filter=[StructureStatus.SHELL])
+    assert [s.name for s in shells] == ["Fresh copy"]
+    assert shells[0].structure_id != sid and shells[0].legs[0].lots == 0 and shells[0].legs[0].entry_price is None
+    assert repo.get_structure(sid).status == StructureStatus.CLOSED  # the source is untouched
+
+
+def test_reuse_structure_default_name_and_refuses_open_structures(repo):
+    sid = closed_structure(repo)
+    dc.reuse_structure(1, sid, None)
+    assert [s.name for s in repo.get_all_structures(status_filter=[StructureStatus.SHELL])] == ["Outright (reuse)"]
+    open_id = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    is_open, toast_open, message, icon, header = dc.reuse_structure(1, open_id, None)
+    assert is_open is dc.no_update and icon == "danger"
+    with pytest.raises(PreventUpdate):
+        dc.toggle_reuse_panel(None, False)
+    assert dc.toggle_reuse_panel(1, False) is True
+
+
+def test_closed_grid_reuse_action_refreshes_active_grid(repo):
+    sid = closed_structure(repo)
+    rows, toast_open, message, icon, header = sc.handle_closed_structure_action(
+        {"value": {"action": "reuse", "structure_id": sid}, "rowId": sid}, "active", "all", "name", {}, {}
+    )
+    assert [r["status"] for r in rows] == ["SHELL"] and "ready as new shell" in message
+    for bad in (None, {"value": {"action": "other", "structure_id": sid}}, {"value": {"action": "reuse"}}):
+        with pytest.raises(PreventUpdate):
+            sc.handle_closed_structure_action(bad, "active", "all", "name", {}, {})
+    rows, toast_open, message, icon, header = sc.handle_closed_structure_action(
+        {"value": {"action": "reuse", "structure_id": "missing"}}, "active", "all", "name", {}, {}
+    )
+    assert rows is sc.no_update and icon == "danger"

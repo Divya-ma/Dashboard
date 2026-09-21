@@ -341,3 +341,93 @@ def test_todays_pnl_is_zero_without_a_snapshot_today(env, repo):
     repo.save_structure(open_structure())
     result = cb.refresh_portfolio_pnl(0, {"CLZ26": {"price": 76.0, "is_stale": False}})
     assert result["todays_pnl"] == 0.0
+
+
+# ---------- realized PnL persistence and price alerts ----------
+
+from datetime import datetime, timezone
+
+from core.models import Trade, TradeEventType
+
+
+def _save(repo, structure):
+    for leg in structure.legs:
+        repo.save_contract(leg.contract)
+    repo.save_structure(structure)
+
+
+def test_refresh_portfolio_pnl_keeps_closed_realized_and_reports_todays(env, repo):
+    open_structure = open_structure_for_shell()
+    closed = open_structure_for_shell()
+    closed = closed.model_copy(update={"status": StructureStatus.CLOSED})
+    _save(repo, open_structure)
+    _save(repo, closed)
+    now = datetime.now(timezone.utc)
+    repo.save_trade(Trade(structure_id=closed.structure_id, leg_id=closed.legs[0].leg_id,
+                          event_type=TradeEventType.FULL_EXIT, lots=10, price=77.0, direction="sell",
+                          realized_pnl=2500.0, timestamp=now))
+    repo.save_trade(Trade(structure_id=closed.structure_id, leg_id=closed.legs[0].leg_id,
+                          event_type=TradeEventType.FULL_EXIT, lots=10, price=77.0, direction="sell",
+                          realized_pnl=1000.0, timestamp=now.replace(year=now.year - 1)))
+    result = cb.refresh_portfolio_pnl(0, {"CLZ26": {"price": 76.0}})
+    assert result["total_realized"] == 0.0
+    assert result["total_realized_all_time"] == 3500.0
+    assert result["todays_realized_pnl"] == 2500.0
+    assert result["open_structure_count"] == 1
+
+
+def open_structure_for_shell():
+    return open_structure(entry_price=75.0, lots=10.0)
+
+
+def _alert_setup(repo, direction="buy", stop=None, target=None):
+    structure = open_structure_for_shell()
+    _save(repo, structure)
+    trade = Trade(structure_id=structure.structure_id, leg_id=structure.legs[0].leg_id,
+                  event_type=TradeEventType.TRADE, lots=10, price=75.0, direction=direction,
+                  stop_loss_price=stop, target_price=target)
+    repo.save_trade(trade)
+    return structure, trade
+
+
+def test_price_alert_callback_returns_persistent_stop_toast(env, repo):
+    _alert_setup(repo, stop=73.0)
+    toasts = cb.check_price_alerts({"CLZ26": {"price": 72.0}}, None)
+    (toast,) = toasts
+    assert toast.icon == "danger" and toast.duration == 0 and toast.is_open is True
+    assert "Stop Loss Hit" in toast.header and "72" in toast.children
+    assert toast.style["backgroundColor"] == COLORS["CARD_BG"]
+
+
+def test_price_alert_callback_target_toast_auto_dismisses(env, repo):
+    _alert_setup(repo, target=80.0)
+    (toast,) = cb.check_price_alerts({"CLZ26": {"price": 81.0}}, None)
+    assert toast.icon == "success" and toast.duration == 8000
+
+
+def test_price_alert_callback_fires_once_and_keeps_open_toasts(env, repo):
+    _alert_setup(repo, stop=73.0)
+    first = cb.check_price_alerts({"CLZ26": {"price": 72.0}}, None)
+    with pytest.raises(cb.PreventUpdate):
+        cb.check_price_alerts({"CLZ26": {"price": 71.0}}, [first[0].to_plotly_json()])  # already sent
+    structure2 = open_structure_for_shell()
+    _save(repo, structure2)
+    repo.save_trade(Trade(structure_id=structure2.structure_id, leg_id=structure2.legs[0].leg_id,
+                          event_type=TradeEventType.TRADE, lots=1, price=75.0, direction="buy", stop_loss_price=74.0))
+    dismissed = {"props": {"is_open": False, "id": "gone"}}
+    kept = {"props": {"is_open": True, "id": "kept"}}
+    result = cb.check_price_alerts({"CLZ26": {"price": 72.0}}, [dismissed, kept])
+    assert result[0] == kept and len(result) == 2 and "Stop Loss Hit" in result[1].header
+
+
+def test_price_alert_callback_ignores_untriggered_and_empty(env, repo):
+    _alert_setup(repo, stop=73.0)
+    for prices in ({}, {"CLZ26": {"price": 75.0}}):
+        with pytest.raises(cb.PreventUpdate):
+            cb.check_price_alerts(prices, None)
+
+
+def test_price_alert_callback_ignores_trades_without_levels(env, repo):
+    _alert_setup(repo)  # no stop or target on the trade
+    with pytest.raises(cb.PreventUpdate):
+        cb.check_price_alerts({"CLZ26": {"price": 1.0}}, None)

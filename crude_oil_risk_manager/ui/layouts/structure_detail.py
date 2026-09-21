@@ -108,6 +108,27 @@ def _header(structure: Structure, has_trades: bool) -> html.Div:
     )
 
 
+def _reuse_panel() -> html.Div:
+    """Closed structures only: reuse the legs as a fresh shell (optionally under a new name)."""
+    return html.Div(
+        [
+            dbc.Button("♻️ Reuse as Shell", id="btn-reuse-structure", color="success", outline=True, size="sm"),
+            dbc.Collapse(
+                html.Div(
+                    [
+                        dbc.Input(id="reuse-structure-name", placeholder="New name (optional)", maxLength=100, className="mb-2"),
+                        dbc.Button("Confirm Reuse", id="btn-confirm-reuse", color="success"),
+                    ],
+                    style={"maxWidth": "420px", "marginTop": "10px"},
+                ),
+                id="reuse-collapse",
+                is_open=False,
+            ),
+        ],
+        style={"marginBottom": "20px"},
+    )
+
+
 def _metric_card(label: str, body, big: bool = False) -> dbc.Col:
     return dbc.Col(
         dbc.Card(
@@ -164,7 +185,7 @@ def _legs_table(structure: Structure, prices: dict[str, float], breakdown: dict[
                 str(number), symbol, ratio, f"{leg.lots:g}", format_price(entry),
                 format_price(prices.get(leg.contract.symbol)),
                 pnl_span(breakdown.get(leg.leg_id)) if leg.leg_id in breakdown else EMPTY,
-                "Long" if leg.ratio > 0 else "Short",
+                "Long" if (leg.ratio > 0) == (leg.direction == "buy") else "Short",
             ]
         )
     footer = [html.Td("Total Structure PnL:", colSpan=6, style={"textAlign": "right", "fontWeight": "bold"}), html.Td(pnl_span(total, fontWeight="bold"), colSpan=2)]
@@ -250,6 +271,27 @@ def _entry_form(structure: Structure, live: float | None) -> html.Div:
                 _live_label(live, "trade-live-price-label"),
             ),
             _field("Lots", dbc.Input(id="trade-entry-lots", type="number", placeholder="Number of lots", min=0.01, step=0.01, style={"width": "220px"})),
+            html.H6("🎯 Price Alerts (Optional)", style=_TEXT),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            dbc.Input(id="trade-stop-loss-price", type="number", placeholder="Stop loss price", step=0.01),
+                            html.Div("Alert triggered when live price crosses this level", style=_MUTED),
+                        ],
+                        md=4,
+                    ),
+                    dbc.Col(
+                        [
+                            dbc.Input(id="trade-target-price", type="number", placeholder="Target price", step=0.01),
+                            html.Div("Alert triggered when live price reaches this level", style=_MUTED),
+                        ],
+                        md=4,
+                    ),
+                ],
+                className="mb-1",
+            ),
+            html.Div(f"Current live price: {format_price(live)}", id="trade-alert-live-reference", style={**_MUTED, "marginBottom": "16px"}),
             _field(
                 "Direction (for the trade log; the leg ratios already encode direction)",
                 dbc.RadioItems(id="trade-direction", options=[{"label": "Buy", "value": "buy"}, {"label": "Sell", "value": "sell"}], value="buy", inline=True),
@@ -329,6 +371,8 @@ def structure_detail_layout(
     total = None if unrealized is None else unrealized + realized
 
     sections = [_header(structure, bool(trades))]
+    if structure.status == StructureStatus.CLOSED:
+        sections.append(_reuse_panel())
     if is_open:
         sections.append(_pnl_summary(unrealized, realized, entry, live, summary_note))
     elif structure.status == StructureStatus.CLOSED:

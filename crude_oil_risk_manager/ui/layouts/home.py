@@ -104,19 +104,54 @@ ROW_STYLE_CONDITIONS = [
 ]
 
 
+REALIZED_VALUE_STYLE = {"fontSize": "2rem", "fontWeight": "bold", "lineHeight": "1.2", "color": COLORS["TEXT_PRIMARY"]}
+
+
+def _realized_metric(label: str, value_id: str) -> dbc.Col:
+    return dbc.Col(
+        [
+            html.Div(label, style=_LABEL_STYLE),
+            html.Div("—", id=value_id, style=REALIZED_VALUE_STYLE),
+        ],
+        md=6,
+    )
+
+
+def _realized_bar() -> html.Div:
+    """Persistent realized-PnL bar above the cards; it only changes when a position is exited."""
+    return html.Div(
+        [
+            dbc.Row(
+                [
+                    _realized_metric("TOTAL REALIZED PnL (ALL TIME)", "home-total-realized-pnl"),
+                    _realized_metric("TODAY'S REALIZED PnL", "home-today-realized-pnl"),
+                ]
+            ),
+            html.Hr(style={"borderColor": COLORS["BORDER_COLOR"], "margin": "16px 0 0 0"}),
+        ],
+        id="home-realized-pnl-bar",
+        style={
+            "backgroundColor": COLORS["SIDEBAR_BG"],
+            "border": f"1px solid {COLORS['BORDER_COLOR']}",
+            "borderRadius": "6px",
+            "padding": "16px 20px 0 20px",
+            "marginBottom": "20px",
+        },
+    )
+
+
 def home_layout() -> html.Div:
     """Skeleton of the Home tab with the component ids the callbacks fill in."""
     metric_cards = dbc.Row(
         [
-            dbc.Col(_card("Total PnL", "home-card-total-pnl", COLORS["ACCENT_GREEN"]), md=4, xl=2, className="mb-3"),
-            dbc.Col(_card("Today's PnL", "home-card-today-pnl", COLORS["ACCENT_GREEN"]), md=4, xl=2, className="mb-3"),
-            dbc.Col(_card("Open Structures", "home-card-open-structures", COLORS["ACCENT_BLUE"]), md=4, xl=2, className="mb-3"),
-            dbc.Col(_card("Open Legs", "home-card-open-legs", COLORS["ACCENT_BLUE"]), md=4, xl=2, className="mb-3"),
-            dbc.Col(_card("Margin Used", "home-card-margin-used", COLORS["ACCENT_YELLOW"]), md=4, xl=2, className="mb-3"),
+            dbc.Col(_card("Unrealized PnL", "home-card-unrealized-pnl", COLORS["ACCENT_GREEN"]), md=4, xl=True, className="mb-3"),
+            dbc.Col(_card("Open Structures", "home-card-open-structures", COLORS["ACCENT_BLUE"]), md=4, xl=True, className="mb-3"),
+            dbc.Col(_card("Open Legs", "home-card-open-legs", COLORS["ACCENT_BLUE"]), md=4, xl=True, className="mb-3"),
             dbc.Col(
-                _card("Net Lots", "home-card-net-lots", COLORS["ACCENT_BLUE"], {"fontSize": "16px"}),
-                md=4, xl=2, className="mb-3",
+                _card("Net Lots by Product", "home-card-net-lots", COLORS["ACCENT_BLUE"], {"fontSize": "16px"}),
+                md=4, xl=True, className="mb-3",
             ),
+            dbc.Col(_card("Margin Used", "home-card-margin-used", COLORS["ACCENT_YELLOW"]), md=4, xl=True, className="mb-3"),
         ]
     )
 
@@ -151,4 +186,4 @@ def home_layout() -> html.Div:
         ]
     )
 
-    return html.Div([metric_cards, winner_loser_stale, table])
+    return html.Div([_realized_bar(), metric_cards, winner_loser_stale, table])

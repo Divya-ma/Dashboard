@@ -25,6 +25,7 @@ from core.pnl import (
     calculate_structure_realized_pnl,
     calculate_structure_unrealized_pnl,
     calculate_todays_pnl,
+    calculate_todays_realized_pnl,
 )
 
 
@@ -64,15 +65,15 @@ def make_structure(**overrides) -> Structure:
 
 
 def test_leg_unrealized_pnl_long_profit():
-    assert calculate_leg_unrealized_pnl(75.0, 76.0, 1, 10, 1000) == 10_000.0
+    assert calculate_leg_unrealized_pnl(75.0, 76.0, 1, 10, 1000, "buy") == 10_000.0
 
 
 def test_leg_unrealized_pnl_short_profit():
-    assert calculate_leg_unrealized_pnl(75.0, 74.0, -1, 10, 1000) == 10_000.0
+    assert calculate_leg_unrealized_pnl(75.0, 74.0, -1, 10, 1000, "buy") == 10_000.0
 
 
 def test_leg_unrealized_pnl_long_loss():
-    assert calculate_leg_unrealized_pnl(75.0, 74.0, 1, 10, 1000) == -10_000.0
+    assert calculate_leg_unrealized_pnl(75.0, 74.0, 1, 10, 1000, "buy") == -10_000.0
 
 
 def test_leg_unrealized_pnl_zero_ratio_raises():
@@ -95,11 +96,48 @@ def test_leg_unrealized_pnl_nan_input_raises():
         calculate_leg_unrealized_pnl(float("nan"), 76.0, 1, 10, 1000)
 
 
+# Note: (0.45 - 0.37) * 10 lots * 1000 = 800, i.e. the direction tests below use 800 / 500.
+
+
+def test_sell_trade_profit_when_price_falls():
+    assert calculate_leg_unrealized_pnl(0.45, 0.37, 1, 10, 1000, direction="sell") == pytest.approx(800.0)
+
+
+def test_sell_trade_loss_when_price_rises():
+    assert calculate_leg_unrealized_pnl(0.45, 0.50, 1, 10, 1000, direction="sell") == pytest.approx(-500.0)
+
+
+def test_buy_trade_profit_when_price_rises():
+    assert calculate_leg_unrealized_pnl(0.37, 0.45, 1, 10, 1000, direction="buy") == pytest.approx(800.0)
+
+
+def test_direction_defaults_to_buy_and_is_validated():
+    assert calculate_leg_unrealized_pnl(75.0, 76.0, 1, 10, 1000) == calculate_leg_unrealized_pnl(75.0, 76.0, 1, 10, 1000, "buy")
+    with pytest.raises(ValueError, match="direction"):
+        calculate_leg_unrealized_pnl(75.0, 76.0, 1, 10, 1000, direction="hold")
+
+
+def test_sell_direction_combines_with_negative_ratio():
+    # A sold short leg is a long exposure: falling-price loss flips twice.
+    assert calculate_leg_unrealized_pnl(75.0, 74.0, -1, 10, 1000, direction="sell") == pytest.approx(-10_000.0)
+
+
+def test_leg_realized_pnl_honours_direction():
+    assert calculate_leg_realized_pnl(0.45, 0.37, 1, 10, 1000, direction="sell") == pytest.approx(800.0)
+
+
+def test_structure_unrealized_pnl_reads_direction_from_each_leg():
+    sold = make_structure(legs=[make_leg(entry_price=75.0, direction="sell")])
+    bought = make_structure(legs=[make_leg(entry_price=75.0, direction="buy")])
+    assert calculate_structure_unrealized_pnl(sold.legs, {"CLZ26": 74.0})[0] == pytest.approx(10_000.0)
+    assert calculate_structure_unrealized_pnl(bought.legs, {"CLZ26": 74.0})[0] == pytest.approx(-10_000.0)
+
+
 # ---------- calculate_leg_realized_pnl ----------
 
 
 def test_leg_realized_pnl_matches_unrealized_formula():
-    assert calculate_leg_realized_pnl(75.0, 76.0, 1, 10, 1000) == 10_000.0
+    assert calculate_leg_realized_pnl(75.0, 76.0, 1, 10, 1000, "buy") == 10_000.0
 
 
 # ---------- calculate_average_entry_price ----------
@@ -303,6 +341,90 @@ def test_portfolio_pnl_excludes_shell_and_closed_structures():
         stale_symbols=[],
     )
     assert result["open_structure_count"] == 0
+
+
+def closed_with_exit(pnl: float, when: datetime | None = None):
+    structure = make_structure(status=StructureStatus.CLOSED)
+    trade = Trade(
+        structure_id=structure.structure_id,
+        leg_id=structure.legs[0].leg_id,
+        event_type=TradeEventType.FULL_EXIT,
+        lots=10,
+        price=77.0,
+        direction="sell",
+        realized_pnl=pnl,
+        **({"timestamp": when} if when else {}),
+    )
+    return structure, trade
+
+
+def test_portfolio_realized_keeps_closed_structures_in_all_time_total():
+    open_structure = make_structure()
+    closed, exit_trade = closed_with_exit(2500.0)
+    result = calculate_portfolio_pnl(
+        structures=[open_structure],
+        trades_by_structure={},
+        live_prices={"CLZ26": 76.0},
+        stale_symbols=[],
+        closed_structures=[closed],
+        closed_trades_by_structure={closed.structure_id: [exit_trade]},
+    )
+    assert result["total_realized"] == 0.0  # open structures only
+    assert result["total_realized_all_time"] == pytest.approx(2500.0)
+    assert result["total_unrealized"] == pytest.approx(10_000.0)
+    assert result["open_structure_count"] == 1 and len(result["per_structure"]) == 1
+
+
+def test_portfolio_realized_all_time_sums_open_and_closed():
+    open_structure = make_structure()
+    partial = Trade(
+        structure_id=open_structure.structure_id, leg_id=open_structure.legs[0].leg_id,
+        event_type=TradeEventType.PARTIAL_EXIT, lots=1, price=76.0, direction="sell", realized_pnl=400.0,
+    )
+    closed, exit_trade = closed_with_exit(-100.0)
+    result = calculate_portfolio_pnl(
+        [open_structure], {open_structure.structure_id: [partial]}, {"CLZ26": 75.0}, [],
+        [closed], {closed.structure_id: [exit_trade]},
+    )
+    assert result["total_realized"] == pytest.approx(400.0)
+    assert result["total_realized_all_time"] == pytest.approx(300.0)
+
+
+def test_portfolio_without_closed_arguments_is_unchanged():
+    result = calculate_portfolio_pnl([make_structure()], {}, {"CLZ26": 76.0}, [])
+    assert result["total_realized_all_time"] == result["total_realized"] == 0.0
+
+
+# ---------- calculate_todays_realized_pnl ----------
+
+_NOW = datetime(2026, 9, 21, 15, 0, tzinfo=timezone.utc)
+
+
+def test_todays_realized_no_exits_is_zero():
+    assert calculate_todays_realized_pnl([], _NOW.date()) == 0.0
+
+
+def test_todays_realized_sums_todays_full_exit():
+    _, exit_trade = closed_with_exit(1200.0, _NOW)
+    assert calculate_todays_realized_pnl([exit_trade], _NOW.date()) == pytest.approx(1200.0)
+
+
+def test_todays_realized_excludes_yesterday():
+    _, exit_trade = closed_with_exit(1200.0, _NOW - timedelta(days=1))
+    assert calculate_todays_realized_pnl([exit_trade], _NOW.date()) == 0.0
+
+
+def test_todays_realized_mix_only_counts_today_and_ignores_non_exits():
+    _, today_a = closed_with_exit(1000.0, _NOW)
+    _, today_b = closed_with_exit(-300.0, _NOW - timedelta(hours=2))
+    _, yesterday = closed_with_exit(5000.0, _NOW - timedelta(days=1))
+    entry = Trade(structure_id="s", leg_id="l", event_type=TradeEventType.TRADE, lots=1, price=1.0, direction="buy", timestamp=_NOW)
+    assert calculate_todays_realized_pnl([today_a, today_b, yesterday, entry], _NOW.date()) == pytest.approx(700.0)
+
+
+def test_todays_realized_defaults_to_today_utc():
+    _, exit_trade = closed_with_exit(50.0)
+    assert calculate_todays_realized_pnl([exit_trade]) == pytest.approx(50.0)
 
 
 def test_portfolio_pnl_net_lots_by_product_spread_nets_to_zero():

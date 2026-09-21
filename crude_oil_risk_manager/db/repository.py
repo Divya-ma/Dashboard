@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.engine import Connection, Engine
 
 from core.models import (
@@ -65,6 +66,43 @@ class Repository:
         with self._engine.begin() as conn:
             for statement in statements:
                 conn.execute(text(statement))
+        self._migrate_columns()
+
+    def _migrate_columns(self) -> None:
+        """Add columns introduced after the first release to databases created without them.
+
+        SQLite has no ADD COLUMN IF NOT EXISTS, so each ALTER is attempted and the
+        "duplicate column" error is ignored. When legs.direction is added to an existing
+        database it is back-filled from each structure's first entry trade, so positions
+        entered as 'sell' before direction was stored keep the right PnL sign.
+        """
+        for statement in (
+            "ALTER TABLE trades ADD COLUMN stop_loss_price REAL",
+            "ALTER TABLE trades ADD COLUMN target_price REAL",
+        ):
+            self._try_alter(statement)
+        if self._try_alter("ALTER TABLE legs ADD COLUMN direction TEXT NOT NULL DEFAULT 'buy'"):
+            with self._engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE legs SET direction = COALESCE((
+                            SELECT t.direction FROM trades t
+                            WHERE t.structure_id = legs.structure_id AND t.event_type = 'trade'
+                            ORDER BY t.timestamp ASC LIMIT 1
+                        ), 'buy')
+                        """
+                    )
+                )
+
+    def _try_alter(self, statement: str) -> bool:
+        """Run an ALTER TABLE; False (ignored) if the column already exists."""
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(text(statement))
+            return True
+        except OperationalError:
+            return False
 
     # ------------------------------------------------------------------
     # Contract methods
@@ -239,10 +277,10 @@ class Repository:
                 """
                 INSERT OR REPLACE INTO legs (
                     leg_id, structure_id, contract_id, ratio, lots,
-                    entry_price, average_entry_price, is_naked, leg_order
+                    entry_price, average_entry_price, is_naked, direction, leg_order
                 ) VALUES (
                     :leg_id, :structure_id, :contract_id, :ratio, :lots,
-                    :entry_price, :average_entry_price, :is_naked, :leg_order
+                    :entry_price, :average_entry_price, :is_naked, :direction, :leg_order
                 )
                 """
             ),
@@ -255,6 +293,7 @@ class Repository:
                 "entry_price": leg.entry_price,
                 "average_entry_price": leg.average_entry_price,
                 "is_naked": int(leg.is_naked),
+                "direction": leg.direction,
                 "leg_order": order,
             },
         )
@@ -374,6 +413,7 @@ class Repository:
             entry_price=row["entry_price"],
             average_entry_price=row["average_entry_price"],
             is_naked=bool(row["is_naked"]),
+            direction=row["direction"] or "buy",
         )
 
     @staticmethod
@@ -405,10 +445,12 @@ class Repository:
                     """
                     INSERT INTO trades (
                         trade_id, structure_id, leg_id, event_type, lots,
-                        price, direction, timestamp, realized_pnl, notes
+                        price, direction, timestamp, realized_pnl, notes,
+                        stop_loss_price, target_price
                     ) VALUES (
                         :trade_id, :structure_id, :leg_id, :event_type, :lots,
-                        :price, :direction, :timestamp, :realized_pnl, :notes
+                        :price, :direction, :timestamp, :realized_pnl, :notes,
+                        :stop_loss_price, :target_price
                     )
                     """
                 ),
@@ -423,6 +465,8 @@ class Repository:
                     "timestamp": trade.timestamp.isoformat(),
                     "realized_pnl": trade.realized_pnl,
                     "notes": trade.notes,
+                    "stop_loss_price": trade.stop_loss_price,
+                    "target_price": trade.target_price,
                 },
             )
 
@@ -459,6 +503,8 @@ class Repository:
             timestamp=_parse_dt(row["timestamp"]),
             realized_pnl=row["realized_pnl"],
             notes=row["notes"] or "",
+            stop_loss_price=row["stop_loss_price"],
+            target_price=row["target_price"],
         )
 
     # ------------------------------------------------------------------

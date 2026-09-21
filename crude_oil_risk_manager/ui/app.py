@@ -33,7 +33,12 @@ from ui.callbacks.structure_detail_callbacks import register_structure_detail_ca
 from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
 from ui.container import container  # noqa: E402
-from ui.layouts.shell import build_alert_container, build_global_css, build_shell  # noqa: E402
+from ui.layouts.shell import (  # noqa: E402
+    build_alert_container,
+    build_global_css,
+    build_price_alert_container,
+    build_shell,
+)
 from ui.layouts.structure_builder import builder_save_toast, new_structure_modal  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -156,6 +161,7 @@ def serve_layout() -> html.Div:
             dcc.Interval(id="interval-pnl-refresh", interval=PNL_REFRESH_INTERVAL_MS, n_intervals=0),
             dcc.Interval(id="interval-countdown", interval=COUNTDOWN_INTERVAL_MS, n_intervals=0),
             build_alert_container(),
+            build_price_alert_container(),
             build_shell(token_configured),
             new_structure_modal(),
             builder_save_toast(),

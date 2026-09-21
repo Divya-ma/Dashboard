@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS legs (
     entry_price REAL,
     average_entry_price REAL,
     is_naked INTEGER NOT NULL DEFAULT 0,
+    direction TEXT NOT NULL DEFAULT 'buy',   -- 'buy' or 'sell': flips the PnL sign
     leg_order INTEGER NOT NULL DEFAULT 0    -- preserves user-defined ordering of legs
 );
 
@@ -53,7 +54,9 @@ CREATE TABLE IF NOT EXISTS trades (
     direction TEXT NOT NULL,
     timestamp TEXT NOT NULL,
     realized_pnl REAL,
-    notes TEXT DEFAULT ''
+    notes TEXT DEFAULT '',
+    stop_loss_price REAL,
+    target_price REAL
 );
 
 CREATE TABLE IF NOT EXISTS pnl_records (

@@ -243,3 +243,92 @@ def test_last_error_cleared_on_success(teams_manager, mocker):
     teams_manager.last_error = "stale"
     assert teams_manager.send_test_alert() is True
     assert teams_manager.last_error is None
+
+
+# ---------- check_price_alerts ----------
+
+from core.models import Contract, Leg, Structure, StructureStatus, StructureType, Trade, TradeEventType
+
+
+def alert_structure(name="CL outright"):
+    leg = Leg(
+        contract=Contract(product="CL", contract_month=12, contract_year=2026, symbol="CLZ26",
+                          multiplier=1000, tick_size=0.01, tick_value=10),
+        ratio=1, lots=10, entry_price=75.0,
+    )
+    return Structure(name=name, structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[leg], status=StructureStatus.OPEN)
+
+
+def alert_trade(structure, direction="buy", stop=None, target=None):
+    return Trade(
+        structure_id=structure.structure_id, leg_id=structure.legs[0].leg_id, event_type=TradeEventType.TRADE,
+        lots=10, price=75.0, direction=direction, stop_loss_price=stop, target_price=target,
+    )
+
+
+def run_price_alerts(manager, trade, structure, live):
+    return manager.check_price_alerts({"CLZ26": live}, [trade], {structure.structure_id: structure})
+
+
+def test_buy_below_stop_raises_critical_alert(manager, repo):
+    s = alert_structure()
+    (alert,) = run_price_alerts(manager, alert_trade(s, "buy", stop=73.0), s, 72.5)
+    assert alert.level == AlertLevel.CRITICAL
+    assert "Stop Loss Hit" in alert.title and "CL outright" in alert.title
+    assert "72.5" in alert.body and "73" in alert.body and "buy" in alert.body
+    assert alert.structure_id == s.structure_id
+    assert [a.alert_id for a in repo.get_alert_history()] == [alert.alert_id]  # saved via send_alert
+
+
+def test_sell_above_stop_raises_critical_alert(manager):
+    s = alert_structure()
+    (alert,) = run_price_alerts(manager, alert_trade(s, "sell", stop=77.0), s, 77.5)
+    assert alert.level == AlertLevel.CRITICAL and "sell" in alert.body
+
+
+def test_buy_above_target_raises_info_alert(manager):
+    s = alert_structure()
+    (alert,) = run_price_alerts(manager, alert_trade(s, "buy", target=80.0), s, 80.5)
+    assert alert.level == AlertLevel.INFO and "Target Hit" in alert.title
+
+
+def test_sell_below_target_raises_info_alert(manager):
+    s = alert_structure()
+    (alert,) = run_price_alerts(manager, alert_trade(s, "sell", target=70.0), s, 69.5)
+    assert alert.level == AlertLevel.INFO
+
+
+def test_levels_not_reached_raise_nothing(manager):
+    s = alert_structure()
+    assert run_price_alerts(manager, alert_trade(s, "buy", stop=73.0, target=80.0), s, 75.0) == []
+    assert run_price_alerts(manager, alert_trade(s, "sell", stop=77.0, target=70.0), s, 75.0) == []
+
+
+def test_already_sent_alert_is_not_duplicated_even_after_restart(manager, repo):
+    s = alert_structure()
+    trade = alert_trade(s, "buy", stop=73.0)
+    assert len(run_price_alerts(manager, trade, s, 72.0)) == 1
+    assert run_price_alerts(manager, trade, s, 71.0) == []
+    assert repo.get_setting(f"alert_sent_{trade.trade_id}_stop") is True
+    assert run_price_alerts(AlertManager(repo), trade, s, 70.0) == []  # a new manager = an app restart
+
+
+def test_stop_and_target_are_deduplicated_independently(manager):
+    s = alert_structure()
+    stop_only = run_price_alerts(manager, alert_trade(s, "buy", stop=73.0), s, 72.0)
+    assert len(stop_only) == 1
+    trade = alert_trade(s, "buy", stop=73.0, target=80.0)
+    both = manager.check_price_alerts({"CLZ26": 72.0}, [trade], {s.structure_id: s})
+    assert [a.level for a in both] == [AlertLevel.CRITICAL]  # only the stop is crossed at 72
+
+
+def test_no_stop_or_target_returns_empty_list(manager):
+    s = alert_structure()
+    assert run_price_alerts(manager, alert_trade(s, "buy"), s, 1.0) == []
+
+
+def test_missing_price_or_structure_is_skipped(manager):
+    s = alert_structure()
+    trade = alert_trade(s, "buy", stop=73.0)
+    assert manager.check_price_alerts({}, [trade], {s.structure_id: s}) == []
+    assert manager.check_price_alerts({"CLZ26": 70.0}, [trade], {}) == []

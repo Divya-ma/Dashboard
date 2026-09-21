@@ -13,11 +13,17 @@ from datetime import datetime, timezone
 
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, html, no_update
+from dash.exceptions import PreventUpdate
 
 from adapters.base import APIError, AuthenticationError, SymbolTranslator
 from config.settings import settings
-from core.models import AlertLevel, StructureStatus
-from core.pnl import build_pnl_record, calculate_portfolio_pnl, calculate_todays_pnl
+from core.models import AlertLevel, StructureStatus, TradeEventType
+from core.pnl import (
+    build_pnl_record,
+    calculate_portfolio_pnl,
+    calculate_todays_pnl,
+    calculate_todays_realized_pnl,
+)
 from core.user_settings import KEY_API_TOKEN, KEY_PNL_STOP
 from ui.container import NO_UPDATE_LABEL, container
 from ui.layouts.placeholder import (
@@ -131,6 +137,13 @@ def _load_open_positions():
     structures = container.repository.get_all_structures(status_filter=_OPEN_STATUSES)
     trades = {s.structure_id: container.repository.get_trades_for_structure(s.structure_id) for s in structures}
     return structures, trades
+
+
+def _load_closed_positions():
+    """Closed structures and their trades: their realized PnL stays in the all-time total."""
+    closed = container.repository.get_all_structures(status_filter=[StructureStatus.CLOSED])
+    trades = {s.structure_id: container.repository.get_trades_for_structure(s.structure_id) for s in closed}
+    return closed, trades
 
 
 def _save_pnl_records(live_prices: dict) -> None:
@@ -272,13 +285,16 @@ def refresh_portfolio_pnl(n_intervals, live_prices):
     """Recalculate portfolio PnL from cached prices (no API call) into a JSON-safe dict."""
     try:
         structures, trades = _load_open_positions()
+        closed, closed_trades = _load_closed_positions()
     except Exception:  # noqa: BLE001
         logger.exception("Could not load positions for PnL refresh")
         return no_update
 
     prices = _price_map(live_prices)
     stale = _stale_symbols(live_prices)
-    summary = calculate_portfolio_pnl(structures, trades, prices, stale)
+    summary = calculate_portfolio_pnl(structures, trades, prices, stale, closed, closed_trades)
+    all_trades = [t for group in (*trades.values(), *closed_trades.values()) for t in group]
+    summary["todays_realized_pnl"] = calculate_todays_realized_pnl(all_trades)
     _add_structure_details(summary, structures, stale)
     summary["todays_pnl"] = _todays_pnl(structures, trades, prices, stale, summary)
     summary["calculated_at"] = summary["calculated_at"].isoformat()
@@ -326,6 +342,61 @@ def check_alerts(n_intervals, portfolio_pnl):
 
 
 # ----------------------------------------------------------------------
+# Stop-loss / target price alerts
+# ----------------------------------------------------------------------
+
+_ENTRY_EVENTS = (TradeEventType.TRADE, TradeEventType.ADD)
+
+
+def _price_alert_toast(alert) -> dbc.Toast:
+    """Stop-loss toasts stay until dismissed (duration 0); target toasts close after 8 seconds."""
+    critical = alert.level == AlertLevel.CRITICAL
+    return dbc.Toast(
+        alert.body,
+        id=f"toast-{alert.alert_id}",
+        header=alert.title,
+        icon="danger" if critical else "success",
+        duration=0 if critical else 8000,
+        is_open=True,
+        dismissable=True,
+        style={"width": "380px", "marginBottom": "10px", "backgroundColor": COLORS["CARD_BG"]},
+    )
+
+
+def _still_open(toast) -> bool:
+    """False for a toast the user already dismissed (its is_open was set to False client-side)."""
+    props = toast.get("props", {}) if isinstance(toast, dict) else {}
+    return props.get("is_open", True)
+
+
+def check_price_alerts(live_prices, existing_toasts):
+    """After each live price update, raise stop-loss / target alerts as persistent toasts.
+
+    Uses its own toast container: `alert-toast-container` is rewritten every 5s by
+    check_alerts, which would wipe a stop-loss toast that must stay until dismissed.
+    """
+    manager = container.alert_manager
+    if not live_prices or manager is None:
+        raise PreventUpdate
+    structures, trades = _load_open_positions()
+    open_trades = [
+        t
+        for group in trades.values()
+        for t in group
+        if t.event_type in _ENTRY_EVENTS and (t.stop_loss_price is not None or t.target_price is not None)
+    ]
+    if not open_trades:
+        raise PreventUpdate
+    alerts = manager.check_price_alerts(
+        _price_map(live_prices), open_trades, {s.structure_id: s for s in structures}
+    )
+    if not alerts:
+        raise PreventUpdate
+    kept = [toast for toast in (existing_toasts or []) if _still_open(toast)]
+    return kept + [_price_alert_toast(alert) for alert in alerts]
+
+
+# ----------------------------------------------------------------------
 # Registration
 # ----------------------------------------------------------------------
 
@@ -364,3 +435,10 @@ def register_callbacks(app) -> None:
         Input("interval-pnl-refresh", "n_intervals"),
         State("store-portfolio-pnl", "data"),
     )(check_alerts)
+
+    app.callback(
+        Output("price-alert-toast-container", "children"),
+        Input("store-live-prices", "data"),
+        State("price-alert-toast-container", "children"),
+        prevent_initial_call=True,
+    )(check_price_alerts)

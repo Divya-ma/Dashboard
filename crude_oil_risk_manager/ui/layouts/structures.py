@@ -114,6 +114,14 @@ CLOSED_COLUMN_DEFS = [
     _number_column("days_held", "Days Held", _INT_FORMATTER, 100),
     {"field": "closed_at", "headerName": "Closed At", "width": 160, "valueFormatter": _TEXT_FORMATTER},
     {"field": "close_trigger", "headerName": "Close Trigger", "width": 130, "valueFormatter": _TEXT_FORMATTER},
+    {
+        "colId": "actions",
+        "headerName": "Actions",
+        "width": 190,
+        "sortable": False,
+        "cellRenderer": "ButtonRenderer",
+        "cellRendererParams": {"colors": COLORS, "label": "♻️ Reuse as Shell", "action": "reuse"},
+    },
 ]
 
 _SHELL_ROW_STYLE = {

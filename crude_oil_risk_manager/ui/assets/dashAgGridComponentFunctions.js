@@ -82,3 +82,28 @@ dagcomponentfuncs.StructureActions = function (props) {
     }
     return React.createElement("div", { style: { display: "flex", alignItems: "center", height: "100%" } }, buttons);
 };
+
+// Generic single-button cell: cellRendererParams {label, action, colors}. Clicking reports
+// {action, structure_id} through cellRendererData, like the other renderers above.
+dagcomponentfuncs.ButtonRenderer = function (props) {
+    var colors = props.colors || {};
+    var color = colors.ACCENT_GREEN;
+    return React.createElement(
+        "button",
+        {
+            onClick: function () {
+                props.setData({ action: props.action, structure_id: props.data.structure_id });
+            },
+            style: {
+                color: color,
+                backgroundColor: "transparent",
+                border: "1px solid " + color,
+                borderRadius: "4px",
+                padding: "2px 10px",
+                fontSize: "12px",
+                cursor: "pointer",
+            },
+        },
+        props.label
+    );
+};

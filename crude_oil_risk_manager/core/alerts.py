@@ -9,7 +9,8 @@ import logging
 
 import requests
 
-from core.models import Alert, AlertLevel
+from core.models import Alert, AlertLevel, Structure, Trade
+from core.structure_view import structure_live_price
 from db.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,71 @@ class AlertManager:
             logger.error("Could not save alert %s: %s", alert.alert_id, type(exc).__name__)
             alert.channels_sent = [c for c in channels if c != "in_app"]
         return alert
+
+    def check_price_alerts(
+        self,
+        live_prices: dict[str, float],
+        open_trades: list[Trade],
+        structures: dict[str, Structure],
+    ) -> list[Alert]:
+        """Fire stop-loss / target alerts for trades whose structure price has crossed a level.
+
+        `live_prices` is {symbol: price}; the structure price is the composite of its legs'
+        prices (None if a leg has no price, in which case that trade is skipped). A buy is
+        stopped at or below its stop and hits its target at or above it; a sell is the reverse.
+        Each trade + level fires once: the "sent" flag lives in the settings table under
+        `alert_sent_{trade_id}_{stop|target}`, so it survives a restart. Returns the alerts
+        raised this call (already sent and saved via send_alert). Never raises.
+        """
+        raised: list[Alert] = []
+        for trade in open_trades:
+            if trade.stop_loss_price is None and trade.target_price is None:
+                continue
+            structure = structures.get(trade.structure_id)
+            if structure is None:
+                continue
+            live = structure_live_price(structure, live_prices)
+            if live is None:
+                continue
+
+            buy = trade.direction == "buy"
+            stop, target = trade.stop_loss_price, trade.target_price
+            checks = (
+                ("stop", stop, stop is not None and (live <= stop if buy else live >= stop)),
+                ("target", target, target is not None and (live >= target if buy else live <= target)),
+            )
+            for kind, level, hit in checks:
+                if not hit:
+                    continue
+                key = f"alert_sent_{trade.trade_id}_{kind}"
+                try:
+                    if self.repository.get_setting(key, False):
+                        continue
+                except Exception as exc:  # noqa: BLE001 - alerting must never raise
+                    logger.error("Could not read alert state %s: %s", key, type(exc).__name__)
+                    continue
+
+                if kind == "stop":
+                    alert = self.send_alert(
+                        AlertLevel.CRITICAL,
+                        f"🛑 Stop Loss Hit: {structure.name}",
+                        f"Live price {live:g} has crossed your stop loss at {level:g}. "
+                        f"Direction: {trade.direction}. Review position immediately.",
+                        structure.structure_id,
+                    )
+                else:
+                    alert = self.send_alert(
+                        AlertLevel.INFO,
+                        f"🎯 Target Hit: {structure.name}",
+                        f"Live price {live:g} has reached your target of {level:g}. Direction: {trade.direction}.",
+                        structure.structure_id,
+                    )
+                try:
+                    self.repository.set_setting(key, True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Could not save alert state %s: %s", key, type(exc).__name__)
+                raised.append(alert)
+        return raised
 
     def send_test_alert(self, webhook_url: str | None = None) -> bool:
         """Send a test message to Teams. It is not saved as an alert.

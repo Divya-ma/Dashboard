@@ -25,17 +25,22 @@ def calculate_leg_unrealized_pnl(
     ratio: int,
     lots: float,
     multiplier: float,
+    direction: str = "buy",
 ) -> float:
     """Unrealized P&L for a single leg.
 
-    Formula: (current_price - entry_price) * ratio * lots * multiplier
+    Formula: (current_price - entry_price) * direction_multiplier * ratio * lots * multiplier
 
-    The ratio sign encodes direction: +1 is a long leg (benefits from a price
-    rise), -1 is a short leg (benefits from a price fall).
+    The ratio sign gives the leg's side within the structure (+1 long leg, -1 short
+    leg). `direction` is the side the position was entered on: "buy" (multiplier +1)
+    or "sell" (multiplier -1, so a falling price is a profit).
 
-    Raises ValueError if lots < 0, multiplier <= 0, ratio == 0, or if the
-    result is not finite (NaN/inf).
+    Raises ValueError if lots < 0, multiplier <= 0, ratio == 0, direction is not
+    "buy"/"sell", or if the result is not finite (NaN/inf).
     """
+    if direction not in ("buy", "sell"):
+        raise ValueError(f"direction must be 'buy' or 'sell', got {direction!r}")
+    direction_multiplier = 1 if direction == "buy" else -1
     if lots < 0:
         raise ValueError(f"lots must be >= 0, got {lots}")
     if multiplier <= 0:
@@ -43,7 +48,7 @@ def calculate_leg_unrealized_pnl(
     if ratio == 0:
         raise ValueError("ratio must be non-zero")
 
-    pnl = (current_price - entry_price) * ratio * lots * multiplier
+    pnl = (current_price - entry_price) * direction_multiplier * ratio * lots * multiplier
     if not math.isfinite(pnl):
         raise ValueError(f"calculated P&L is not finite: {pnl}")
     return pnl
@@ -55,13 +60,14 @@ def calculate_leg_realized_pnl(
     ratio: int,
     lots: float,
     multiplier: float,
+    direction: str = "buy",
 ) -> float:
     """Realized P&L for a single leg at exit.
 
-    Same formula and validation as calculate_leg_unrealized_pnl, but using
-    exit_price. Called once at trade exit, not continuously.
+    Same formula and validation as calculate_leg_unrealized_pnl (including the
+    `direction` sign), but using exit_price. Called once at trade exit.
     """
-    return calculate_leg_unrealized_pnl(entry_price, exit_price, ratio, lots, multiplier)
+    return calculate_leg_unrealized_pnl(entry_price, exit_price, ratio, lots, multiplier, direction)
 
 
 def calculate_average_entry_price(
@@ -134,6 +140,7 @@ def calculate_structure_unrealized_pnl(
             ratio=leg.ratio,
             lots=leg.lots,
             multiplier=leg.contract.multiplier,
+            direction=leg.direction,
         )
         breakdown[leg.leg_id] = leg_pnl
         total += leg_pnl
@@ -206,10 +213,16 @@ def calculate_portfolio_pnl(
     trades_by_structure: dict[str, list[Trade]],
     live_prices: dict[str, float],
     stale_symbols: list[str],
+    closed_structures: list[Structure] | None = None,
+    closed_trades_by_structure: dict[str, list[Trade]] | None = None,
 ) -> dict:
     """Calculate a portfolio-level P&L summary across all open structures.
 
-    Only structures with status OPEN or PARTIALLY_CLOSED are included.
+    Only structures with status OPEN or PARTIALLY_CLOSED contribute unrealized P&L,
+    positions and per-structure rows. `total_realized` is the realized P&L of those
+    open structures only. Realized P&L booked by CLOSED structures is added to
+    `total_realized_all_time` (open + closed), so it does not vanish when a structure
+    closes; pass `closed_structures` and their trades to include it.
     net_lots_by_product sums ratio * lots per product across all legs of
     all included structures. largest_winner/largest_loser are the
     structures with the highest/lowest total P&L (unrealized + realized),
@@ -252,6 +265,12 @@ def calculate_portfolio_pnl(
             product = leg.contract.product
             net_lots_by_product[product] = net_lots_by_product.get(product, 0.0) + (leg.ratio * leg.lots)
 
+    closed_realized = sum(
+        calculate_structure_realized_pnl((closed_trades_by_structure or {}).get(s.structure_id, []))
+        for s in (closed_structures or [])
+        if s.status == StructureStatus.CLOSED
+    ) or 0.0
+
     if pnl_by_structure:
         winner_id = max(pnl_by_structure, key=lambda sid: pnl_by_structure[sid])
         loser_id = min(pnl_by_structure, key=lambda sid: pnl_by_structure[sid])
@@ -264,6 +283,7 @@ def calculate_portfolio_pnl(
     return {
         "total_unrealized": total_unrealized,
         "total_realized": total_realized,
+        "total_realized_all_time": total_realized + closed_realized,
         "total_pnl": total_unrealized + total_realized,
         "per_structure": per_structure,
         "open_structure_count": len(open_structures),
@@ -300,6 +320,25 @@ def calculate_todays_pnl(
     if len(todays_records) < 2:
         return 0.0
     return todays_records[-1].total_pnl - todays_records[0].total_pnl
+
+
+def calculate_todays_realized_pnl(
+    all_trades: list[Trade],
+    reference_date: date | None = None,
+) -> float:
+    """Realized P&L booked on `reference_date` (default: today, UTC).
+
+    Sums realized_pnl of FULL_EXIT trades whose timestamp falls on that UTC date.
+    Returns 0.0 if there were no exits that day.
+    """
+    ref_date = reference_date if reference_date is not None else datetime.now(timezone.utc).date()
+    return sum(
+        trade.realized_pnl
+        for trade in all_trades
+        if trade.event_type == TradeEventType.FULL_EXIT
+        and trade.realized_pnl is not None
+        and trade.timestamp.astimezone(timezone.utc).date() == ref_date
+    ) or 0.0
 
 
 # ----------------------------------------------------------------------

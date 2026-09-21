@@ -369,3 +369,89 @@ def test_get_first_pnl_since_returns_earliest_record_at_or_after_cutoff(repo):
     assert first is not None and first.total_pnl == 3.0
     assert repo.get_first_pnl_since(structure.structure_id, midnight + timedelta(days=1)) is None
     assert repo.get_first_pnl_since("no-such-structure", midnight) is None
+
+
+# ---------- schema migration and new columns ----------
+
+import sqlite3
+
+
+def _old_database(path):
+    """A database created before legs.direction and trades.stop_loss_price / target_price existed."""
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE contracts (contract_id TEXT PRIMARY KEY, product TEXT NOT NULL, contract_month INTEGER NOT NULL,
+            contract_year INTEGER NOT NULL, symbol TEXT NOT NULL UNIQUE, multiplier REAL NOT NULL, tick_size REAL NOT NULL,
+            tick_value REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'USD', expiry_date TEXT, first_notice_date TEXT,
+            created_at TEXT NOT NULL);
+        CREATE TABLE structures (structure_id TEXT PRIMARY KEY, name TEXT NOT NULL, structure_type TEXT NOT NULL,
+            products TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'shell', created_at TEXT NOT NULL,
+            last_modified_at TEXT NOT NULL, notes TEXT DEFAULT '', close_trigger TEXT, closed_at TEXT,
+            has_duplicate_tenors INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE legs (leg_id TEXT PRIMARY KEY, structure_id TEXT NOT NULL, contract_id TEXT NOT NULL,
+            ratio INTEGER NOT NULL, lots REAL NOT NULL DEFAULT 0.0, entry_price REAL, average_entry_price REAL,
+            is_naked INTEGER NOT NULL DEFAULT 0, leg_order INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE trades (trade_id TEXT PRIMARY KEY, structure_id TEXT NOT NULL, leg_id TEXT NOT NULL,
+            event_type TEXT NOT NULL, lots REAL NOT NULL, price REAL NOT NULL, direction TEXT NOT NULL,
+            timestamp TEXT NOT NULL, realized_pnl REAL, notes TEXT DEFAULT '');
+        INSERT INTO contracts VALUES ('CLZ26','CL',12,2026,'CLZ26',1000,0.01,10,'USD',NULL,NULL,'2026-01-01T00:00:00+00:00');
+        INSERT INTO structures VALUES ('sold','Sold','outright','["CL"]','open','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00','',NULL,NULL,0);
+        INSERT INTO structures VALUES ('bought','Bought','outright','["CL"]','open','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00','',NULL,NULL,0);
+        INSERT INTO legs VALUES ('l-sold','sold','CLZ26',1,10,0.45,0.45,0,0);
+        INSERT INTO legs VALUES ('l-bought','bought','CLZ26',1,10,0.45,0.45,0,0);
+        INSERT INTO trades VALUES ('t1','sold','l-sold','trade',10,0.45,'sell','2026-01-02T00:00:00+00:00',NULL,'');
+        INSERT INTO trades VALUES ('t2','bought','l-bought','trade',10,0.45,'buy','2026-01-02T00:00:00+00:00',NULL,'');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_migration_adds_columns_and_backfills_direction_from_first_trade(tmp_path):
+    path = str(tmp_path / "old.db")
+    _old_database(path)
+    repo = Repository(path)
+    assert repo.get_structure("sold").legs[0].direction == "sell"
+    assert repo.get_structure("bought").legs[0].direction == "buy"
+    trade = repo.get_trades_for_structure("sold")[0]
+    assert trade.stop_loss_price is None and trade.target_price is None
+
+
+def test_migration_is_idempotent_and_does_not_overwrite_direction(tmp_path):
+    path = str(tmp_path / "old.db")
+    _old_database(path)
+    Repository(path)
+    again = Repository(path)  # second start: ALTERs fail silently, nothing is re-backfilled
+    leg = again.get_structure("bought").legs[0]
+    again.update_structure_legs("bought", [leg.model_copy(update={"direction": "sell"})])
+    assert Repository(path).get_structure("bought").legs[0].direction == "sell"
+
+
+def test_direction_and_alert_levels_round_trip(repo):
+    from core.models import Contract, Leg, Structure, StructureStatus, StructureType, Trade, TradeEventType
+
+    contract = Contract(product="CL", contract_month=12, contract_year=2026, symbol="CLZ26",
+                        multiplier=1000, tick_size=0.01, tick_value=10)
+    leg = Leg(contract=contract, ratio=1, lots=5, entry_price=75.0, direction="sell")
+    structure = Structure(name="S", structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[leg],
+                          status=StructureStatus.OPEN)
+    repo.save_contract(contract)
+    repo.save_structure(structure)
+    repo.save_trade(Trade(structure_id=structure.structure_id, leg_id=leg.leg_id, event_type=TradeEventType.TRADE,
+                          lots=5, price=75.0, direction="sell", stop_loss_price=77.0, target_price=70.0))
+    assert repo.get_structure(structure.structure_id).legs[0].direction == "sell"
+    trade = repo.get_trades_for_structure(structure.structure_id)[0]
+    assert (trade.stop_loss_price, trade.target_price) == (77.0, 70.0)
+
+
+def test_leg_direction_validator():
+    import pytest as _pytest
+
+    from core.models import Contract, Leg
+
+    contract = Contract(product="CL", contract_month=12, contract_year=2026, symbol="CLZ26",
+                        multiplier=1000, tick_size=0.01, tick_value=10)
+    assert Leg(contract=contract, ratio=1).direction == "buy"
+    with _pytest.raises(ValueError):
+        Leg(contract=contract, ratio=1, direction="hold")

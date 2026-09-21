@@ -38,6 +38,12 @@ class Trade(BaseModel):
         default=None, description="Populated only on exit/roll events."
     )
     notes: str = Field(default="", max_length=200, description="Optional trade notes.")
+    stop_loss_price: float | None = Field(
+        default=None, description="Optional structure price at which a stop-loss alert fires."
+    )
+    target_price: float | None = Field(
+        default=None, description="Optional structure price at which a target alert fires."
+    )
 
     @field_validator("lots")
     @classmethod

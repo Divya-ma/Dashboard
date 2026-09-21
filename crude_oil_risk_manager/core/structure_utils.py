@@ -12,8 +12,11 @@ handled by `net_outright_equivalent`, which decomposes each leg and sums.
 """
 
 import re
+import uuid
+from datetime import datetime, timezone
 
 from adapters.base import PRODUCT_TO_API_CODE, SymbolTranslator
+from core.models import Structure, StructureStatus
 
 # Default leg ratios by number of legs in an exchange-quoted symbol.
 DEFAULT_RATIOS: dict[int, list[int]] = {
@@ -213,3 +216,38 @@ def split_validation_messages(messages: list[str]) -> tuple[list[str], list[str]
     errors = [m[len(ERROR_PREFIX):] for m in messages if m.startswith(ERROR_PREFIX)]
     warnings = [m for m in messages if not m.startswith(ERROR_PREFIX)]
     return errors, warnings
+
+
+def clone_structure_as_shell(source: Structure, new_name: str | None = None) -> Structure:
+    """A fresh SHELL structure with the same legs (symbols, ratios, contracts) as `source`.
+
+    Meant for reusing a closed structure: new structure and leg ids, no lots, no entry
+    prices, direction reset to "buy", no close trigger/time. The name defaults to
+    "<source name> (reuse)" (cut to the 100-character limit). The caller saves it.
+    """
+    now = datetime.now(timezone.utc)
+    legs = [
+        leg.model_copy(
+            update={
+                "leg_id": str(uuid.uuid4()),
+                "lots": 0.0,
+                "entry_price": None,
+                "average_entry_price": None,
+                "direction": "buy",
+                "is_naked": False,
+            }
+        )
+        for leg in source.legs
+    ]
+    return Structure(
+        name=(new_name or "").strip()[:100] or f"{source.name[:92]} (reuse)",
+        structure_type=source.structure_type,
+        products=list(source.products),
+        legs=legs,
+        status=StructureStatus.SHELL,
+        created_at=now,
+        last_modified_at=now,
+        notes=f"Reused from structure {source.structure_id} closed on {source.closed_at}",
+        close_trigger=None,
+        closed_at=None,
+    )
