@@ -28,6 +28,7 @@ from db.repository import Repository  # noqa: E402
 from ui.callbacks.home_callbacks import register_home_callbacks  # noqa: E402
 from ui.callbacks.settings_callbacks import register_settings_callbacks  # noqa: E402
 from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
+from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
 from ui.container import container  # noqa: E402
 from ui.layouts.shell import build_alert_container, build_global_css, build_shell  # noqa: E402
 
@@ -105,6 +106,7 @@ logger.info(
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.CYBORG],
+    assets_folder=str(_PROJECT_ROOT / "ui" / "assets"),  # AG Grid cell renderers
     suppress_callback_exceptions=True,
     title=settings.APP_TITLE,
 )
@@ -140,6 +142,7 @@ def serve_layout() -> html.Div:
             dcc.Store(id="store-token-configured", data=token_configured),
             dcc.Store(id="store-live-prices", data={}),
             dcc.Store(id="store-portfolio-pnl", data={}),
+            dcc.Store(id="store-selected-structure-id", data=None),
             dcc.Interval(id="interval-live-poll", interval=LIVE_POLL_INTERVAL_MS, n_intervals=0),
             dcc.Interval(id="interval-pnl-refresh", interval=PNL_REFRESH_INTERVAL_MS, n_intervals=0),
             dcc.Interval(id="interval-countdown", interval=COUNTDOWN_INTERVAL_MS, n_intervals=0),
@@ -153,6 +156,7 @@ app.layout = serve_layout
 register_callbacks(app)
 register_home_callbacks(app)
 register_settings_callbacks(app)
+register_structures_callbacks(app)
 
 
 if __name__ == "__main__":

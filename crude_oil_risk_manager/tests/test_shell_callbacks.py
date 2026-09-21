@@ -84,7 +84,7 @@ def pnl_payload(total, **extra):
 
 
 def test_render_page_unbuilt_tabs_show_placeholder():
-    for path in ["/structures", "/correlation", "/exposure", "/var-scenario", "/trade-analyzer", "/archive"]:
+    for path in ["/correlation", "/exposure", "/var-scenario", "/trade-analyzer", "/archive"]:
         page, _ = cb.render_page(path, True)
         assert page.children == "🚧 This tab is under construction", path
         assert page.style["color"] == COLORS["TEXT_PRIMARY"]
@@ -99,7 +99,7 @@ def test_render_page_home_and_settings_use_real_layouts(env):
 
 def test_render_page_structure_detail_path_routes_to_structures_page():
     page, _ = cb.render_page("/structures/abc-123", True)
-    assert page.children == "🚧 This tab is under construction"
+    assert "structures-active-grid" in str(page)
 
 
 def test_render_page_unknown_path_is_404():
@@ -109,7 +109,7 @@ def test_render_page_unknown_path_is_404():
 
 def test_render_page_none_and_trailing_slash_route_correctly():
     assert "home-structures-table" in str(cb.render_page(None, True)[0])
-    assert cb.render_page("/structures/", True)[0].children.startswith("🚧")
+    assert "structures-active-grid" in str(cb.render_page("/structures/", True)[0])
 
 
 def test_render_page_banner_visibility_follows_token_state():
