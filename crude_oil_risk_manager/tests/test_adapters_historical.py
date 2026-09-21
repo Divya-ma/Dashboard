@@ -183,6 +183,22 @@ def test_run_morning_sync_skips_symbols_already_synced_today(vendor_adapter, rep
     assert result == {}
 
 
+def test_symbol_with_error_status_today_is_retried(vendor_adapter, repo):
+    from core.models import Contract
+
+    repo.save_contract(
+        Contract(
+            product="CL", contract_month=12, contract_year=2026, symbol="CLZ26",
+            multiplier=1000.0, tick_size=0.01, tick_value=10.0,
+        )
+    )
+    vendor_adapter._update_sync_log("CLZ26", status="error", error_msg="API down")
+    assert vendor_adapter.get_symbols_needing_sync(repo) == ["CLZ26"]
+
+    vendor_adapter._update_sync_log("CLZ26", status="ok", row_count=1)
+    assert vendor_adapter.get_symbols_needing_sync(repo) == []
+
+
 def test_run_morning_sync_fetches_symbols_not_synced_today(vendor_adapter, repo, mocker):
     from core.models import Contract
 

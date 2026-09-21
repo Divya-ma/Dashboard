@@ -371,7 +371,8 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
     # ------------------------------------------------------------------
 
     def get_symbols_needing_sync(self, repository: Repository) -> list[str]:
-        """Return internal symbols whose sync_log entry is missing or not from today (UTC)."""
+        """Return internal symbols whose sync_log entry is missing, not from today (UTC),
+        or not status "ok" (so a failed sync is retried)."""
         contracts = repository.get_all_contracts()
         today = datetime.now(timezone.utc).date()
         log_df = self._read_sync_log()
@@ -384,7 +385,7 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
                 needing.append(symbol)
                 continue
             last_sync = pd.to_datetime(row.iloc[0]["last_sync_utc"])
-            if last_sync.date() != today:
+            if last_sync.date() != today or row.iloc[0]["status"] != "ok":
                 needing.append(symbol)
         return needing
 

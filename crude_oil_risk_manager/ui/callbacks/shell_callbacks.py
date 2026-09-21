@@ -1,0 +1,321 @@
+"""Shell callbacks: page routing, live price polling, refresh countdown and alert toasts.
+
+Callbacks stay thin: calculations come from core/, data access from the
+Repository, and adapters are reached through ui.container (populated by
+ui/app.py). The callbacks are plain module-level functions; register_callbacks()
+attaches them to the app, so this module never imports ui.app.
+"""
+
+import importlib
+import logging
+import time
+from datetime import datetime
+
+import dash_bootstrap_components as dbc
+from dash import Input, Output, State, html, no_update
+
+from adapters.base import APIError, AuthenticationError, SymbolTranslator
+from config.settings import settings
+from core.models import AlertLevel, StructureStatus
+from core.pnl import build_pnl_record, calculate_portfolio_pnl
+from ui.container import NO_UPDATE_LABEL, container
+from ui.layouts.placeholder import (
+    archive_layout,
+    correlation_layout,
+    exposure_layout,
+    structures_layout,
+    trade_analyzer_layout,
+    under_construction,
+    var_scenario_layout,
+)
+from ui.layouts.shell import COLORS, stale_indicator
+
+logger = logging.getLogger(__name__)
+
+# A poll newer than this is served from the server-side cache, so page loads and
+# extra browser tabs cannot burn the API's 7-requests/minute budget.
+LIVE_CACHE_TTL_SECONDS = 50
+POLL_PERIOD_SECONDS = 60
+
+TOKEN_SETTING_KEY = "api_access_token"
+PNL_STOP_SETTING_KEY = "alert_portfolio_pnl_stop"
+
+_OPEN_STATUSES = [StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
+
+# path -> (module in ui/layouts, layout function name)
+_ROUTES = {
+    "/": ("home", "home_layout"),
+    "/structures": ("structures", "structures_layout"),
+    "/correlation": ("correlation", "correlation_layout"),
+    "/exposure": ("exposure", "exposure_layout"),
+    "/var-scenario": ("var_scenario", "var_scenario_layout"),
+    "/trade-analyzer": ("trade_analyzer", "trade_analyzer_layout"),
+    "/archive": ("archive", "archive_layout"),
+    "/settings": ("settings", "settings_layout"),
+}
+
+_PLACEHOLDER_LAYOUTS = {
+    "structures_layout": structures_layout,
+    "correlation_layout": correlation_layout,
+    "exposure_layout": exposure_layout,
+    "var_scenario_layout": var_scenario_layout,
+    "trade_analyzer_layout": trade_analyzer_layout,
+    "archive_layout": archive_layout,
+}
+
+
+# ----------------------------------------------------------------------
+# Routing
+# ----------------------------------------------------------------------
+
+
+def _resolve_layout(module_name: str, function_name: str):
+    """Return the real layout function if its module exists, else a placeholder."""
+    module_path = f"ui.layouts.{module_name}"
+    try:
+        module = importlib.import_module(module_path)
+        return getattr(module, function_name)
+    except ImportError as exc:
+        if getattr(exc, "name", None) != module_path:
+            logger.exception("Layout module %s failed to import", module_path)
+    except AttributeError:
+        logger.warning("Layout module %s has no %s", module_path, function_name)
+    return _PLACEHOLDER_LAYOUTS.get(function_name, under_construction)
+
+
+def render_page(pathname, token_configured):
+    """Route the URL to a page layout and show/hide the setup-required banner."""
+    banner_style = {"display": "none"} if token_configured else {"display": "block"}
+
+    path = pathname or "/"
+    if len(path) > 1:
+        path = path.rstrip("/")
+
+    route = _ROUTES.get(path)
+    if route is None:
+        return (
+            html.Div(
+                f"404 — page not found: {path}",
+                style={"color": COLORS["TEXT_PRIMARY"], "padding": "40px", "fontSize": "20px"},
+            ),
+            banner_style,
+        )
+    return _resolve_layout(*route)(), banner_style
+
+
+# ----------------------------------------------------------------------
+# Live prices
+# ----------------------------------------------------------------------
+
+
+def _is_translatable(symbol: str) -> bool:
+    try:
+        SymbolTranslator.internal_to_api(symbol)
+        return True
+    except ValueError:
+        logger.warning("Skipping contract %r: symbol not recognized by the symbol translator", symbol)
+        return False
+
+
+def _price_map(live_prices: dict) -> dict[str, float]:
+    return {symbol: data["price"] for symbol, data in (live_prices or {}).items()}
+
+
+def _stale_symbols(live_prices: dict) -> list[str]:
+    return [symbol for symbol, data in (live_prices or {}).items() if data.get("is_stale")]
+
+
+def _load_open_positions():
+    """Open/partially-closed structures and their trades, from the repository."""
+    structures = container.repository.get_all_structures(status_filter=_OPEN_STATUSES)
+    trades = {s.structure_id: container.repository.get_trades_for_structure(s.structure_id) for s in structures}
+    return structures, trades
+
+
+def _save_pnl_records(live_prices: dict) -> None:
+    """Persist a PnLRecord per open structure; structures with missing prices are skipped."""
+    try:
+        structures, trades = _load_open_positions()
+        prices = _price_map(live_prices)
+        stale = _stale_symbols(live_prices)
+        summary = calculate_portfolio_pnl(structures, trades, prices, stale)
+        for structure in structures:
+            info = summary["per_structure"].get(structure.structure_id)
+            if info is None or info["missing_prices"]:
+                logger.warning(
+                    "Not saving PnL record for %s: missing prices %s",
+                    structure.name, info["missing_prices"] if info else "n/a",
+                )
+                continue
+            record = build_pnl_record(
+                structure.structure_id, structure.legs, trades[structure.structure_id], prices, stale
+            )
+            container.repository.save_pnl_record(record)
+    except Exception:  # noqa: BLE001 - a PnL history failure must not break the price poll
+        logger.exception("Failed to save PnL records")
+
+
+def _last_known_stale():
+    """Last cached prices with every entry flagged stale (used when a poll fails)."""
+    cache = container.live_cache
+    stale_prices = {symbol: {**data, "is_stale": True} for symbol, data in cache.prices.items()}
+    return stale_prices, cache.updated_label, stale_indicator(True)
+
+
+def fetch_live_prices(n_intervals):
+    """Poll live prices for all saved contracts and update the sidebar status."""
+    repository = container.repository
+    cache = container.live_cache
+
+    token = repository.get_setting(TOKEN_SETTING_KEY, "")
+    if not token:
+        return {}, NO_UPDATE_LABEL, stale_indicator(True), False
+
+    if cache.fetched_at is not None and time.monotonic() - cache.fetched_at < LIVE_CACHE_TTL_SECONDS:
+        return cache.prices, cache.updated_label, stale_indicator(cache.is_stale), True
+
+    symbols = sorted({c.symbol for c in repository.get_all_contracts() if _is_translatable(c.symbol)})
+    if not symbols:
+        return {}, NO_UPDATE_LABEL, stale_indicator(False), True
+
+    try:
+        live = container.live_adapter.get_live_prices(symbols)
+    except AuthenticationError:
+        logger.error("Live price poll rejected: invalid or expired access token")
+        return (*_last_known_stale(), False)
+    except (APIError, RuntimeError, ValueError) as exc:
+        logger.error("Live price poll failed: %s", exc)
+        return (*_last_known_stale(), True)
+
+    prices = {
+        symbol: {
+            "price": p.price,
+            "timestamp_iso": p.timestamp.isoformat(),
+            "is_stale": p.is_stale,
+            "open": p.raw_open,
+            "high": p.raw_high,
+            "low": p.raw_low,
+            "volume": p.raw_volume,
+        }
+        for symbol, p in live.items()
+    }
+    missing = [s for s in symbols if s not in prices]
+    for symbol in missing:
+        if symbol in cache.prices:
+            prices[symbol] = {**cache.prices[symbol], "is_stale": True}
+
+    is_stale = bool(missing) or any(d["is_stale"] for d in prices.values())
+    label = f"Last: {datetime.now().strftime('%H:%M:%S')}"
+    cache.prices = prices
+    cache.fetched_at = time.monotonic()
+    cache.updated_label = label
+    cache.is_stale = is_stale
+
+    _save_pnl_records(prices)
+    return prices, label, stale_indicator(is_stale), True
+
+
+def update_countdown(countdown_intervals, poll_intervals):
+    """Seconds remaining until the next live price poll."""
+    seconds_since = (countdown_intervals or 0) % POLL_PERIOD_SECONDS
+    remaining = POLL_PERIOD_SECONDS - seconds_since
+    return f"Next refresh in: {remaining}s"
+
+
+# ----------------------------------------------------------------------
+# Portfolio PnL and alerts
+# ----------------------------------------------------------------------
+
+
+def refresh_portfolio_pnl(n_intervals, live_prices):
+    """Recalculate portfolio PnL from cached prices (no API call) into a JSON-safe dict."""
+    try:
+        structures, trades = _load_open_positions()
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not load positions for PnL refresh")
+        return no_update
+
+    summary = calculate_portfolio_pnl(structures, trades, _price_map(live_prices), _stale_symbols(live_prices))
+    summary["calculated_at"] = summary["calculated_at"].isoformat()
+    summary["has_missing_prices"] = any(s["missing_prices"] for s in summary["per_structure"].values())
+    return summary
+
+
+def _toast_for_alert(alert) -> dbc.Toast:
+    icons = {AlertLevel.INFO: "primary", AlertLevel.WARNING: "warning", AlertLevel.CRITICAL: "danger"}
+    return dbc.Toast(
+        alert.body,
+        id=f"toast-{alert.alert_id}",
+        header=alert.title,
+        icon=icons[alert.level],
+        is_open=True,
+        dismissable=True,
+        style={"width": "350px", "marginBottom": "10px"},
+    )
+
+
+def check_alerts(n_intervals, portfolio_pnl):
+    """Raise a toast (once per breach) when portfolio PnL falls below the stop threshold."""
+    if not portfolio_pnl:
+        return []
+
+    total_pnl = portfolio_pnl.get("total_pnl")
+    if total_pnl is None or portfolio_pnl.get("has_missing_prices"):
+        # PnL built from partial prices could raise a false alarm; leave state untouched.
+        return no_update
+
+    threshold = float(container.repository.get_setting(PNL_STOP_SETTING_KEY, settings.ALERT_PORTFOLIO_PNL_STOP))
+    if total_pnl >= threshold:
+        container.pnl_stop_alert_active = False
+        return []
+    if container.pnl_stop_alert_active:
+        return no_update
+
+    container.pnl_stop_alert_active = True
+    alert = container.alert_manager.send_alert(
+        AlertLevel.CRITICAL,
+        "Portfolio P&L stop breached",
+        f"Portfolio P&L ${total_pnl:,.0f} is below the stop threshold of ${threshold:,.0f}.",
+    )
+    return [_toast_for_alert(alert)]
+
+
+# ----------------------------------------------------------------------
+# Registration
+# ----------------------------------------------------------------------
+
+
+def register_callbacks(app) -> None:
+    """Attach all shell callbacks to the Dash app."""
+    app.callback(
+        Output("page-content", "children"),
+        Output("banner-setup-required", "style"),
+        Input("url", "pathname"),
+        State("store-token-configured", "data"),
+    )(render_page)
+
+    app.callback(
+        Output("store-live-prices", "data"),
+        Output("sidebar-last-updated", "children"),
+        Output("sidebar-stale-indicator", "children"),
+        Output("store-token-configured", "data"),
+        Input("interval-live-poll", "n_intervals"),
+    )(fetch_live_prices)
+
+    app.callback(
+        Output("sidebar-refresh-countdown", "children"),
+        Input("interval-countdown", "n_intervals"),
+        State("interval-live-poll", "n_intervals"),
+    )(update_countdown)
+
+    app.callback(
+        Output("store-portfolio-pnl", "data"),
+        Input("interval-pnl-refresh", "n_intervals"),
+        State("store-live-prices", "data"),
+    )(refresh_portfolio_pnl)
+
+    app.callback(
+        Output("alert-toast-container", "children"),
+        Input("interval-pnl-refresh", "n_intervals"),
+        State("store-portfolio-pnl", "data"),
+    )(check_alerts)
