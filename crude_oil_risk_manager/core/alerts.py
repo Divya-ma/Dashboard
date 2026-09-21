@@ -35,6 +35,8 @@ class AlertManager:
         self.repository = repository
         self._teams_webhook: str | None = None
         self._fallback_webhook_url = fallback_webhook_url
+        # Why the last Teams send failed (exception type or HTTP status); never contains the URL.
+        self.last_error: str | None = None
 
     def _get_teams_webhook(self) -> str | None:
         """Teams webhook URL from the settings table (falling back to the configured
@@ -96,13 +98,30 @@ class AlertManager:
             alert.channels_sent = [c for c in channels if c != "in_app"]
         return alert
 
-    def _send_teams_alert(self, alert: Alert) -> bool:
+    def send_test_alert(self, webhook_url: str | None = None) -> bool:
+        """Send a test message to Teams. It is not saved as an alert.
+
+        Uses `webhook_url` if given (e.g. a value typed in Settings but not saved
+        yet), else the configured webhook. Sends even if Teams alerts are
+        disabled, since it is an explicit user action. On failure `last_error` says why.
+        """
+        alert = Alert(
+            level=AlertLevel.INFO,
+            title="Test Alert from Crude Oil Risk Manager",
+            body="This is a test message.",
+        )
+        return self._send_teams_alert(alert, webhook_url=webhook_url)
+
+    def _send_teams_alert(self, alert: Alert, webhook_url: str | None = None) -> bool:
         """POST the alert to the Teams incoming webhook as a MessageCard.
 
-        Returns True on HTTP 200, False (logged, never raised) otherwise.
+        `webhook_url` overrides the configured webhook. Returns True on HTTP 200,
+        False (logged, never raised) otherwise.
         """
-        webhook = self._get_teams_webhook()
+        self.last_error = None
+        webhook = webhook_url or self._get_teams_webhook()
         if not webhook:
+            self.last_error = "no webhook URL configured"
             return False
 
         payload = {
@@ -127,12 +146,15 @@ class AlertManager:
             response = requests.post(webhook, json=payload, timeout=_TEAMS_TIMEOUT_SECONDS)
         except requests.exceptions.RequestException as exc:
             logger.error("Teams alert failed: %s", type(exc).__name__)
+            self.last_error = type(exc).__name__
             return False
         except Exception as exc:  # noqa: BLE001
             logger.error("Teams alert failed unexpectedly: %s", type(exc).__name__)
+            self.last_error = type(exc).__name__
             return False
 
         if response.status_code != 200:
             logger.error("Teams alert rejected with HTTP %s", response.status_code)
+            self.last_error = f"Teams rejected the message (HTTP {response.status_code})"
             return False
         return True

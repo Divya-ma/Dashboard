@@ -509,6 +509,24 @@ class Repository:
             return None
         return self._row_to_pnl_record(row)
 
+    def get_first_pnl_since(self, structure_id: str, since: datetime) -> PnLRecord | None:
+        """Return the earliest PnLRecord at or after `since` (e.g. the first of the day)."""
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT * FROM pnl_records
+                    WHERE structure_id = :structure_id AND timestamp >= :since
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                    """
+                ),
+                {"structure_id": structure_id, "since": since.isoformat()},
+            ).mappings().first()
+        if row is None:
+            return None
+        return self._row_to_pnl_record(row)
+
     def get_pnl_history(
         self,
         structure_id: str,

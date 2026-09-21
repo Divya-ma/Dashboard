@@ -145,3 +145,67 @@ def test_live_price_is_stale_false_when_recent():
     adapter = MockLiveAdapter()
     prices = adapter.get_live_prices(["CLZ26"])
     assert prices["CLZ26"].is_stale is False
+
+
+# ---------- VendorLiveAdapter.check_connection / staleness ----------
+
+
+def _vendor(tmp_db_path, staleness=10.0):
+    from adapters.live.vendor import VendorLiveAdapter
+    from db.repository import Repository
+
+    repo = Repository(str(tmp_db_path))
+    return VendorLiveAdapter(repo, staleness), repo
+
+
+def _candle(age_seconds=0.0, product="CLZ26"):
+    from datetime import datetime, timezone
+
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    return {
+        "product": product, "time": now_ms - age_seconds * 1000,
+        "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 10,
+    }
+
+
+def test_check_connection_uses_given_token_and_leaves_saved_token_alone(tmp_db_path, mocker):
+    adapter, repo = _vendor(tmp_db_path)
+    repo.set_setting("api_access_token", "saved-token")
+    get = mocker.patch(
+        "adapters.live.vendor.requests.get",
+        return_value=mocker.Mock(status_code=200, json=lambda: [_candle()]),
+    )
+
+    assert adapter.check_connection("typed-token", "CLZ26") == 1
+
+    assert get.call_args.kwargs["headers"]["Authorization"] == "Bearer typed-token"
+    assert get.call_args.kwargs["params"]["instruments"] == "CLZ26"
+    assert repo.get_setting("api_access_token") == "saved-token"
+
+
+def test_check_connection_raises_authentication_error_on_401(tmp_db_path, mocker):
+    from adapters.base import AuthenticationError
+
+    adapter, _ = _vendor(tmp_db_path)
+    mocker.patch("adapters.live.vendor.requests.get", return_value=mocker.Mock(status_code=401))
+    with pytest.raises(AuthenticationError):
+        adapter.check_connection("bad-token")
+
+
+def test_check_connection_returns_zero_when_no_candles(tmp_db_path, mocker):
+    adapter, _ = _vendor(tmp_db_path)
+    mocker.patch("adapters.live.vendor.requests.get", return_value=mocker.Mock(status_code=200, json=lambda: []))
+    assert adapter.check_connection("good-token") == 0
+
+
+def test_set_staleness_threshold_changes_what_is_flagged_stale(tmp_db_path, mocker):
+    adapter, repo = _vendor(tmp_db_path, staleness=10.0)
+    repo.set_setting("api_access_token", "tok")
+    mocker.patch(
+        "adapters.live.vendor.requests.get",
+        return_value=mocker.Mock(status_code=200, json=lambda: [_candle(age_seconds=45)]),
+    )
+    assert adapter.get_live_prices(["CLZ26"])["CLZ26"].is_stale is True
+
+    adapter.set_staleness_threshold(120.0)
+    assert adapter.get_live_prices(["CLZ26"])["CLZ26"].is_stale is False

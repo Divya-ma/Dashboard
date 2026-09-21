@@ -389,6 +389,25 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
                 needing.append(symbol)
         return needing
 
+    def get_sync_summary(self) -> dict:
+        """Summary of the sync log: last sync time (UTC) and per-status symbol counts."""
+        log_df = self._read_sync_log()
+        if log_df.empty:
+            return {"last_sync_utc": None, "symbols_tracked": 0, "symbols_ok": 0, "symbols_error": 0}
+        last_sync = pd.to_datetime(log_df["last_sync_utc"], utc=True).max()
+        ok = int((log_df["status"] == "ok").sum())
+        return {
+            "last_sync_utc": last_sync.to_pydatetime(),
+            "symbols_tracked": len(log_df),
+            "symbols_ok": ok,
+            "symbols_error": int((log_df["status"] == "error").sum()),
+        }
+
+    def get_local_data_summary(self) -> dict:
+        """Count and total size of cached symbol Parquet files (excludes the sync log)."""
+        files = [p for p in self._data_dir.glob("*/*.parquet") if p.parent.name != "_metadata"]
+        return {"symbol_count": len(files), "total_bytes": sum(p.stat().st_size for p in files)}
+
     def run_morning_sync(self, repository: Repository) -> dict[str, str]:
         """Fetch the latest 1D candle for all symbols not yet synced today. Synchronous."""
         logger.info("Morning sync: starting at %s", datetime.now(timezone.utc).isoformat())

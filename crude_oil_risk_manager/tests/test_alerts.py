@@ -200,3 +200,46 @@ def test_webhook_configured_later_is_picked_up(repo):
     assert manager._get_teams_webhook() is None
     repo.set_setting("teams_webhook_url", WEBHOOK)
     assert manager._get_teams_webhook() == WEBHOOK
+
+
+# ---------- send_test_alert / last_error ----------
+
+
+def test_send_test_alert_posts_test_message_to_given_url_without_saving(manager, repo, mocker):
+    post = mocker.patch("core.alerts.requests.post", return_value=mocker.Mock(status_code=200))
+    assert manager.send_test_alert("https://typed.example/hook") is True
+    assert post.call_args.args[0] == "https://typed.example/hook"
+    section = post.call_args.kwargs["json"]["sections"][0]
+    assert section["activityTitle"] == "Test Alert from Crude Oil Risk Manager"
+    assert {"name": "Details", "value": "This is a test message."} in section["facts"]
+    assert repo.get_alert_history() == []
+
+
+def test_send_test_alert_works_even_when_teams_alerts_disabled(teams_manager, repo, mocker):
+    repo.set_setting("teams_alerts_enabled", False)
+    post = mocker.patch("core.alerts.requests.post", return_value=mocker.Mock(status_code=200))
+    assert teams_manager.send_test_alert() is True
+    post.assert_called_once()
+
+
+def test_last_error_describes_each_failure_without_the_url(teams_manager, mocker):
+    mocker.patch("core.alerts.requests.post", side_effect=requests.exceptions.Timeout(WEBHOOK))
+    teams_manager._send_teams_alert(make_alert())
+    assert teams_manager.last_error == "Timeout"
+
+    mocker.patch("core.alerts.requests.post", return_value=mocker.Mock(status_code=400))
+    teams_manager._send_teams_alert(make_alert())
+    assert teams_manager.last_error == "Teams rejected the message (HTTP 400)"
+    assert "secret-path" not in teams_manager.last_error
+
+
+def test_last_error_set_when_no_webhook_is_configured(manager):
+    assert manager.send_test_alert() is False
+    assert manager.last_error == "no webhook URL configured"
+
+
+def test_last_error_cleared_on_success(teams_manager, mocker):
+    mocker.patch("core.alerts.requests.post", return_value=mocker.Mock(status_code=200))
+    teams_manager.last_error = "stale"
+    assert teams_manager.send_test_alert() is True
+    assert teams_manager.last_error is None

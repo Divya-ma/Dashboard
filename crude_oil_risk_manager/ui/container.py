@@ -6,6 +6,7 @@ populates the module-level `container` at startup. Callback modules import
 circular, and would re-run startup when app.py is launched as a script).
 """
 
+import threading
 from dataclasses import dataclass, field
 
 from adapters.base import HistoricalDataAdapter, LiveDataAdapter
@@ -33,6 +34,7 @@ class Container:
     alert_manager: AlertManager | None = None
     live_cache: LivePriceCache = field(default_factory=LivePriceCache)
     pnl_stop_alert_active: bool = False
+    sync_thread: threading.Thread | None = None  # latest morning-sync thread (startup or manual)
 
 
 container = Container()

@@ -23,7 +23,10 @@ from adapters.historical.vendor import VendorHistoricalAdapter  # noqa: E402
 from adapters.live.vendor import VendorLiveAdapter  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
+from core.user_settings import KEY_API_TOKEN, KEY_STALENESS  # noqa: E402
 from db.repository import Repository  # noqa: E402
+from ui.callbacks.home_callbacks import register_home_callbacks  # noqa: E402
+from ui.callbacks.settings_callbacks import register_settings_callbacks  # noqa: E402
 from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
 from ui.container import container  # noqa: E402
 from ui.layouts.shell import build_alert_container, build_global_css, build_shell  # noqa: E402
@@ -31,7 +34,6 @@ from ui.layouts.shell import build_alert_container, build_global_css, build_shel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-TOKEN_SETTING_KEY = "api_access_token"
 LIVE_POLL_INTERVAL_MS = 60 * 1000
 PNL_REFRESH_INTERVAL_MS = 5 * 1000
 COUNTDOWN_INTERVAL_MS = 1 * 1000
@@ -54,12 +56,14 @@ repository.initialize_db()
 
 
 def _is_token_configured() -> bool:
-    return bool(repository.get_setting(TOKEN_SETTING_KEY, ""))
+    return bool(repository.get_setting(KEY_API_TOKEN, ""))
 
 
 TOKEN_CONFIGURED = _is_token_configured()
 
-live_adapter = VendorLiveAdapter(repository, settings.LIVE_STALENESS_THRESHOLD_SECONDS)
+live_adapter = VendorLiveAdapter(
+    repository, repository.get_setting(KEY_STALENESS, settings.LIVE_STALENESS_THRESHOLD_SECONDS)
+)
 # One of the API's 7 calls/minute is reserved for the live price poll.
 historical_adapter = VendorHistoricalAdapter(
     repository,
@@ -85,7 +89,8 @@ def _run_morning_sync() -> None:
 
 
 if TOKEN_CONFIGURED:
-    threading.Thread(target=_run_morning_sync, name="morning-sync", daemon=True).start()
+    container.sync_thread = threading.Thread(target=_run_morning_sync, name="morning-sync", daemon=True)
+    container.sync_thread.start()
 else:
     logger.warning("No API token configured; skipping morning sync until a token is entered")
 
@@ -146,6 +151,8 @@ def serve_layout() -> html.Div:
 
 app.layout = serve_layout
 register_callbacks(app)
+register_home_callbacks(app)
+register_settings_callbacks(app)
 
 
 if __name__ == "__main__":

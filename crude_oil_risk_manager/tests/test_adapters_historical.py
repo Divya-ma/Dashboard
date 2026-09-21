@@ -244,3 +244,34 @@ def test_backfill_symbol_raises_when_start_after_end(vendor_adapter):
     end = datetime(2026, 1, 1, tzinfo=timezone.utc)
     with pytest.raises(ValueError):
         vendor_adapter.backfill_symbol("CLZ26", start, end)
+
+
+# ---------- get_sync_summary / get_local_data_summary ----------
+
+
+def test_sync_summary_empty_before_any_sync(vendor_adapter):
+    assert vendor_adapter.get_sync_summary() == {
+        "last_sync_utc": None, "symbols_tracked": 0, "symbols_ok": 0, "symbols_error": 0,
+    }
+
+
+def test_sync_summary_counts_statuses_and_reports_latest_sync(vendor_adapter):
+    vendor_adapter._update_sync_log("CLZ26", status="ok", row_count=5)
+    vendor_adapter._update_sync_log("CLF27", status="error", error_msg="no data returned")
+    summary = vendor_adapter.get_sync_summary()
+    assert summary["symbols_tracked"] == 2
+    assert summary["symbols_ok"] == 1
+    assert summary["symbols_error"] == 1
+    assert summary["last_sync_utc"].tzinfo is not None
+    assert (datetime.now(timezone.utc) - summary["last_sync_utc"]).total_seconds() < 60
+
+
+def test_local_data_summary_counts_symbol_files_but_not_the_sync_log(vendor_adapter):
+    assert vendor_adapter.get_local_data_summary() == {"symbol_count": 0, "total_bytes": 0}
+
+    vendor_adapter._save_local("CLZ26", make_ohlc_df("CLZ26", [datetime(2026, 1, 1, tzinfo=timezone.utc)]))
+    vendor_adapter._save_local("COZ26", make_ohlc_df("BRNZ26", [datetime(2026, 1, 1, tzinfo=timezone.utc)]))
+
+    summary = vendor_adapter.get_local_data_summary()  # sync_log.parquet exists now but must not count
+    assert summary["symbol_count"] == 2
+    assert summary["total_bytes"] > 0

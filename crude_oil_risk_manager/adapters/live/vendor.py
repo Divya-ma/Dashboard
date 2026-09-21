@@ -32,6 +32,19 @@ class VendorLiveAdapter(LiveDataAdapter):
         self._repository = repository
         self._staleness_threshold_seconds = staleness_threshold_seconds
 
+    def set_staleness_threshold(self, seconds: float) -> None:
+        """Change the staleness threshold used to flag prices as stale."""
+        self._staleness_threshold_seconds = seconds
+
+    def check_connection(self, token: str, symbol: str = "CLZ26") -> int:
+        """Make one real API call with the given token, without touching the saved token.
+
+        Returns the number of candles returned for `symbol`. Raises the same APIError
+        subtypes as get_live_prices (e.g. AuthenticationError for a bad token).
+        """
+        api_symbol = SymbolTranslator.internal_to_api(symbol)
+        return len(self._fetch_batch([api_symbol], {api_symbol: symbol}, token))
+
     def get_access_token(self) -> str:
         """Return the current Bearer token, fetched from the settings table."""
         token = self._repository.get_setting("api_access_token", "")

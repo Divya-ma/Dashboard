@@ -63,6 +63,22 @@ body {{ background-color: {DARK_BG}; color: {TEXT_PRIMARY}; }}
     background-color: {ACCENT_BLUE} !important;
     border-left: 3px solid {ACCENT_GREEN};
 }}
+.accordion {{
+    --bs-accordion-bg: {CARD_BG};
+    --bs-accordion-color: {TEXT_PRIMARY};
+    --bs-accordion-border-color: {BORDER_COLOR};
+    --bs-accordion-btn-color: {TEXT_PRIMARY};
+    --bs-accordion-btn-bg: {CARD_BG};
+    --bs-accordion-active-color: {TEXT_PRIMARY};
+    --bs-accordion-active-bg: {ACCENT_BLUE};
+}}
+.accordion-button::after {{ filter: invert(1); }}
+.form-control, .form-control:focus {{
+    background-color: {SIDEBAR_BG};
+    color: {TEXT_PRIMARY};
+    border-color: {BORDER_COLOR};
+}}
+.form-control::placeholder {{ color: {TEXT_SECONDARY}; }}
 """
 
 

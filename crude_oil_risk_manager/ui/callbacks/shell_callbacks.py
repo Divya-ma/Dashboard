@@ -9,7 +9,7 @@ attaches them to the app, so this module never imports ui.app.
 import importlib
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, html, no_update
@@ -17,7 +17,8 @@ from dash import Input, Output, State, html, no_update
 from adapters.base import APIError, AuthenticationError, SymbolTranslator
 from config.settings import settings
 from core.models import AlertLevel, StructureStatus
-from core.pnl import build_pnl_record, calculate_portfolio_pnl
+from core.pnl import build_pnl_record, calculate_portfolio_pnl, calculate_todays_pnl
+from core.user_settings import KEY_API_TOKEN, KEY_PNL_STOP
 from ui.container import NO_UPDATE_LABEL, container
 from ui.layouts.placeholder import (
     archive_layout,
@@ -36,9 +37,6 @@ logger = logging.getLogger(__name__)
 # extra browser tabs cannot burn the API's 7-requests/minute budget.
 LIVE_CACHE_TTL_SECONDS = 50
 POLL_PERIOD_SECONDS = 60
-
-TOKEN_SETTING_KEY = "api_access_token"
-PNL_STOP_SETTING_KEY = "alert_portfolio_pnl_stop"
 
 _OPEN_STATUSES = [StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
 
@@ -90,6 +88,9 @@ def render_page(pathname, token_configured):
     path = pathname or "/"
     if len(path) > 1:
         path = path.rstrip("/")
+
+    if path.startswith("/structures/"):
+        path = "/structures"  # /structures/<structure_id> is handled by the structures page
 
     route = _ROUTES.get(path)
     if route is None:
@@ -167,7 +168,7 @@ def fetch_live_prices(n_intervals):
     repository = container.repository
     cache = container.live_cache
 
-    token = repository.get_setting(TOKEN_SETTING_KEY, "")
+    token = repository.get_setting(KEY_API_TOKEN, "")
     if not token:
         return {}, NO_UPDATE_LABEL, stale_indicator(True), False
 
@@ -227,6 +228,46 @@ def update_countdown(countdown_intervals, poll_intervals):
 # ----------------------------------------------------------------------
 
 
+def _add_structure_details(summary: dict, structures, stale_symbols: list[str]) -> None:
+    """Add display details (name, products, status, days held) and the stale/missing symbols in use."""
+    for structure in structures:
+        summary["per_structure"][structure.structure_id].update(
+            name=structure.name,
+            products=sorted({leg.contract.product for leg in structure.legs}),
+            status=structure.status.value,
+            days_held=structure.days_held,
+        )
+    in_use = {leg.contract.symbol for s in structures for leg in s.legs if leg.is_traded}
+    summary["stale_symbols_in_use"] = sorted(in_use & set(stale_symbols))
+    summary["missing_price_symbols"] = sorted(
+        {sym for info in summary["per_structure"].values() for sym in info["missing_prices"]}
+    )
+
+
+def _todays_pnl(structures, trades, prices, stale, summary) -> float | None:
+    """Portfolio PnL change since each structure's first snapshot today (UTC).
+
+    Structures with a missing price or no snapshot yet today are skipped. Returns
+    None if the calculation fails, so the UI shows "—" instead of a wrong number.
+    """
+    start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    total = 0.0
+    try:
+        for structure in structures:
+            sid = structure.structure_id
+            if summary["per_structure"][sid]["missing_prices"]:
+                continue
+            baseline = container.repository.get_first_pnl_since(sid, start_of_day)
+            if baseline is None:
+                continue
+            current = build_pnl_record(sid, structure.legs, trades[sid], prices, stale)
+            total += calculate_todays_pnl([baseline, current])
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not calculate today's PnL")
+        return None
+    return total
+
+
 def refresh_portfolio_pnl(n_intervals, live_prices):
     """Recalculate portfolio PnL from cached prices (no API call) into a JSON-safe dict."""
     try:
@@ -235,9 +276,13 @@ def refresh_portfolio_pnl(n_intervals, live_prices):
         logger.exception("Could not load positions for PnL refresh")
         return no_update
 
-    summary = calculate_portfolio_pnl(structures, trades, _price_map(live_prices), _stale_symbols(live_prices))
+    prices = _price_map(live_prices)
+    stale = _stale_symbols(live_prices)
+    summary = calculate_portfolio_pnl(structures, trades, prices, stale)
+    _add_structure_details(summary, structures, stale)
+    summary["todays_pnl"] = _todays_pnl(structures, trades, prices, stale, summary)
     summary["calculated_at"] = summary["calculated_at"].isoformat()
-    summary["has_missing_prices"] = any(s["missing_prices"] for s in summary["per_structure"].values())
+    summary["has_missing_prices"] = bool(summary["missing_price_symbols"])
     return summary
 
 
@@ -264,7 +309,7 @@ def check_alerts(n_intervals, portfolio_pnl):
         # PnL built from partial prices could raise a false alarm; leave state untouched.
         return no_update
 
-    threshold = float(container.repository.get_setting(PNL_STOP_SETTING_KEY, settings.ALERT_PORTFOLIO_PNL_STOP))
+    threshold = float(container.repository.get_setting(KEY_PNL_STOP, settings.ALERT_PORTFOLIO_PNL_STOP))
     if total_pnl >= threshold:
         container.pnl_stop_alert_active = False
         return []

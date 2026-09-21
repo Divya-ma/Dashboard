@@ -84,11 +84,22 @@ def pnl_payload(total, **extra):
 
 
 def test_render_page_unbuilt_tabs_show_placeholder():
-    for path in ["/", "/structures", "/correlation", "/exposure", "/var-scenario",
-                 "/trade-analyzer", "/archive", "/settings"]:
+    for path in ["/structures", "/correlation", "/exposure", "/var-scenario", "/trade-analyzer", "/archive"]:
         page, _ = cb.render_page(path, True)
         assert page.children == "🚧 This tab is under construction", path
         assert page.style["color"] == COLORS["TEXT_PRIMARY"]
+
+
+def test_render_page_home_and_settings_use_real_layouts(env):
+    home, _ = cb.render_page("/", True)
+    assert "home-structures-table" in str(home)
+    settings_page, _ = cb.render_page("/settings", True)
+    assert "settings-api-token" in str(settings_page)
+
+
+def test_render_page_structure_detail_path_routes_to_structures_page():
+    page, _ = cb.render_page("/structures/abc-123", True)
+    assert page.children == "🚧 This tab is under construction"
 
 
 def test_render_page_unknown_path_is_404():
@@ -97,7 +108,7 @@ def test_render_page_unknown_path_is_404():
 
 
 def test_render_page_none_and_trailing_slash_route_correctly():
-    assert cb.render_page(None, True)[0].children.startswith("🚧")
+    assert "home-structures-table" in str(cb.render_page(None, True)[0])
     assert cb.render_page("/structures/", True)[0].children.startswith("🚧")
 
 
@@ -281,3 +292,52 @@ def test_check_alerts_ignores_pnl_built_from_missing_prices(env, repo):
 def test_check_alerts_uses_threshold_from_settings_table(env, repo):
     repo.set_setting("alert_portfolio_pnl_stop", -500.0)
     assert len(cb.check_alerts(0, pnl_payload(-1000.0))) == 1
+
+
+# ---------- enriched portfolio store (used by the Home tab) ----------
+
+
+def test_refresh_portfolio_pnl_adds_structure_details_for_home_tab(env, repo):
+    structure = open_structure(entry_price=75.0, lots=10.0)
+    repo.save_structure(structure)
+    live = {"CLZ26": {"price": 76.0, "is_stale": True}}
+
+    result = cb.refresh_portfolio_pnl(0, live)
+
+    info = result["per_structure"][structure.structure_id]
+    assert info["name"] == "CLZ26 outright"
+    assert info["products"] == ["CL"]
+    assert info["status"] == "open"
+    assert result["stale_symbols_in_use"] == ["CLZ26"]
+    assert result["missing_price_symbols"] == []
+    json.dumps(result)
+
+
+def test_refresh_portfolio_pnl_lists_missing_price_symbols(env, repo):
+    repo.save_structure(open_structure())
+    result = cb.refresh_portfolio_pnl(0, {})
+    assert result["missing_price_symbols"] == ["CLZ26"]
+
+
+def test_todays_pnl_is_change_since_first_snapshot_today(env, repo):
+    from datetime import datetime, timezone
+
+    from core.models import PnLRecord
+
+    structure = open_structure(entry_price=75.0, lots=10.0)
+    repo.save_structure(structure)
+    repo.save_pnl_record(
+        PnLRecord(
+            structure_id=structure.structure_id, unrealized_pnl=2_000.0, realized_pnl=0.0,
+            total_pnl=2_000.0, timestamp=datetime.now(timezone.utc).replace(hour=0, minute=0, second=1),
+        )
+    )
+    # live PnL is (76 - 75) * 10 * 1000 = 10,000, so today's change is 8,000
+    result = cb.refresh_portfolio_pnl(0, {"CLZ26": {"price": 76.0, "is_stale": False}})
+    assert result["todays_pnl"] == pytest.approx(8_000.0)
+
+
+def test_todays_pnl_is_zero_without_a_snapshot_today(env, repo):
+    repo.save_structure(open_structure())
+    result = cb.refresh_portfolio_pnl(0, {"CLZ26": {"price": 76.0, "is_stale": False}})
+    assert result["todays_pnl"] == 0.0

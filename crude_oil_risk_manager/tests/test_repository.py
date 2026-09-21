@@ -342,3 +342,30 @@ def test_delete_contract_succeeds_when_unreferenced(repo):
     repo.save_contract(contract)
     repo.delete_contract("CLZ25")
     assert repo.get_contract("CLZ25") is None
+
+
+def test_get_first_pnl_since_returns_earliest_record_at_or_after_cutoff(repo):
+    from datetime import datetime, timedelta, timezone
+
+    structure = Structure(
+        name="PnL history", structure_type=StructureType.OUTRIGHT, products=["CL"],
+        legs=[make_leg()], status=StructureStatus.OPEN,
+    )
+    repo.save_structure(structure)
+    midnight = datetime(2026, 9, 21, tzinfo=timezone.utc)
+
+    def record(total, when):
+        return PnLRecord(
+            structure_id=structure.structure_id, unrealized_pnl=total, realized_pnl=0.0,
+            total_pnl=total, timestamp=when,
+        )
+
+    repo.save_pnl_record(record(1.0, midnight - timedelta(hours=1)))  # yesterday
+    repo.save_pnl_record(record(2.0, midnight + timedelta(hours=3)))
+    repo.save_pnl_record(record(3.0, midnight + timedelta(hours=1)))  # earliest today
+    repo.save_pnl_record(record(4.0, midnight + timedelta(hours=5)))
+
+    first = repo.get_first_pnl_since(structure.structure_id, midnight)
+    assert first is not None and first.total_pnl == 3.0
+    assert repo.get_first_pnl_since(structure.structure_id, midnight + timedelta(days=1)) is None
+    assert repo.get_first_pnl_since("no-such-structure", midnight) is None
