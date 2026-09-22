@@ -7,6 +7,7 @@ values, call it and render the result.
 from dash import Input, Output, State
 from dash.exceptions import PreventUpdate
 
+from core.structure_builder import backfill_symbols_async
 from core.structure_view import statuses_for_filter
 from core.trade_idea import DEFAULT_LEGS, STRUCTURE_LEG_COUNTS, analyze_trade_idea, parse_idea_inputs
 from ui.container import container
@@ -50,14 +51,29 @@ def analyze(
         entry, stop, target, transaction_cost,
     )
     if idea is None:
-        return build_messages(errors, warnings)
+        return build_messages(errors, warnings), []
 
     repository = container.repository
     structures = [repository.get_structure(item["structure_id"]) for item in open_structures or []]
     structures = [s for s in structures if s is not None]
     lookback_days = int(lookback)
     analysis = analyze_trade_idea(idea, lookback_days, structures, container.data_loader)
-    return build_output(analysis, warnings, lookback_days, has_open_structures=bool(structures))
+    return build_output(analysis, warnings, lookback_days, has_open_structures=bool(structures)), analysis.missing_symbols
+
+
+def backfill_missing_symbols(n_clicks, missing_symbols):
+    """Kick off an async backfill for the legs Analyze flagged as having no local data.
+
+    Never blocks the UI: the fetch runs on a background thread (same helper the
+    Structure Builder uses for new legs), so the trader can keep working and click
+    Analyze again once it's done.
+    """
+    if not n_clicks:
+        raise PreventUpdate
+    if not missing_symbols:
+        return "Nothing to backfill."
+    backfill_symbols_async(container.historical_adapter, missing_symbols)
+    return f"🔄 Backfilling {', '.join(missing_symbols)} in the background — click Analyze again in a minute."
 
 
 def register_idea_callbacks(app) -> None:
@@ -77,6 +93,7 @@ def register_idea_callbacks(app) -> None:
 
     app.callback(
         Output("idea-output", "children"),
+        Output("idea-missing-symbols", "data"),
         Input("idea-analyze-btn", "n_clicks"),
         State("idea-structure-type", "value"),
         State("idea-leg-1-symbol", "value"),
@@ -96,3 +113,10 @@ def register_idea_callbacks(app) -> None:
         State("idea-open-structures", "data"),
         prevent_initial_call=True,
     )(analyze)
+
+    app.callback(
+        Output("idea-backfill-status", "children"),
+        Input("idea-backfill-btn", "n_clicks"),
+        State("idea-missing-symbols", "data"),
+        prevent_initial_call=True,
+    )(backfill_missing_symbols)

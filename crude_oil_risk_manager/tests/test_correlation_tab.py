@@ -1,5 +1,7 @@
 """Tests for the watchlist correlation engine, the Correlation tab layout and its callbacks."""
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,10 +10,15 @@ from dash.exceptions import PreventUpdate
 from core.correlation import (
     MIN_OBSERVATIONS,
     build_correlation_matrix_from_series,
+    build_watchlist_series,
     compute_watchlist_correlation,
     normalize_instrument_symbol,
+    rolling_correlation_from_series,
     structure_difference_series,
+    watchlist_item_missing_symbols,
     watchlist_item_warning,
+    watchlist_pair_summary,
+    year_overlay_frame,
 )
 from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError, InsufficientDataError
@@ -20,6 +27,7 @@ from db.repository import Repository
 from ui.callbacks import correlation_callbacks as cc
 from ui.container import Container
 from ui.layouts.correlation_tab import (
+    MIN_ITEMS_TEXT,
     PLACEHOLDER_TEXT,
     build_heatmap_figure,
     correlation_layout,
@@ -181,6 +189,21 @@ def test_watchlist_item_warnings(make_data, loader):
     assert "no longer open" in watchlist_item_warning(struct_item, {}, loader)
 
 
+def test_watchlist_item_missing_symbols(make_data, loader):
+    make_data(CLZ26=random_closes(40, 1))
+    ok = {"type": "instrument", "key": "CLZ26", "label": "CLZ26"}
+    missing = {"type": "instrument", "key": "CLF27", "label": "CLF27"}
+    assert watchlist_item_missing_symbols(ok, {}, loader) == []
+    assert watchlist_item_missing_symbols(missing, {}, loader) == ["CLF27"]
+
+    half = structure("half", [("CLZ26", 1, "buy", 1), ("CLF27", -1, "buy", 1)])
+    by_id = {half.structure_id: half}
+    struct_item = {"type": "structure", "key": half.structure_id, "label": "half"}
+    assert watchlist_item_missing_symbols(struct_item, by_id, loader) == ["CLF27"]
+    # A gone structure has nothing a backfill could fix.
+    assert watchlist_item_missing_symbols(struct_item, {}, loader) == []
+
+
 def instrument(symbol):
     return {"type": "instrument", "key": symbol, "label": symbol}
 
@@ -220,6 +243,79 @@ def test_compute_reports_short_history(make_data, loader):
     make_data(CLZ26=random_closes(15, 1), CLF27=random_closes(15, 2))
     result = compute_watchlist_correlation([instrument("CLZ26"), instrument("CLF27")], {}, 90, loader)
     assert result.error is None and result.observations == 14 and result.requested == 90
+
+
+def test_compute_watchlist_correlation_as_of_restricts_to_that_date(make_data, loader):
+    a = random_closes(80, 1)
+    make_data(CLZ26=a, CLF27=a + 5)  # perfectly correlated
+    items = [instrument("CLZ26"), instrument("CLF27")]
+    full = compute_watchlist_correlation(items, {}, 30, loader)
+    early = compute_watchlist_correlation(items, {}, 30, loader, as_of=date(2000, 1, 1))
+    assert full.error is None
+    assert early.error is not None  # no data that far back
+
+
+# ---------- rolling correlation / year overlay / pair summary (build_watchlist_series users) ----------
+
+
+def test_build_watchlist_series_returns_series_and_skips_invalid(make_data, loader):
+    make_data(CLZ26=random_closes(40, 1))
+    series, skipped = build_watchlist_series([instrument("CLZ26"), instrument("CLF27")], {}, loader)
+    assert list(series) == ["CLZ26"]
+    assert list(skipped) == ["CLF27"]
+
+
+def test_rolling_correlation_from_series_matches_pandas(make_data, loader):
+    a, b = random_closes(60, 1), random_closes(60, 2)
+    make_data(CLZ26=a, CLF27=b)
+    series, _ = build_watchlist_series([instrument("CLZ26"), instrument("CLF27")], {}, loader)
+    rolling = rolling_correlation_from_series(series["CLZ26"], series["CLF27"], 20)
+    expected = series["CLZ26"].rolling(20).corr(series["CLF27"]).dropna()
+    assert len(rolling) == len(expected)
+    assert np.allclose(rolling.to_numpy(), expected.to_numpy())
+
+
+def test_rolling_correlation_from_series_no_common_dates_raises(make_data, loader):
+    make_data(CLZ26=random_closes(40, 1))
+    series, _ = build_watchlist_series([instrument("CLZ26")], {}, loader)
+    disjoint = series["CLZ26"].copy()
+    disjoint.index = disjoint.index + pd.Timedelta(days=10_000)
+    with pytest.raises(InsufficientDataError):
+        rolling_correlation_from_series(series["CLZ26"], disjoint, 20)
+
+
+def test_year_overlay_frame_has_doy_and_year_columns(make_data, loader):
+    a, b = random_closes(60, 1), random_closes(60, 2)
+    make_data(CLZ26=a, CLF27=b)
+    series, _ = build_watchlist_series([instrument("CLZ26"), instrument("CLF27")], {}, loader)
+    rolling = rolling_correlation_from_series(series["CLZ26"], series["CLF27"], 20)
+    frame = year_overlay_frame(rolling)
+    assert list(frame.columns) == ["value", "doy", "year"]
+    assert len(frame) == len(rolling)
+    assert (frame["doy"] == frame.index.dayofyear).all()
+
+
+def test_watchlist_pair_summary_covers_every_pair_once(make_data, loader):
+    a, b, c = random_closes(60, 1), random_closes(60, 2), random_closes(60, 3)
+    make_data(CLZ26=a, CLF27=b, CLG27=c)
+    series, _ = build_watchlist_series(
+        [instrument("CLZ26"), instrument("CLF27"), instrument("CLG27")], {}, loader
+    )
+    rows = watchlist_pair_summary(series, 20)
+    pairs = {(r["base"], r["target"]) for r in rows}
+    assert pairs == {("CLZ26", "CLF27"), ("CLZ26", "CLG27"), ("CLF27", "CLG27")}
+    for row in rows:
+        assert row["min"] <= row["mean"] <= row["max"]
+        assert row["n_obs"] > 0
+
+
+def test_watchlist_pair_summary_skips_pairs_with_no_shared_history(make_data, loader):
+    make_data(CLZ26=random_closes(40, 1))
+    series, _ = build_watchlist_series([instrument("CLZ26")], {}, loader)
+    disjoint = series["CLZ26"].copy()
+    disjoint.index = disjoint.index + pd.Timedelta(days=10_000)
+    rows = watchlist_pair_summary({"CLZ26": series["CLZ26"], "Disjoint": disjoint}, 20)
+    assert rows == []
 
 
 # ---------- layout and figure ----------
@@ -348,34 +444,128 @@ def test_remove_item(monkeypatch):
 
 def test_watchlist_rows_show_warning_and_remove_buttons(env, make_data):
     make_data(CLZ26=random_closes(40, 1))
-    rendered = str(cc.render_watchlist_rows([instrument("CLZ26"), instrument("CLF27")]))
+    rows, backfill_style, missing = cc.render_watchlist_rows([instrument("CLZ26"), instrument("CLF27")])
+    rendered = str(rows)
     assert rendered.count("corr-remove") == 2
     assert "no price data found for this symbol — skipped" in rendered and rendered.count("skipped") == 1
-    assert "No items yet" in str(cc.render_watchlist_rows([]))
+    assert missing == ["CLF27"]
+    assert backfill_style == cc._SHOWN
+
+    rows_empty, hidden_style, none_missing = cc.render_watchlist_rows([])
+    assert "No items yet" in str(rows_empty)
+    assert hidden_style == cc._HIDDEN and none_missing == []
+
+
+def test_backfill_missing_is_async_and_never_blocks_compute(env, monkeypatch):
+    """The explicit Backfill button (unlike watchlist rendering/Compute) IS allowed to fetch."""
+    calls = []
+
+    class StubHistorical:
+        def backfill_symbol(self, symbol, start):
+            calls.append(symbol)
+            return 5
+
+    monkeypatch.setattr(cc.container, "historical_adapter", StubHistorical())
+    with pytest.raises(PreventUpdate):
+        cc.backfill_missing(None, ["CLF27"])
+    assert cc.backfill_missing(1, []) == "Nothing to backfill."
+
+    status = cc.backfill_missing(1, ["CLF27", "CLG27"])
+    assert "Backfilling" in status and "CLF27" in status and "CLG27" in status
+    import time
+    time.sleep(0.1)  # the backfill runs on a background thread
+    assert calls == ["CLF27", "CLG27"]
 
 
 def test_compute_heatmap_success_status_and_figure(env, make_data):
     make_data(CLZ26=random_closes(80, 1), CLF27=random_closes(80, 2))
-    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27")], "30")
+    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27")], "30", None)
     assert figure.layout.title.text == "Correlation Matrix — 30d"
     assert "Last computed" in status.children and "30 days" in status.children and "Only" not in status.children
 
 
 def test_compute_heatmap_notes_short_history_and_skipped_items(env, make_data):
     make_data(CLZ26=random_closes(20, 1), CLF27=random_closes(20, 2))
-    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27"), instrument("NOPE26")], "90")
+    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27"), instrument("NOPE26")], "90", None)
     assert "Only 19 common days available (requested 90d)" in status.children
     assert "Skipped: NOPE26" in status.children
 
 
 def test_compute_heatmap_inline_errors(env, make_data):
-    figure, status = cc.compute_heatmap(1, [instrument("CLZ26")], "30")
+    figure, status = cc.compute_heatmap(1, [instrument("CLZ26")], "30", None)
     assert figure.layout.annotations[0].text == "Add at least 2 items to compute"
     assert status.style["color"] == COLORS["ACCENT_RED"] and "Add at least 2 items to compute" in status.children
-    figure, status = cc.compute_heatmap(1, [instrument("A26"), instrument("B26")], "30")
+    figure, status = cc.compute_heatmap(1, [instrument("A26"), instrument("B26")], "30", None)
     assert "No valid data to compute — check symbols" in status.children
     make_data(CLZ26=random_closes(40, 1))
-    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("B26")], "30")
+    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("B26")], "30", None)
     assert "Need at least 2 valid series" in status.children
     with pytest.raises(PreventUpdate):
-        cc.compute_heatmap(None, [], "30")
+        cc.compute_heatmap(None, [], "30", None)
+
+
+def test_compute_heatmap_as_of_restricts_the_window(env, make_data):
+    a, b = random_closes(80, 1), random_closes(80, 2)
+    make_data(CLZ26=a, CLF27=b)
+    items = [instrument("CLZ26"), instrument("CLF27")]
+    figure, status = cc.compute_heatmap(1, items, "30", "2000-01-01")
+    assert "Add at least 2 items to compute" not in str(figure)  # a real (error) figure, not the placeholder
+    assert status.style["color"] == COLORS["ACCENT_RED"]  # too little data that far back
+
+
+# ---------- Time Series / Year Overlay / Summary Table callbacks ----------
+
+
+def test_populate_base_target_options_mirrors_watchlist_labels():
+    opts = cc.populate_base_target_options([instrument("CLZ26"), instrument("CLF27")])
+    assert len(opts) == 4
+    for options in opts:
+        assert [o["value"] for o in options] == ["CLZ26", "CLF27"]
+
+
+def test_compute_time_series_requires_base_and_target(env):
+    with pytest.raises(PreventUpdate):
+        cc.compute_time_series(None, [], "CLZ26", "CLF27", [20], "", ["flip"])
+    figure, status = cc.compute_time_series(1, [], None, "CLF27", [20], "", ["flip"])
+    assert "Pick a Base and a Target" in status.children
+
+
+def test_compute_time_series_success_uses_checked_and_custom_windows(env, make_data):
+    make_data(CLZ26=random_closes(80, 1), CLF27=random_closes(80, 2))
+    watchlist = [instrument("CLZ26"), instrument("CLF27")]
+    figure, status = cc.compute_time_series(1, watchlist, "CLZ26", "CLF27", [20], "45, 45 bad", ["flip", "avg"])
+    names = {trace.name for trace in figure.data}
+    assert "20d" in names and "45d" in names and "Average" in names
+    assert "windows: 20d, 45d" in status.children
+
+
+def test_compute_time_series_missing_symbol_reports_reason(env):
+    watchlist = [instrument("CLZ26"), instrument("NOPE99")]
+    figure, status = cc.compute_time_series(1, watchlist, "CLZ26", "NOPE99", [20], "", [])
+    assert status.style["color"] == COLORS["ACCENT_RED"]
+
+
+def test_compute_year_overlay_success(env, make_data):
+    make_data(CLZ26=random_closes(400, 1), CLF27=random_closes(400, 2))
+    watchlist = [instrument("CLZ26"), instrument("CLF27")]
+    figure, status = cc.compute_year_overlay(1, watchlist, "CLZ26", "CLF27", 20, ["avg"])
+    assert figure.layout.title.text.startswith("CLZ26 vs CLF27")
+    assert "year(s) of data" in status.children
+    with pytest.raises(PreventUpdate):
+        cc.compute_year_overlay(None, watchlist, "CLZ26", "CLF27", 20, [])
+
+
+def test_compute_summary_covers_every_pair(env, make_data):
+    a, b, c = random_closes(60, 1), random_closes(60, 2), random_closes(60, 3)
+    make_data(CLZ26=a, CLF27=b, CLG27=c)
+    watchlist = [instrument("CLZ26"), instrument("CLF27"), instrument("CLG27")]
+    table, status = cc.compute_summary(1, watchlist, 20)
+    assert table.data is not None and len(table.data) == 3
+    assert "3 pair(s) at 20d" in status.children
+
+
+def test_compute_summary_needs_two_items(env):
+    with pytest.raises(PreventUpdate):
+        cc.compute_summary(None, [], 20)
+    table, status = cc.compute_summary(1, [instrument("CLZ26")], 20)
+    assert MIN_ITEMS_TEXT in status.children

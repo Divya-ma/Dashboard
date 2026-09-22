@@ -1,24 +1,39 @@
-"""Correlation Heatmap callbacks: mode toggle, watchlist editing and the compute action.
+"""Correlation tab callbacks: mode toggle, watchlist editing and the four compute actions
+(Heatmap, Time Series, Year Overlay, Summary Table).
 
-The maths lives in core.correlation (series building, alignment, Pearson matrix);
-these functions gather inputs, call it and render the result. The data loader and
-repository come from ui.container.
+The maths lives in core.correlation (series building, alignment, Pearson matrix, rolling
+correlation, pair summary); these functions gather inputs, call it and render the result.
+The data loader and repository come from ui.container.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from dash import ALL, Input, Output, State, callback_context, html, no_update
 from dash.exceptions import PreventUpdate
 
 from core.correlation import (
+    build_watchlist_series,
     compute_watchlist_correlation,
     normalize_instrument_symbol,
+    rolling_correlation_from_series,
+    watchlist_item_missing_symbols,
     watchlist_item_warning,
+    watchlist_pair_summary,
+    year_overlay_frame,
 )
+from core.exceptions import CrudeOilRiskError
+from core.structure_builder import backfill_symbols_async
 from core.structure_view import statuses_for_filter
 from ui.container import container
 from ui.layouts.correlation_tab import (
+    DEFAULT_SUMMARY_WINDOW,
+    DEFAULT_TS_WINDOWS,
+    DEFAULT_YEAR_WINDOW,
+    MIN_ITEMS_TEXT,
     build_heatmap_figure,
+    build_summary_table,
+    build_time_series_figure,
+    build_year_overlay_figure,
     empty_figure,
     render_watchlist,
 )
@@ -26,6 +41,7 @@ from ui.layouts.shell import COLORS
 
 _SHOWN: dict = {}
 _HIDDEN = {"display": "none"}
+_MUTED = {"color": COLORS["TEXT_SECONDARY"], "fontSize": "13px"}
 
 
 def _open_structures() -> dict:
@@ -101,14 +117,38 @@ def remove_item(remove_clicks, watchlist):
 
 
 def render_watchlist_rows(watchlist):
-    """Watchlist rows, each with a warning if its data is missing (checked against the local Parquet)."""
+    """Watchlist rows (each with a warning if its data is missing), plus the missing-symbol
+    set for the "Backfill Missing Data" button/store."""
     items = watchlist or []
     loader = container.data_loader
     structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
-    warnings = {
-        f"{item['type']}:{item['key']}": watchlist_item_warning(item, structures, loader) for item in items
-    } if loader is not None else {}
-    return render_watchlist(items, warnings)
+    if loader is None:
+        return render_watchlist(items, {}), _HIDDEN, []
+
+    warnings = {f"{item['type']}:{item['key']}": watchlist_item_warning(item, structures, loader) for item in items}
+    missing = sorted({sym for item in items for sym in watchlist_item_missing_symbols(item, structures, loader)})
+    return render_watchlist(items, warnings), (_SHOWN if missing else _HIDDEN), missing
+
+
+def populate_base_target_options(watchlist):
+    """Base/Target dropdown options for Time Series and Year Overlay: the watchlist's own labels."""
+    labels = [item["label"] for item in (watchlist or [])]
+    options = [{"label": label, "value": label} for label in labels]
+    return options, options, options, options
+
+
+def backfill_missing(n_clicks, missing_symbols):
+    """Kick off an async backfill for every watchlist symbol currently flagged as missing.
+
+    Never blocks the UI: runs on a background thread (the same helper the Structure
+    Builder uses), so the trader can click Compute again once it finishes.
+    """
+    if not n_clicks:
+        raise PreventUpdate
+    if not missing_symbols:
+        return "Nothing to backfill."
+    backfill_symbols_async(container.historical_adapter, missing_symbols)
+    return f"🔄 Backfilling {', '.join(missing_symbols)} in the background — try Compute again in a minute."
 
 
 # ----------------------------------------------------------------------
@@ -120,24 +160,141 @@ def _status(text: str, is_error: bool = False) -> html.Div:
     return html.Div(text, style={"color": COLORS["ACCENT_RED"] if is_error else COLORS["TEXT_SECONDARY"]})
 
 
-def compute_heatmap(n_clicks, watchlist, lookback):
+def compute_heatmap(n_clicks, watchlist, lookback, as_of_str):
     """Build the watchlist series, correlate them and render the heatmap and status line."""
     if not n_clicks:
         raise PreventUpdate
     lookback_days = int(lookback)
+    as_of = date.fromisoformat(as_of_str) if as_of_str else None
     items = watchlist or []
     structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
-    result = compute_watchlist_correlation(items, structures, lookback_days, container.data_loader)
+    result = compute_watchlist_correlation(items, structures, lookback_days, container.data_loader, as_of)
 
     skipped = f" Skipped: {', '.join(result.skipped)}." if result.skipped else ""
     if result.error:
         return empty_figure(result.error, is_error=True), _status(f"⚠️ {result.error}.{skipped}", is_error=True)
 
     now = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    text = f"Last computed {now} UTC · {result.observations} days."
+    as_of_desc = f" (as of {as_of})" if as_of else ""
+    text = f"Last computed {now} UTC{as_of_desc} · {result.observations} days."
     if result.observations < lookback_days:
         text += f" Only {result.observations} common days available (requested {lookback_days}d)."
     return build_heatmap_figure(result.matrix, lookback_days), _status(text + skipped)
+
+
+# ----------------------------------------------------------------------
+# Time Series / Year Overlay / Summary Table
+# ----------------------------------------------------------------------
+
+
+def _items_for_labels(watchlist, labels: set[str]) -> list[dict]:
+    return [item for item in (watchlist or []) if item["label"] in labels]
+
+
+def _series_for_pair(watchlist, base: str, target: str) -> tuple[dict, dict]:
+    """{label: series} for just the base/target watchlist items, plus {label: skip reason}."""
+    items = _items_for_labels(watchlist, {base, target})
+    structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
+    return build_watchlist_series(items, structures, container.data_loader)
+
+
+def _parse_windows(checked: list[int] | None, custom_text: str | None, defaults: list[int]) -> list[int]:
+    windows = set(checked or [])
+    for token in (custom_text or "").replace(",", " ").split():
+        try:
+            window = int(token)
+        except ValueError:
+            continue
+        if window > 1:
+            windows.add(window)
+    return sorted(windows) if windows else sorted(defaults)
+
+
+def _no_pair_selected():
+    return empty_figure("Pick a Base and a Target column first.", is_error=True), _status(
+        "Pick a Base and a Target column first.", is_error=True
+    )
+
+
+def compute_time_series(n_clicks, watchlist, base, target, windows_checked, custom_windows, options):
+    """Trailing correlation over full history for one pair, any window(s) overlaid."""
+    if not n_clicks:
+        raise PreventUpdate
+    if not base or not target:
+        return _no_pair_selected()
+
+    windows = _parse_windows(windows_checked, custom_windows, DEFAULT_TS_WINDOWS)
+    series, skipped = _series_for_pair(watchlist, base, target)
+    if base not in series or target not in series:
+        reason = "; ".join(f"{label}: {msg}" for label, msg in skipped.items()) or "no local data"
+        return empty_figure(reason, is_error=True), _status(f"⚠️ {reason}", is_error=True)
+
+    series_by_window, errors = {}, []
+    for window in windows:
+        try:
+            series_by_window[window] = rolling_correlation_from_series(series[base], series[target], window)
+        except (CrudeOilRiskError, ValueError) as exc:
+            errors.append(f"{window}d: {exc}")
+    if not series_by_window:
+        return empty_figure("No rolling correlation available for these windows.", is_error=True), _status(
+            "⚠️ " + "; ".join(errors), is_error=True
+        )
+
+    options = options or []
+    figure = build_time_series_figure(
+        series_by_window, base, target, highlight_flips="flip" in options, show_avg="avg" in options
+    )
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    text = f"Last computed {now} UTC · windows: {', '.join(f'{w}d' for w in series_by_window)}."
+    if errors:
+        text += " Skipped: " + "; ".join(errors)
+    return figure, _status(text)
+
+
+def compute_year_overlay(n_clicks, watchlist, base, target, window, options):
+    """The same pair's rolling correlation compared year over year by day-of-year."""
+    if not n_clicks:
+        raise PreventUpdate
+    if not base or not target:
+        return _no_pair_selected()
+
+    window = int(window or DEFAULT_YEAR_WINDOW)
+    series, skipped = _series_for_pair(watchlist, base, target)
+    if base not in series or target not in series:
+        reason = "; ".join(f"{label}: {msg}" for label, msg in skipped.items()) or "no local data"
+        return empty_figure(reason, is_error=True), _status(f"⚠️ {reason}", is_error=True)
+
+    try:
+        rolling = rolling_correlation_from_series(series[base], series[target], window)
+    except (CrudeOilRiskError, ValueError) as exc:
+        return empty_figure(str(exc), is_error=True), _status(f"⚠️ {exc}", is_error=True)
+
+    frame = year_overlay_frame(rolling)
+    figure = build_year_overlay_figure(frame, base, target, window, show_avg="avg" in (options or []))
+    years = sorted(frame["year"].unique().tolist())
+    return figure, _status(f"{len(years)} year(s) of data: {', '.join(str(y) for y in years)}.")
+
+
+def compute_summary(n_clicks, watchlist, window):
+    """Mean/std/min/max/last rolling correlation across every valid watchlist pair."""
+    if not n_clicks:
+        raise PreventUpdate
+    items = watchlist or []
+    if len(items) < 2:
+        return html.Div(), _status(MIN_ITEMS_TEXT, is_error=True)
+
+    window = int(window or DEFAULT_SUMMARY_WINDOW)
+    structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
+    series, skipped = build_watchlist_series(items, structures, container.data_loader)
+    if len(series) < 2:
+        return html.Div(), _status("Need at least 2 valid series", is_error=True)
+
+    rows = watchlist_pair_summary(series, window)
+    if not rows:
+        return html.Div(), _status("No pair had enough shared history for this window.", is_error=True)
+
+    skip_text = f" Skipped: {', '.join(skipped)}." if skipped else ""
+    return build_summary_table(rows), _status(f"{len(rows)} pair(s) at {window}d.{skip_text}")
 
 
 # ----------------------------------------------------------------------
@@ -180,8 +337,17 @@ def register_correlation_callbacks(app) -> None:
 
     app.callback(
         Output("corr-watchlist-list", "children"),
+        Output("corr-backfill-btn", "style"),
+        Output("corr-missing-symbols", "data"),
         Input("corr-watchlist", "data"),
     )(render_watchlist_rows)
+
+    app.callback(
+        Output("corr-backfill-status", "children"),
+        Input("corr-backfill-btn", "n_clicks"),
+        State("corr-missing-symbols", "data"),
+        prevent_initial_call=True,
+    )(backfill_missing)
 
     app.callback(
         Output("corr-heatmap", "figure"),
@@ -189,5 +355,48 @@ def register_correlation_callbacks(app) -> None:
         Input("corr-compute-btn", "n_clicks"),
         State("corr-watchlist", "data"),
         State("corr-lookback", "value"),
+        State("corr-asof-date", "date"),
         prevent_initial_call=True,
     )(compute_heatmap)
+
+    app.callback(
+        Output("corr-ts-base", "options"),
+        Output("corr-ts-target", "options"),
+        Output("corr-yr-base", "options"),
+        Output("corr-yr-target", "options"),
+        Input("corr-watchlist", "data"),
+    )(populate_base_target_options)
+
+    app.callback(
+        Output("corr-ts-graph", "figure"),
+        Output("corr-ts-status", "children"),
+        Input("corr-ts-compute-btn", "n_clicks"),
+        State("corr-watchlist", "data"),
+        State("corr-ts-base", "value"),
+        State("corr-ts-target", "value"),
+        State("corr-ts-windows", "value"),
+        State("corr-ts-custom-windows", "value"),
+        State("corr-ts-options", "value"),
+        prevent_initial_call=True,
+    )(compute_time_series)
+
+    app.callback(
+        Output("corr-yr-graph", "figure"),
+        Output("corr-yr-status", "children"),
+        Input("corr-yr-compute-btn", "n_clicks"),
+        State("corr-watchlist", "data"),
+        State("corr-yr-base", "value"),
+        State("corr-yr-target", "value"),
+        State("corr-yr-window", "value"),
+        State("corr-yr-options", "value"),
+        prevent_initial_call=True,
+    )(compute_year_overlay)
+
+    app.callback(
+        Output("corr-sum-table-wrap", "children"),
+        Output("corr-sum-status", "children"),
+        Input("corr-sum-compute-btn", "n_clicks"),
+        State("corr-watchlist", "data"),
+        State("corr-sum-window", "value"),
+        prevent_initial_call=True,
+    )(compute_summary)

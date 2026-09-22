@@ -150,7 +150,8 @@ def test_analysis_risk_reward_dollars_and_unit_series(make_data, loader):
 def test_analysis_missing_symbols_are_reported(make_data, loader):
     make_data(CLZ26=random_closes(40, 1))
     result = analyze_trade_idea(idea([leg("CLZ26"), leg("CLF27"), leg("NOPE")]), 30, [], loader)
-    assert result.errors == ["No historical data for CLF27", "No historical data for NOPE"]
+    assert result.errors == ["No local historical data for CLF27", "No local historical data for NOPE"]
+    assert result.missing_symbols == ["CLF27", "NOPE"]
     assert result.unit_series is None
 
 
@@ -284,7 +285,7 @@ def run_analyze(**overrides):
                 symbol_2=None, direction_2="buy", lots_2=1, symbol_3=None, direction_3="buy", lots_3=1,
                 entry=75.0, stop=74.0, target=77.0, transaction_cost=None, lookback="30", open_structures=[])
     args.update(overrides)
-    return ic.analyze(**args)
+    return ic.analyze(**args)[0]
 
 
 def test_load_open_structures_on_tab_open(env, repo):
@@ -306,7 +307,7 @@ def test_analyze_validation_errors_show_inline(env):
 
 
 def test_analyze_missing_symbol_error(env):
-    assert "No historical data for CLZ26" in str(run_analyze())
+    assert "No local historical data for CLZ26" in str(run_analyze())
 
 
 def test_analyze_full_output_with_open_structure_correlation(env, repo, make_data):

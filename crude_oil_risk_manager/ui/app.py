@@ -20,7 +20,7 @@ import dash_bootstrap_components as dbc  # noqa: E402
 from dash import dcc, html  # noqa: E402
 
 from adapters.historical.vendor import VendorHistoricalAdapter  # noqa: E402
-from adapters.live.vendor import VendorLiveAdapter  # noqa: E402
+from adapters.live.fairvalue import FairValueLiveAdapter  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
 from core.data_loader import DataLoader  # noqa: E402
@@ -49,7 +49,7 @@ from ui.layouts.structure_builder import builder_save_toast, new_structure_modal
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-LIVE_POLL_INTERVAL_MS = 60 * 1000
+LIVE_POLL_INTERVAL_MS = 10 * 1000  # /fairvalue/ has its own independent 7 req/min budget
 PNL_REFRESH_INTERVAL_MS = 5 * 1000
 COUNTDOWN_INTERVAL_MS = 1 * 1000
 
@@ -76,7 +76,7 @@ def _is_token_configured() -> bool:
 
 TOKEN_CONFIGURED = _is_token_configured()
 
-live_adapter = VendorLiveAdapter(
+live_adapter = FairValueLiveAdapter(
     repository, repository.get_setting(KEY_STALENESS, settings.LIVE_STALENESS_THRESHOLD_SECONDS)
 )
 # One of the API's 7 calls/minute is reserved for the live price poll.

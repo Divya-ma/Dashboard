@@ -20,7 +20,7 @@ from db.repository import Repository
 from ui.callbacks import structure_builder_callbacks as bc
 from ui.callbacks import structures_callbacks as sc
 from ui.container import Container
-from ui.layouts.structure_builder import new_structure_modal, render_step_indicator
+from ui.layouts.structure_builder import new_structure_modal, render_correlation_table, render_step_indicator
 
 
 # ---------- decomposition ----------
@@ -240,6 +240,39 @@ def test_check_portfolio_correlation_survives_data_errors(monkeypatch):
     monkeypatch.setattr(sb, "get_correlation_with_portfolio", boom)
     rows = sb.check_portfolio_correlation(["CLG27"], [structure("a", ["CLZ26"], [1])], 60, None)
     assert rows[0]["correlation"] is None and rows[0]["classification"] == "insufficient_data"
+    assert rows[0]["error"] == "no data"
+
+
+def test_render_correlation_table_shows_the_real_error_reason():
+    rows = [
+        {
+            "candidate": "CLZ26", "existing_symbol": "CLF27", "existing_structure": "Spread A",
+            "correlation": None, "classification": "insufficient_data",
+            "error": "API access token not configured. Please enter your Bearer token in the Settings tab.",
+        }
+    ]
+    text = str(render_correlation_table(rows))
+    assert "API access token not configured" in text
+    assert "Insufficient data for CLZ26 / CLF27" not in text  # real reason replaces the generic one
+
+
+def test_render_correlation_table_falls_back_to_generic_message_without_an_error(monkeypatch):
+    rows = [
+        {
+            "candidate": "CLZ26", "existing_symbol": "CLF27", "existing_structure": "Spread A",
+            "correlation": None, "classification": "insufficient_data", "error": None,
+        }
+    ]
+    assert "Insufficient data for CLZ26 / CLF27" in str(render_correlation_table(rows))
+
+
+def test_check_portfolio_correlation_carries_the_real_error_reason(monkeypatch):
+    def fake(candidate, portfolio_symbols, window, loader):
+        return {s: {"correlation": None, "error": "no local data for CLG27"} for s in portfolio_symbols}
+
+    monkeypatch.setattr(sb, "get_correlation_with_portfolio", fake)
+    rows = sb.check_portfolio_correlation(["CLG27"], [structure("a", ["CLZ26"], [1])], 60, object())
+    assert rows[0]["error"] == "no local data for CLG27"
 
 
 # ---------- layout ----------

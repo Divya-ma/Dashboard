@@ -273,7 +273,7 @@ def check_portfolio_correlation(
             results = get_correlation_with_portfolio(candidate, list(names_by_symbol), window, data_loader)
         except (CrudeOilRiskError, ValueError) as exc:
             logger.warning("Correlation check failed for %s: %s", candidate, exc)
-            results = {s: {"correlation": None} for s in names_by_symbol}
+            results = {s: {"correlation": None, "error": str(exc)} for s in names_by_symbol}
         for existing, entry in results.items():
             correlation = entry["correlation"]
             rows.append(
@@ -283,6 +283,7 @@ def check_portfolio_correlation(
                     "existing_structure": ", ".join(names_by_symbol[existing]),
                     "correlation": correlation,
                     "classification": classify_correlation(correlation),
+                    "error": entry.get("error"),
                 }
             )
     return rows

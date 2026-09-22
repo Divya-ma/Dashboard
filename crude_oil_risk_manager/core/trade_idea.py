@@ -89,6 +89,7 @@ class IdeaAnalysis:
     skipped_structures: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    missing_symbols: list[str] = field(default_factory=list)  # legs with no local data; see analyze_trade_idea
 
 
 # ----------------------------------------------------------------------
@@ -207,9 +208,12 @@ def analyze_trade_idea(
 ) -> IdeaAnalysis:
     """Risk/reward, historical context, portfolio correlation and the hypothetical PnL series.
 
-    Symbols with no local history stop the analysis ("No historical data for X"). Open
-    structures without data are left out of the correlation table and listed in
-    `skipped_structures`.
+    Reads local Parquet only — it must never trigger a synchronous API backfill (that would
+    block the Dash worker for as long as the backfill takes). A leg with no local history
+    stops the analysis; its symbol is also collected in `result.missing_symbols` so the UI
+    can offer an explicit, asynchronous "Backfill Missing Data" action instead (see
+    ui/callbacks/idea_callbacks.py). Open structures without data are left out of the
+    correlation table and listed in `skipped_structures`.
     """
     result = IdeaAnalysis(idea=idea, requested=lookback_days)
     for leg in idea.legs:
@@ -218,7 +222,8 @@ def analyze_trade_idea(
         except CrudeOilRiskError:
             missing = True
         if missing:
-            result.errors.append(f"No historical data for {leg['symbol']}")
+            result.errors.append(f"No local historical data for {leg['symbol']}")
+            result.missing_symbols.append(leg["symbol"])
     if result.errors:
         return result
 

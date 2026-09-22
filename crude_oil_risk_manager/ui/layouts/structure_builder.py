@@ -89,7 +89,8 @@ def render_correlation_table(rows: list[dict]):
     for row in rows:
         label, color = CLASSIFICATION_DISPLAY[row["classification"]]
         if row["correlation"] is None:
-            correlation = html.Span(f"Insufficient data for {row['candidate']} / {row['existing_symbol']}", style=_MUTED)
+            reason = row.get("error") or f"Insufficient data for {row['candidate']} / {row['existing_symbol']}"
+            correlation = html.Span(reason, style=_MUTED)
             chip = html.Span(label, style={"color": color})
         else:
             correlation = f"{row['correlation']:+.2f}"

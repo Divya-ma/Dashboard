@@ -171,20 +171,29 @@ def get_correlation_with_portfolio(
     """Correlation of a candidate symbol against every portfolio symbol.
 
     Returns {existing_symbol: {"correlation": float | None, "classification": str,
-    "window_used": int, "common_dates": int}}. Every portfolio symbol is
-    always present as a key; correlation is None when the calculation failed
-    (window_used is then 0). window_used is the number of observations
-    actually used in the correlation. Interface for the Structure Builder
-    live correlation check.
+    "window_used": int, "common_dates": int, "error": str | None}}. Every portfolio
+    symbol is always present as a key; correlation is None when the calculation
+    failed (window_used is then 0), and "error" carries the reason (e.g. "no API
+    token configured", "InsufficientDataError: ...") so the caller can show *why*
+    instead of a blanket "insufficient data" — this is what feeds the Structure
+    Builder's live correlation check. window_used is the number of observations
+    actually used in the correlation.
+
+    load_price_differences backfills a symbol with no local data on demand, so a
+    brand-new leg is fetched here rather than failing outright; that backfill runs
+    synchronously (this is a user-triggered "Refresh Correlation" click, not a poll),
+    so it can take a while the first time a symbol is used.
     """
     _validate_window(window)
     results: dict[str, dict] = {}
 
+    candidate_diffs = None
+    candidate_error: str | None = None
     try:
         candidate_diffs = data_loader.load_price_differences(candidate_symbol, min_rows=window)
     except CrudeOilRiskError as exc:
+        candidate_error = str(exc)
         logger.warning("Cannot load candidate %s: %s", candidate_symbol, exc)
-        candidate_diffs = None
 
     for existing in portfolio_symbols:
         entry = {
@@ -192,6 +201,7 @@ def get_correlation_with_portfolio(
             "classification": "insufficient_data",
             "window_used": 0,
             "common_dates": 0,
+            "error": candidate_error,
         }
         results[existing] = entry
         if candidate_diffs is None:
@@ -204,6 +214,7 @@ def get_correlation_with_portfolio(
             aligned_a, aligned_b = data_loader.align_series(candidate_diffs, existing_diffs)
             corr = _pearson_last_window(aligned_a, aligned_b, window, candidate_symbol, existing)
         except (CrudeOilRiskError, ValueError) as exc:
+            entry["error"] = str(exc)
             logger.warning("Correlation failed for %s / %s: %s", candidate_symbol, existing, exc)
             continue
 
@@ -245,24 +256,30 @@ def normalize_instrument_symbol(symbol: str | None) -> str:
 
 
 def build_correlation_matrix_from_series(
-    series_by_label: dict[str, pd.Series], window: int
+    series_by_label: dict[str, pd.Series], window: int, as_of: date | None = None
 ) -> tuple[pd.DataFrame, int]:
     """Pearson correlation matrix of pre-built price-difference series.
 
-    Series are inner-joined on date and the most recent `window` common days are used
-    (fewer if that is all there is). Returns (matrix, observations_used). A pair whose
-    series has zero variance over the window is NaN, like the symbol-based matrix.
-    Raises InsufficientDataError if there are fewer than 2 series or fewer than
-    MIN_OBSERVATIONS common days.
+    Series are inner-joined on date; if `as_of` is given, dates after it are dropped
+    first (so the matrix reflects the portfolio as it stood on that date), then the
+    most recent `window` common days are used (fewer if that is all there is). Returns
+    (matrix, observations_used). A pair whose series has zero variance over the window
+    is NaN, like the symbol-based matrix. Raises InsufficientDataError if there are
+    fewer than 2 series or fewer than MIN_OBSERVATIONS common days (at or before
+    `as_of`, when given).
     """
     _validate_window(window)
     if len(series_by_label) < 2:
         raise InsufficientDataError("Need at least 2 valid series to compute a correlation matrix.")
     aligned = pd.concat(list(series_by_label.values()), axis=1, join="inner", keys=list(series_by_label))
     aligned = aligned.dropna().sort_index()
+    if as_of is not None:
+        aligned = aligned[aligned.index <= pd.Timestamp(as_of, tz="UTC")]
     if len(aligned) < MIN_OBSERVATIONS:
+        as_of_desc = f" as of {as_of}" if as_of is not None else ""
         raise InsufficientDataError(
-            f"Only {len(aligned)} common days across the selected series; at least {MIN_OBSERVATIONS} are needed."
+            f"Only {len(aligned)} common days across the selected series{as_of_desc}; "
+            f"at least {MIN_OBSERVATIONS} are needed."
         )
     used = aligned.iloc[-window:]
     n = len(used)
@@ -314,6 +331,23 @@ def _safe_range(symbol: str, data_loader: DataLoader):
         return None
 
 
+def watchlist_item_missing_symbols(
+    item: dict, structures_by_id: dict[str, Structure], data_loader: DataLoader
+) -> list[str]:
+    """Exchange-quoted symbols this watchlist item needs but has no local price history for.
+
+    Empty if the item can already be computed (or its structure/symbol is simply gone,
+    which no backfill can fix). Used to offer a one-click "Backfill Missing Data" action
+    instead of leaving the item stuck on "insufficient data" forever.
+    """
+    if item["type"] == "structure":
+        structure = structures_by_id.get(item["key"])
+        if structure is None:
+            return []
+        return [leg.contract.symbol for leg in structure.legs if _safe_range(leg.contract.symbol, data_loader) is None]
+    return [] if _safe_range(item["key"], data_loader) is not None else [item["key"]]
+
+
 def watchlist_item_warning(
     item: dict, structures_by_id: dict[str, Structure], data_loader: DataLoader
 ) -> str | None:
@@ -322,9 +356,39 @@ def watchlist_item_warning(
         structure = structures_by_id.get(item["key"])
         if structure is None:
             return "structure not found or no longer open"
-        missing = [leg.contract.symbol for leg in structure.legs if _safe_range(leg.contract.symbol, data_loader) is None]
+        missing = watchlist_item_missing_symbols(item, structures_by_id, data_loader)
         return f"missing price data for {', '.join(missing)}" if missing else None
     return None if _safe_range(item["key"], data_loader) is not None else "no price data found for this symbol"
+
+
+def build_watchlist_series(
+    items: list[dict], structures_by_id: dict[str, Structure], data_loader: DataLoader
+) -> tuple[dict[str, pd.Series], dict[str, str]]:
+    """Price-difference series for every watchlist item ({"type", "key", "label"}), by label.
+
+    Instruments use their own exchange-quoted price differences; structures use
+    `structure_difference_series`. Local Parquet only — never backfills (see
+    `_load_local_differences`), so this is safe to call on every render/compute, not just
+    on an explicit user action. Items with missing/invalid data are skipped rather than
+    failing the run; the second dict is {label: reason}. Shared by every watchlist view
+    (Heatmap, Time Series, Year Overlay, Summary Table) so they always agree on what each
+    item's series actually is.
+    """
+    series: dict[str, pd.Series] = {}
+    skipped: dict[str, str] = {}
+    for item in items:
+        label = item["label"]
+        try:
+            if item["type"] == "structure":
+                structure = structures_by_id.get(item["key"])
+                if structure is None:
+                    raise CrudeOilRiskError("structure not found or no longer open")
+                series[label] = structure_difference_series(structure, data_loader)
+            else:
+                series[label] = _load_local_differences(item["key"], data_loader)
+        except (CrudeOilRiskError, ValueError) as exc:
+            skipped[label] = str(exc)
+    return series, skipped
 
 
 @dataclass
@@ -343,31 +407,19 @@ def compute_watchlist_correlation(
     structures_by_id: dict[str, Structure],
     lookback_days: int,
     data_loader: DataLoader,
+    as_of: date | None = None,
 ) -> WatchlistResult:
     """Correlation matrix of watchlist items ({"type": instrument|structure, "key", "label"}).
 
-    Instruments use their own exchange-quoted price differences; structures use
-    `structure_difference_series`. Items with missing data are skipped (and reported in
-    `skipped`) rather than failing the run.
+    `as_of` restricts the matrix to data at or before that date (the Heatmap tab's as-of
+    slider); omit it for "as of the latest available date" (the default).
     """
     result = WatchlistResult(requested=lookback_days)
     if len(items) < 2:
         result.error = "Add at least 2 items to compute"
         return result
 
-    series: dict[str, pd.Series] = {}
-    for item in items:
-        label = item["label"]
-        try:
-            if item["type"] == "structure":
-                structure = structures_by_id.get(item["key"])
-                if structure is None:
-                    raise CrudeOilRiskError("structure not found or no longer open")
-                series[label] = structure_difference_series(structure, data_loader)
-            else:
-                series[label] = _load_local_differences(item["key"], data_loader)
-        except (CrudeOilRiskError, ValueError) as exc:
-            result.skipped[label] = str(exc)
+    series, result.skipped = build_watchlist_series(items, structures_by_id, data_loader)
 
     if not series:
         result.error = "No valid data to compute — check symbols"
@@ -375,10 +427,77 @@ def compute_watchlist_correlation(
         result.error = "Need at least 2 valid series"
     else:
         try:
-            result.matrix, result.observations = build_correlation_matrix_from_series(series, lookback_days)
+            result.matrix, result.observations = build_correlation_matrix_from_series(series, lookback_days, as_of)
         except InsufficientDataError as exc:
             result.error = str(exc)
     return result
+
+
+# ----------------------------------------------------------------------
+# Time Series / Year Overlay / Summary Table (Correlation tab)
+# ----------------------------------------------------------------------
+
+
+def rolling_correlation_from_series(series_a: pd.Series, series_b: pd.Series, window: int) -> pd.Series:
+    """Rolling `window`-day Pearson correlation between two pre-built price-difference series.
+
+    Series are inner-joined on date first (no forward-fill). Leading NaNs (the first
+    window-1 observations) and any undefined windows (zero variance) are dropped. Raises
+    InsufficientDataError if the two series share no common dates at all, or if nothing
+    survives the rolling computation (e.g. window larger than the shared history).
+    """
+    _validate_window(window)
+    aligned = pd.concat([series_a, series_b], axis=1, join="inner").dropna().sort_index()
+    if aligned.empty:
+        raise InsufficientDataError(f"{series_a.name} and {series_b.name} share no common trading days.")
+    a, b = aligned.iloc[:, 0], aligned.iloc[:, 1]
+    rolling = a.rolling(window).corr(b).replace([np.inf, -np.inf], np.nan).dropna().clip(-1.0, 1.0)
+    if rolling.empty:
+        raise InsufficientDataError(
+            f"No {window}-day rolling correlation available for {series_a.name} vs {series_b.name}: "
+            f"only {len(aligned)} common days."
+        )
+    rolling.name = f"{series_a.name}|{series_b.name}"
+    return rolling
+
+
+def year_overlay_frame(rolling: pd.Series) -> pd.DataFrame:
+    """A rolling-correlation series reshaped into columns (value, doy, year) for a seasonal overlay."""
+    frame = pd.DataFrame({"value": rolling.to_numpy(dtype=float)}, index=rolling.index)
+    frame["doy"] = frame.index.dayofyear
+    frame["year"] = frame.index.year
+    return frame
+
+
+def watchlist_pair_summary(series_by_label: dict[str, pd.Series], window: int) -> list[dict]:
+    """Mean/std/min/max/last rolling correlation, at `window`, for every pair in the watchlist.
+
+    Base/target pairing mirrors the heatmap: every label paired with every label after it
+    (so each pair appears once). A pair with no usable rolling correlation (e.g. no shared
+    history) is left out rather than raising.
+    """
+    _validate_window(window)
+    labels = list(series_by_label)
+    rows = []
+    for i, base in enumerate(labels):
+        for target in labels[i + 1:]:
+            try:
+                s = rolling_correlation_from_series(series_by_label[base], series_by_label[target], window)
+            except InsufficientDataError:
+                continue
+            rows.append(
+                {
+                    "base": base,
+                    "target": target,
+                    "mean": float(s.mean()),
+                    "std": float(s.std()) if len(s) > 1 else 0.0,
+                    "min": float(s.min()),
+                    "max": float(s.max()),
+                    "last": float(s.iloc[-1]),
+                    "n_obs": int(len(s)),
+                }
+            )
+    return rows
 
 
 # TODO: Structure-vs-structure correlation.

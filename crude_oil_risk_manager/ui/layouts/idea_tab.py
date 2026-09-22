@@ -173,10 +173,25 @@ def build_messages(errors: list[str], warnings: list[str]) -> list:
     ]
 
 
+def build_missing_data_action(missing_symbols: list[str]) -> html.Div:
+    """A one-click, non-blocking backfill offer for legs with no local price history."""
+    if not missing_symbols:
+        return html.Div()
+    return html.Div(
+        [
+            dbc.Button(
+                f"🔄 Backfill {len(missing_symbols)} Missing Symbol(s) in the Background",
+                id="idea-backfill-btn", color="secondary", outline=True, size="sm", className="mb-2",
+            ),
+            html.Div(id="idea-backfill-status", style=_MUTED),
+        ]
+    )
+
+
 def build_output(analysis: IdeaAnalysis, warnings: list[str], lookback_days: int, has_open_structures: bool) -> html.Div:
     """The right column after Analyze: warnings, then sections A-D (or the errors)."""
     if analysis.errors:
-        return html.Div(build_messages(analysis.errors, warnings))
+        return html.Div([*build_messages(analysis.errors, warnings), build_missing_data_action(analysis.missing_symbols)])
     return html.Div(
         [
             *build_messages([], [*warnings, *analysis.warnings]),
@@ -271,6 +286,7 @@ def trade_analyzer_layout() -> html.Div:
     return html.Div(
         [
             dcc.Store(id="idea-open-structures", data=[]),
+            dcc.Store(id="idea-missing-symbols", data=[]),
             html.H3("🎯 Trade Idea Analyzer", style={**_HEADING, "marginBottom": "16px"}),
             dbc.Row(
                 [

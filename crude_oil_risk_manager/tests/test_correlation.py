@@ -159,6 +159,20 @@ def test_portfolio_correlation_missing_candidate_returns_none_for_all(tmp_path, 
     assert result["CLF27"]["correlation"] is None
 
 
+def test_portfolio_correlation_reports_the_real_failure_reason(tmp_path, loader, create_synthetic_parquet):
+    """A missing candidate/existing symbol carries WHY it failed, not just a blanket None."""
+    create_synthetic_parquet(tmp_path, "CLF27", closes=random_closes(100, seed=1))
+    result = get_correlation_with_portfolio("CLZ26", ["CLF27"], 30, loader)
+    assert result["CLF27"]["error"]  # candidate failure reason, applied to every entry
+
+    result = get_correlation_with_portfolio("CLF27", ["CLZ26"], 30, loader)
+    assert result["CLZ26"]["error"]  # existing-symbol failure reason
+
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(100, seed=2))
+    ok = get_correlation_with_portfolio("CLZ26", ["CLF27"], 30, loader)
+    assert ok["CLF27"]["error"] is None
+
+
 # ---------- DataLoader ----------
 
 
