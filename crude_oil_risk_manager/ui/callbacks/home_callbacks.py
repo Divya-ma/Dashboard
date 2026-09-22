@@ -59,6 +59,13 @@ def _realized_value(value: float | None) -> tuple[str, dict]:
     return format_pnl(value), style
 
 
+def _reset_note(baseline: float | None) -> str:
+    """Small note under Total Realized PnL when Settings > Account Reset has a baseline active."""
+    if not baseline:
+        return ""
+    return f"🔄 Reset active — shown relative to a ${baseline:,.0f} baseline (Settings > Account Reset)"
+
+
 def _margin_card() -> list:
     """Margin usage is not tracked (contracts carry no margin data); only the configured limit is shown."""
     limit = container.repository.get_setting(KEY_MARGIN_LIMIT, settings.DEFAULT_MARGIN_LIMIT)
@@ -97,16 +104,18 @@ def update_home_metrics(portfolio_pnl):
     """
     if not portfolio_pnl:
         empty_text, empty_style = _realized_value(None)
-        return (empty_text, empty_style, empty_text, empty_style, "—", "—", "—", "—", "—", "—", "—", _HIDDEN, "")
+        return (empty_text, empty_style, "", empty_text, empty_style, "—", "—", "—", "—", "—", "—", "—", _HIDDEN, "")
 
     per_structure = portfolio_pnl.get("per_structure", {})
     banner_style, banner_children = _stale_banner(portfolio_pnl)
     total_text, total_style = _realized_value(portfolio_pnl.get("total_realized_all_time"))
     today_text, today_style = _realized_value(portfolio_pnl.get("todays_realized_pnl"))
+    reset_note = _reset_note(portfolio_pnl.get("pnl_baseline"))
 
     return (
         total_text,
         total_style,
+        reset_note,
         today_text,
         today_style,
         _pnl_span(portfolio_pnl["total_unrealized"]),
@@ -156,6 +165,7 @@ def register_home_callbacks(app) -> None:
     app.callback(
         Output("home-total-realized-pnl", "children"),
         Output("home-total-realized-pnl", "style"),
+        Output("home-pnl-reset-note", "children"),
         Output("home-today-realized-pnl", "children"),
         Output("home-today-realized-pnl", "style"),
         Output("home-card-unrealized-pnl", "children"),

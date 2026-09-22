@@ -44,6 +44,16 @@ class Leg(BaseModel):
         description="'buy' or 'sell': the side the position was entered on. Flips the PnL sign.",
     )
 
+    transaction_cost_per_lot: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "$ cost per lot for a SINGLE side (one entry, or one exit) of this leg. "
+            "The structure's entry cost is sum(leg.transaction_cost_per_lot * lots) across "
+            "legs, charged again (using the exit lots) when the structure is exited."
+        ),
+    )
+
     @field_validator("direction")
     @classmethod
     def validate_direction(cls, v: str) -> str:

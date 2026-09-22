@@ -71,58 +71,65 @@ def test_pnl_color():
 
 
 # ---------- update_home_metrics ----------
-# Output order: total realized (text, style), today's realized (text, style), unrealized card,
-# open structures, open legs, net lots, margin, winner, loser, banner style, banner children.
+# Output order: total realized (text, style), reset note, today's realized (text, style),
+# unrealized card, open structures, open legs, net lots, margin, winner, loser, banner style,
+# banner children.
 
 
 def test_metrics_empty_store_shows_placeholders_and_hides_banner():
     result = hc.update_home_metrics({})
-    assert len(result) == 13
-    assert result[0] == "—" and result[2] == "—"
-    assert result[4:11] == ("—",) * 7
-    assert result[11] == {"display": "none"}
+    assert len(result) == 14
+    assert result[0] == "—" and result[3] == "—"
+    assert result[5:12] == ("—",) * 7
+    assert result[12] == {"display": "none"}
 
 
 def test_realized_bar_shows_all_time_and_today_with_color():
     result = hc.update_home_metrics(payload())
     assert result[0] == "+$12,000" and result[1]["color"] == COLORS["ACCENT_GREEN"]
-    assert result[2] == "+$500" and result[3]["color"] == COLORS["ACCENT_GREEN"]
+    assert result[3] == "+$500" and result[4]["color"] == COLORS["ACCENT_GREEN"]
     assert result[1]["fontSize"] == "2rem" and result[1]["fontWeight"] == "bold"
 
 
 def test_realized_bar_negative_is_red_and_zero_is_neutral():
     result = hc.update_home_metrics(payload(total_realized_all_time=-2500.0, todays_realized_pnl=0.0))
     assert result[0] == "-$2,500" and result[1]["color"] == COLORS["ACCENT_RED"]
-    assert result[2] == "+$0" and result[3]["color"] == COLORS["TEXT_PRIMARY"]
+    assert result[3] == "+$0" and result[4]["color"] == COLORS["TEXT_PRIMARY"]
 
 
 def test_realized_bar_missing_values_show_dash():
     result = hc.update_home_metrics(payload(total_realized_all_time=None, todays_realized_pnl=None))
-    assert result[0] == "—" and result[2] == "—"
+    assert result[0] == "—" and result[3] == "—"
+
+
+def test_reset_note_shown_only_when_baseline_active():
+    assert hc.update_home_metrics(payload())[2] == ""
+    result = hc.update_home_metrics(payload(pnl_baseline=5000.0))
+    assert "$5,000" in result[2] and "Reset active" in result[2]
 
 
 def test_unrealized_card_shows_only_unrealized_with_color():
     result = hc.update_home_metrics(payload(total_unrealized=-1800.0, total_pnl=99999.0))
-    assert result[4].children == "-$1,800"
-    assert result[4].style["color"] == COLORS["ACCENT_RED"]
+    assert result[5].children == "-$1,800"
+    assert result[5].style["color"] == COLORS["ACCENT_RED"]
 
 
 def test_metrics_counts():
     result = hc.update_home_metrics(payload())
-    assert result[5] == "3" and result[6] == "4"
+    assert result[6] == "3" and result[7] == "4"
 
 
 def test_metrics_net_lots_compact_breakdown_by_product():
-    assert hc.update_home_metrics(payload())[7] == "BRN: -4 | CL: +10"
+    assert hc.update_home_metrics(payload())[8] == "BRN: -4 | CL: +10"
 
 
 def test_metrics_net_lots_empty_shows_dash():
-    assert hc.update_home_metrics(payload(net_lots_by_product={}))[7] == "—"
+    assert hc.update_home_metrics(payload(net_lots_by_product={}))[8] == "—"
 
 
 def test_metrics_winner_and_loser_show_structure_name_and_pnl():
     result = hc.update_home_metrics(payload())
-    winner, loser = result[9], result[10]
+    winner, loser = result[10], result[11]
     assert winner[0].children == "CL outright"
     assert winner[1].children == "+$9,800"
     assert loser[0].children == "BRN short"
@@ -131,12 +138,12 @@ def test_metrics_winner_and_loser_show_structure_name_and_pnl():
 
 def test_metrics_no_winner_shows_dash():
     result = hc.update_home_metrics(payload(largest_winner=None, largest_loser=None))
-    assert result[9] == "—" and result[10] == "—"
+    assert result[10] == "—" and result[11] == "—"
 
 
 def test_margin_card_shows_configured_limit_and_says_usage_is_not_tracked(repo):
     repo.set_setting("margin_limit", 2_500_000.0)
-    margin = hc.update_home_metrics(payload())[8]
+    margin = hc.update_home_metrics(payload())[9]
     assert margin[0] == "—"
     assert "$2,500,000" in margin[1].children
     assert "not tracked" in margin[1].children
@@ -144,12 +151,12 @@ def test_margin_card_shows_configured_limit_and_says_usage_is_not_tracked(repo):
 
 def test_stale_banner_hidden_when_nothing_stale():
     result = hc.update_home_metrics(payload())
-    assert result[11] == {"display": "none"}
+    assert result[12] == {"display": "none"}
 
 
 def test_stale_banner_lists_stale_symbols():
     result = hc.update_home_metrics(payload(stale_symbols_in_use=["CLZ26", "BRNZ26"]))
-    style, children = result[11], result[12]
+    style, children = result[12], result[13]
     assert style["display"] == "block"
     assert "Stale data detected for: CLZ26, BRNZ26" in children[0].children
     assert style["border"].endswith(COLORS["ACCENT_YELLOW"])
@@ -157,8 +164,8 @@ def test_stale_banner_lists_stale_symbols():
 
 def test_stale_banner_also_reports_symbols_with_no_price():
     result = hc.update_home_metrics(payload(missing_price_symbols=["CLF27"]))
-    assert result[11]["display"] == "block"
-    assert "No live price for: CLF27" in result[12][0].children
+    assert result[12]["display"] == "block"
+    assert "No live price for: CLF27" in result[13][0].children
 
 
 # ---------- update_home_table ----------

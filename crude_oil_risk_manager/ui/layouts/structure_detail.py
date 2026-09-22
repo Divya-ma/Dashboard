@@ -12,7 +12,11 @@ import dash_bootstrap_components as dbc
 from dash import html
 
 from core.models import PnLRecord, Structure, StructureStatus, Trade, TradeEventType
-from core.pnl import calculate_structure_realized_pnl, calculate_structure_unrealized_pnl
+from core.pnl import (
+    calculate_structure_realized_pnl,
+    calculate_structure_transaction_costs,
+    calculate_structure_unrealized_pnl,
+)
 from core.structure_utils import net_outright_equivalent
 from core.structure_view import prices_from_store, structure_entry_price, structure_live_price
 from ui.layouts.shell import COLORS
@@ -152,13 +156,14 @@ def _price_move(entry: float | None, live: float | None, total: float | None) ->
     return [f"{format_price(entry)} → {format_price(live)} ", html.Span(arrow, style={"color": pnl_color(total)})]
 
 
-def _pnl_summary(unrealized, realized, entry, live, note: str | None) -> html.Div:
-    total = None if unrealized is None else unrealized + realized
+def _pnl_summary(unrealized, realized, transaction_costs: float, entry, live, note: str | None) -> html.Div:
+    total = None if unrealized is None else unrealized + realized - transaction_costs
     cards = dbc.Row(
         [
             _metric_card("Unrealized PnL", pnl_span(unrealized)),
             _metric_card("Realized PnL", pnl_span(realized)),
-            _metric_card("Total PnL", pnl_span(total), big=True),
+            _metric_card("Transaction Cost", f"-${transaction_costs:,.0f}" if transaction_costs else EMPTY),
+            _metric_card("Total PnL (net of TC)", pnl_span(total), big=True),
             _metric_card("Entry Price / Live Price", _price_move(entry, live, total)),
         ]
     )
@@ -186,12 +191,16 @@ def _legs_table(structure: Structure, prices: dict[str, float], breakdown: dict[
                 format_price(prices.get(leg.contract.symbol)),
                 pnl_span(breakdown.get(leg.leg_id)) if leg.leg_id in breakdown else EMPTY,
                 "Long" if (leg.ratio > 0) == (leg.direction == "buy") else "Short",
+                f"${leg.transaction_cost_per_lot:,.2f}" if leg.transaction_cost_per_lot else EMPTY,
             ]
         )
-    footer = [html.Td("Total Structure PnL:", colSpan=6, style={"textAlign": "right", "fontWeight": "bold"}), html.Td(pnl_span(total, fontWeight="bold"), colSpan=2)]
+    footer = [html.Td("Total Structure PnL (net of TC):", colSpan=7, style={"textAlign": "right", "fontWeight": "bold"}), html.Td(pnl_span(total, fontWeight="bold"), colSpan=2)]
     parts = [
         html.H6("Legs", style=_TEXT),
-        _table(["Leg #", "Symbol", "Ratio", "Lots", "Entry Price", "Live Price", "Leg PnL", "Direction"], rows, footer),
+        _table(
+            ["Leg #", "Symbol", "Ratio", "Lots", "Entry Price", "Live Price", "Leg PnL", "Direction", "TC/lot (1 side)"],
+            rows, footer,
+        ),
     ]
     if edit_mode:
         parts.append(
@@ -241,11 +250,12 @@ def _trade_history(trades: list[Trade]) -> html.Div:
                 format_price(trade.price),
                 f"{trade.lots:g}",
                 pnl_span(trade.realized_pnl) if trade.realized_pnl is not None else EMPTY,
+                f"-${trade.transaction_cost:,.0f}" if trade.transaction_cost else EMPTY,
                 trade.notes or EMPTY,
             ]
         )
     return html.Div(
-        [html.H6("Trade History", style=_TEXT), _table(["Date/Time", "Event", "Price", "Lots", "Realized PnL", "Notes"], rows)],
+        [html.H6("Trade History", style=_TEXT), _table(["Date/Time", "Event", "Price", "Lots", "Realized PnL", "Transaction Cost", "Notes"], rows)],
         style={"marginBottom": "20px"},
     )
 
@@ -357,6 +367,7 @@ def structure_detail_layout(
     is_open = structure.status in (StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED)
     unrealized, breakdown, missing = calculate_structure_unrealized_pnl(structure.legs, prices)
     realized = calculate_structure_realized_pnl(trades)
+    transaction_costs = calculate_structure_transaction_costs(trades)
     entry, live = structure_entry_price(structure), structure_live_price(structure, prices)
 
     summary_note = None
@@ -364,19 +375,20 @@ def structure_detail_layout(
         # Some live prices are missing: fall back to the last saved snapshot instead of a partial number.
         if pnl_record is not None:
             unrealized, realized = pnl_record.unrealized_pnl, pnl_record.realized_pnl
+            transaction_costs = pnl_record.transaction_costs
             breakdown = {}
             summary_note = f"Live prices missing for {', '.join(missing)}; showing the PnL saved at {pnl_record.timestamp:%H:%M:%S} UTC."
         else:
             unrealized, summary_note = None, f"Live prices missing for {', '.join(missing)}; PnL unavailable."
-    total = None if unrealized is None else unrealized + realized
+    total = None if unrealized is None else unrealized + realized - transaction_costs
 
     sections = [_header(structure, bool(trades))]
     if structure.status == StructureStatus.CLOSED:
         sections.append(_reuse_panel())
     if is_open:
-        sections.append(_pnl_summary(unrealized, realized, entry, live, summary_note))
+        sections.append(_pnl_summary(unrealized, realized, transaction_costs, entry, live, summary_note))
     elif structure.status == StructureStatus.CLOSED:
-        total = realized
+        total = realized - transaction_costs
     sections.append(_legs_table(structure, prices, breakdown, total, edit_mode))
     sections.append(_net_outrights(structure))
     if trades:

@@ -107,14 +107,11 @@ ROW_STYLE_CONDITIONS = [
 REALIZED_VALUE_STYLE = {"fontSize": "2rem", "fontWeight": "bold", "lineHeight": "1.2", "color": COLORS["TEXT_PRIMARY"]}
 
 
-def _realized_metric(label: str, value_id: str) -> dbc.Col:
-    return dbc.Col(
-        [
-            html.Div(label, style=_LABEL_STYLE),
-            html.Div("—", id=value_id, style=REALIZED_VALUE_STYLE),
-        ],
-        md=6,
-    )
+def _realized_metric(label: str, value_id: str, note_id: str | None = None) -> dbc.Col:
+    children = [html.Div(label, style=_LABEL_STYLE), html.Div("—", id=value_id, style=REALIZED_VALUE_STYLE)]
+    if note_id:
+        children.append(html.Div("", id=note_id, style={"fontSize": "11px", "color": COLORS["ACCENT_YELLOW"], "marginTop": "2px"}))
+    return dbc.Col(children, md=6)
 
 
 def _realized_bar() -> html.Div:
@@ -123,7 +120,7 @@ def _realized_bar() -> html.Div:
         [
             dbc.Row(
                 [
-                    _realized_metric("TOTAL REALIZED PnL (ALL TIME)", "home-total-realized-pnl"),
+                    _realized_metric("TOTAL REALIZED PnL (ALL TIME)", "home-total-realized-pnl", "home-pnl-reset-note"),
                     _realized_metric("TODAY'S REALIZED PnL", "home-today-realized-pnl"),
                 ]
             ),

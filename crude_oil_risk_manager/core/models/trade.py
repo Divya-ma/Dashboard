@@ -44,6 +44,16 @@ class Trade(BaseModel):
     target_price: float | None = Field(
         default=None, description="Optional structure price at which a target alert fires."
     )
+    transaction_cost: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "$ cost of this trade event: sum(leg.transaction_cost_per_lot * lots) across the "
+            "structure's legs. Charged on every entry/add (opening cost) and again on exit "
+            "(closing cost); never netted into realized_pnl itself — see "
+            "core.pnl.calculate_structure_transaction_costs for the net figure."
+        ),
+    )
 
     @field_validator("lots")
     @classmethod

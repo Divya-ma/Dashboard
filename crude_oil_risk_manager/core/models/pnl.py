@@ -17,7 +17,16 @@ class PnLRecord(BaseModel):
     structure_id: str = Field(..., description="ID of the structure this record belongs to.")
     unrealized_pnl: float = Field(..., description="Unrealized P&L at this snapshot.")
     realized_pnl: float = Field(..., description="Realized P&L at this snapshot.")
-    total_pnl: float = Field(..., description="Must equal unrealized_pnl + realized_pnl.")
+    transaction_costs: float = Field(
+        default=0.0,
+        description=(
+            "Total transaction cost incurred so far (sum of every trade's transaction_cost). "
+            "Already netted out of total_pnl."
+        ),
+    )
+    total_pnl: float = Field(
+        ..., description="Must equal unrealized_pnl + realized_pnl - transaction_costs."
+    )
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), description="Auto-set to UTC now."
     )
@@ -33,10 +42,10 @@ class PnLRecord(BaseModel):
 
     @model_validator(mode="after")
     def validate_total_pnl(self) -> "PnLRecord":
-        expected = self.unrealized_pnl + self.realized_pnl
+        expected = self.unrealized_pnl + self.realized_pnl - self.transaction_costs
         if abs(self.total_pnl - expected) > _PNL_TOLERANCE:
             raise ValueError(
-                f"total_pnl ({self.total_pnl}) must equal unrealized_pnl + realized_pnl "
-                f"({expected})"
+                f"total_pnl ({self.total_pnl}) must equal unrealized_pnl + realized_pnl - "
+                f"transaction_costs ({expected})"
             )
         return self

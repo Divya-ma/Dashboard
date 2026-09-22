@@ -121,6 +121,36 @@ def _teams_section() -> dbc.AccordionItem:
     )
 
 
+def _account_reset_section() -> dbc.AccordionItem:
+    return dbc.AccordionItem(
+        [
+            html.Div(
+                "Zero out the cumulative Total PnL shown on Home (and used by the Portfolio PnL Stop "
+                "alert) without touching any saved structures, trades or transaction costs — use this "
+                "to start tracking performance from a clean slate.",
+                style={**_HINT_STYLE, "marginBottom": "12px"},
+            ),
+            html.Div("", id="settings-pnl-baseline-status", style={**_STATUS_STYLE, "marginTop": 0, "marginBottom": "12px"}),
+            dbc.Button("Reset Total PnL to Zero", id="settings-reset-pnl-btn", color="warning", outline=True, className="me-2"),
+            dbc.Button("Clear Reset (Show True Total)", id="settings-clear-pnl-reset-btn", color="secondary", outline=True),
+            dbc.Collapse(
+                html.Div(
+                    [
+                        html.Div(id="settings-reset-pnl-confirm-text", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "10px"}),
+                        dbc.Button("Confirm: Reset to Zero", id="settings-confirm-reset-pnl-btn", color="danger", size="sm", className="me-2"),
+                        dbc.Button("Cancel", id="settings-cancel-reset-pnl-btn", color="secondary", outline=True, size="sm"),
+                    ],
+                    style={"marginTop": "12px", "padding": "12px", "border": f"1px solid {COLORS['ACCENT_YELLOW']}", "borderRadius": "6px"},
+                ),
+                id="settings-reset-pnl-collapse",
+                is_open=False,
+            ),
+        ],
+        title="🔄 Account Reset",
+        item_id="account-reset",
+    )
+
+
 def _data_section() -> dbc.AccordionItem:
     return dbc.AccordionItem(
         [
@@ -143,7 +173,7 @@ def settings_layout() -> html.Div:
         [
             html.H4("⚙️ Settings", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "20px"}),
             dbc.Accordion(
-                [_api_section(), _thresholds_section(), _defaults_section(), _teams_section(), _data_section()],
+                [_api_section(), _thresholds_section(), _defaults_section(), _teams_section(), _account_reset_section(), _data_section()],
                 id="settings-accordion",
                 always_open=True,
                 active_item=["thresholds"] if token_configured else ["api"],

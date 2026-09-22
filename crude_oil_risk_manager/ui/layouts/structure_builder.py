@@ -133,11 +133,39 @@ def render_step_indicator(step: int, template: str | None) -> dbc.Row:
     return dbc.Row(chips, className="g-2")
 
 
-def build_leg_row(index: int, symbol, ratio, contract_options: list[str], removable: bool) -> dbc.Row:
-    """One leg row: symbol (free text), saved-contract picker, ratio and (Custom only) remove."""
+def leg_rows_header() -> dbc.Row:
+    """Column labels above the leg rows; the TC column is spelled out plus an ⓘ tooltip."""
+    tc_label = html.Span(
+        ["Transaction Cost ", html.Span("ⓘ", id="leg-tc-header-info", style={"cursor": "help", "color": COLORS["ACCENT_YELLOW"]})]
+    )
     return dbc.Row(
         [
-            dbc.Col(html.Div(f"Leg {index + 1}", style={"color": COLORS["TEXT_PRIMARY"], "paddingTop": "8px"}), width=2),
+            dbc.Col(width=1),
+            dbc.Col(html.Div("Symbol", style=_MUTED), width=5),
+            dbc.Col(html.Div("Ratio", style=_MUTED), width=2),
+            dbc.Col(
+                [
+                    html.Div(tc_label, style=_MUTED),
+                    dbc.Tooltip(
+                        "$ cost per lot, one side of the trade. Charged once when you enter/add "
+                        "(sum across legs) and again when you exit — leave 0 if you don't want to track it.",
+                        target="leg-tc-header-info",
+                        placement="top",
+                    ),
+                ],
+                width=2,
+            ),
+            dbc.Col(width=1),
+        ],
+        className="mb-1",
+    )
+
+
+def build_leg_row(index: int, symbol, ratio, tc, contract_options: list[str], removable: bool) -> dbc.Row:
+    """One leg row: symbol (free text), saved-contract picker, ratio, TC/lot and (Custom only) remove."""
+    return dbc.Row(
+        [
+            dbc.Col(html.Div(f"Leg {index + 1}", style={"color": COLORS["TEXT_PRIMARY"], "paddingTop": "8px"}), width=1),
             dbc.Col(
                 [
                     dbc.Input(
@@ -154,10 +182,17 @@ def build_leg_row(index: int, symbol, ratio, contract_options: list[str], remova
                         className="builder-dropdown",
                     ),
                 ],
-                width=6,
+                width=5,
             ),
             dbc.Col(
                 dbc.Input(id={"type": "leg-ratio", "index": index}, type="number", step=1, value=ratio, placeholder="Ratio"),
+                width=2,
+            ),
+            dbc.Col(
+                dbc.Input(
+                    id={"type": "leg-tc", "index": index}, type="number", min=0, step=0.01,
+                    value=tc, placeholder="e.g. 5.00",
+                ),
                 width=2,
             ),
             dbc.Col(
@@ -216,8 +251,15 @@ def _step_1() -> html.Div:
 
 def _step_2() -> html.Div:
     left = [
+        leg_rows_header(),
         html.Div(id="builder-leg-rows"),
         dbc.Button("+ Add Leg", id="btn-add-leg", color="secondary", outline=True, style=HIDDEN),
+        html.Div(
+            "Transaction cost is entered per leg above (per lot, one side). It is summed across "
+            "legs and charged once on entry and once on exit — it's included in every PnL figure "
+            "and analyzer once the structure is saved.",
+            style={**_MUTED, "marginTop": "8px"},
+        ),
     ]
     right = [
         html.H6("📊 Net Outright Equivalent", style=_HEADING),

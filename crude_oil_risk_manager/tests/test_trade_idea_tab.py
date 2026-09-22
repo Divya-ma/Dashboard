@@ -282,7 +282,7 @@ def save(repo, s):
 def run_analyze(**overrides):
     args = dict(n_clicks=1, structure_type="outright", symbol_1="CLZ26", direction_1="buy", lots_1=1,
                 symbol_2=None, direction_2="buy", lots_2=1, symbol_3=None, direction_3="buy", lots_3=1,
-                entry=75.0, stop=74.0, target=77.0, lookback="30", open_structures=[])
+                entry=75.0, stop=74.0, target=77.0, transaction_cost=None, lookback="30", open_structures=[])
     args.update(overrides)
     return ic.analyze(**args)
 

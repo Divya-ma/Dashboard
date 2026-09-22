@@ -79,6 +79,9 @@ class Repository:
         for statement in (
             "ALTER TABLE trades ADD COLUMN stop_loss_price REAL",
             "ALTER TABLE trades ADD COLUMN target_price REAL",
+            "ALTER TABLE trades ADD COLUMN transaction_cost REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE legs ADD COLUMN transaction_cost_per_lot REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE pnl_records ADD COLUMN transaction_costs REAL NOT NULL DEFAULT 0.0",
         ):
             self._try_alter(statement)
         if self._try_alter("ALTER TABLE legs ADD COLUMN direction TEXT NOT NULL DEFAULT 'buy'"):
@@ -277,10 +280,12 @@ class Repository:
                 """
                 INSERT OR REPLACE INTO legs (
                     leg_id, structure_id, contract_id, ratio, lots,
-                    entry_price, average_entry_price, is_naked, direction, leg_order
+                    entry_price, average_entry_price, is_naked, direction, leg_order,
+                    transaction_cost_per_lot
                 ) VALUES (
                     :leg_id, :structure_id, :contract_id, :ratio, :lots,
-                    :entry_price, :average_entry_price, :is_naked, :direction, :leg_order
+                    :entry_price, :average_entry_price, :is_naked, :direction, :leg_order,
+                    :transaction_cost_per_lot
                 )
                 """
             ),
@@ -295,6 +300,7 @@ class Repository:
                 "is_naked": int(leg.is_naked),
                 "direction": leg.direction,
                 "leg_order": order,
+                "transaction_cost_per_lot": leg.transaction_cost_per_lot,
             },
         )
 
@@ -414,6 +420,7 @@ class Repository:
             average_entry_price=row["average_entry_price"],
             is_naked=bool(row["is_naked"]),
             direction=row["direction"] or "buy",
+            transaction_cost_per_lot=row["transaction_cost_per_lot"] or 0.0,
         )
 
     @staticmethod
@@ -446,11 +453,11 @@ class Repository:
                     INSERT INTO trades (
                         trade_id, structure_id, leg_id, event_type, lots,
                         price, direction, timestamp, realized_pnl, notes,
-                        stop_loss_price, target_price
+                        stop_loss_price, target_price, transaction_cost
                     ) VALUES (
                         :trade_id, :structure_id, :leg_id, :event_type, :lots,
                         :price, :direction, :timestamp, :realized_pnl, :notes,
-                        :stop_loss_price, :target_price
+                        :stop_loss_price, :target_price, :transaction_cost
                     )
                     """
                 ),
@@ -467,6 +474,7 @@ class Repository:
                     "notes": trade.notes,
                     "stop_loss_price": trade.stop_loss_price,
                     "target_price": trade.target_price,
+                    "transaction_cost": trade.transaction_cost,
                 },
             )
 
@@ -505,6 +513,7 @@ class Repository:
             notes=row["notes"] or "",
             stop_loss_price=row["stop_loss_price"],
             target_price=row["target_price"],
+            transaction_cost=row["transaction_cost"] or 0.0,
         )
 
     # ------------------------------------------------------------------
@@ -519,10 +528,12 @@ class Repository:
                     """
                     INSERT INTO pnl_records (
                         record_id, structure_id, unrealized_pnl, realized_pnl,
-                        total_pnl, timestamp, last_price_used, is_stale, stale_symbols
+                        total_pnl, timestamp, last_price_used, is_stale, stale_symbols,
+                        transaction_costs
                     ) VALUES (
                         :record_id, :structure_id, :unrealized_pnl, :realized_pnl,
-                        :total_pnl, :timestamp, :last_price_used, :is_stale, :stale_symbols
+                        :total_pnl, :timestamp, :last_price_used, :is_stale, :stale_symbols,
+                        :transaction_costs
                     )
                     """
                 ),
@@ -536,6 +547,7 @@ class Repository:
                     "last_price_used": json.dumps(record.last_price_used),
                     "is_stale": int(record.is_stale),
                     "stale_symbols": json.dumps(record.stale_symbols),
+                    "transaction_costs": record.transaction_costs,
                 },
             )
 
@@ -607,6 +619,7 @@ class Repository:
             last_price_used=json.loads(row["last_price_used"]),
             is_stale=bool(row["is_stale"]),
             stale_symbols=json.loads(row["stale_symbols"]),
+            transaction_costs=row["transaction_costs"] or 0.0,
         )
 
     # ------------------------------------------------------------------

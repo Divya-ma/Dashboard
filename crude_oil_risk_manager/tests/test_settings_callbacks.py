@@ -84,9 +84,10 @@ def test_load_settings_other_path_does_nothing(env):
 
 def test_load_settings_returns_config_defaults_when_nothing_saved(env):
     result = sc.load_settings("/settings")
-    assert len(result) == 11
-    (token, pnl_stop, max_loss, staleness, margin, roll, confidence, window, webhook, enabled, status) = result
+    assert len(result) == 12
+    (token, pnl_stop, max_loss, staleness, margin, roll, confidence, window, webhook, enabled, status, baseline_status) = result
     assert token == "" and webhook == ""
+    assert baseline_status == "No reset active — Total PnL shows the true account total."
     assert pnl_stop == settings.ALERT_PORTFOLIO_PNL_STOP
     assert max_loss == settings.ALERT_STRUCTURE_MAX_LOSS
     assert staleness == settings.LIVE_STALENESS_THRESHOLD_SECONDS
@@ -354,6 +355,8 @@ def test_settings_layout_contains_all_component_ids(env):
         "settings-save-defaults", "settings-teams-webhook", "settings-teams-enabled",
         "settings-test-teams", "settings-teams-status", "settings-save-teams", "settings-sync-status",
         "settings-run-sync", "settings-data-summary",
+        "settings-pnl-baseline-status", "settings-reset-pnl-btn", "settings-clear-pnl-reset-btn",
+        "settings-reset-pnl-collapse", "settings-confirm-reset-pnl-btn", "settings-cancel-reset-pnl-btn",
     ]:
         assert component_id in text, component_id
 
@@ -367,3 +370,44 @@ def test_settings_layout_opens_api_section_until_token_is_configured(env, repo):
 def test_settings_password_fields_are_masked_by_default(env):
     text = str(settings_layout())
     assert text.count("type='password'") == 2  # token + Teams webhook
+
+
+# ---------- account reset (Total PnL baseline) ----------
+
+
+def test_open_reset_confirm_shows_current_total_as_new_baseline(env):
+    with pytest.raises(PreventUpdate):
+        sc.open_reset_confirm(None)
+    is_open, text = sc.open_reset_confirm(1)
+    assert is_open is True
+    assert "$0" in text and "new zero point" in text
+
+
+def test_cancel_reset_pnl_closes_collapse(env):
+    with pytest.raises(PreventUpdate):
+        sc.cancel_reset_pnl(None)
+    assert sc.cancel_reset_pnl(1) is False
+
+
+def test_confirm_reset_pnl_stores_baseline_and_reports_status(env, repo):
+    with pytest.raises(PreventUpdate):
+        sc.confirm_reset_pnl(None)
+    is_open, status = sc.confirm_reset_pnl(1)
+    assert is_open is False
+    assert repo.get_setting("pnl_reset_baseline") == 0.0
+    assert "No reset active" in status
+
+
+def test_clear_pnl_reset_zeroes_the_baseline(env, repo):
+    repo.set_setting("pnl_reset_baseline", 5000.0)
+    with pytest.raises(PreventUpdate):
+        sc.clear_pnl_reset(None)
+    status = sc.clear_pnl_reset(1)
+    assert repo.get_setting("pnl_reset_baseline") == 0.0
+    assert "No reset active" in status
+
+
+def test_baseline_status_formats_positive_and_negative():
+    assert sc._baseline_status(0.0) == "No reset active — Total PnL shows the true account total."
+    assert "+$5,000" in sc._baseline_status(5000.0)
+    assert "-$5,000" in sc._baseline_status(-5000.0)

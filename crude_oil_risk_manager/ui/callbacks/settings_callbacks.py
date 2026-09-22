@@ -13,10 +13,13 @@ from dash.exceptions import PreventUpdate
 
 from adapters.base import APIError
 from config.settings import settings
+from core.models import StructureStatus
+from core.pnl import calculate_portfolio_pnl
 from core.user_settings import (
     KEY_API_TOKEN,
     KEY_CORRELATION_WINDOW,
     KEY_MARGIN_LIMIT,
+    KEY_PNL_BASELINE,
     KEY_PNL_STOP,
     KEY_ROLL_WARNING_DAYS,
     KEY_STALENESS,
@@ -89,6 +92,7 @@ def load_settings(pathname):
         webhook,
         bool(teams_enabled),
         _token_status(token),
+        _baseline_status(repo.get_setting(KEY_PNL_BASELINE, 0.0) or 0.0),
     )
 
 
@@ -211,6 +215,72 @@ def test_teams(n_clicks, webhook_url):
 
 
 # ----------------------------------------------------------------------
+# Account reset (zero out the cumulative Total PnL)
+# ----------------------------------------------------------------------
+
+_OPEN_STATUSES = [StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
+
+
+def _raw_total_pnl() -> float:
+    """Current portfolio total_pnl (unrealized + realized - transaction costs), ignoring any reset baseline."""
+    repository = container.repository
+    open_structures = repository.get_all_structures(status_filter=_OPEN_STATUSES)
+    open_trades = {s.structure_id: repository.get_trades_for_structure(s.structure_id) for s in open_structures}
+    closed = repository.get_all_structures(status_filter=[StructureStatus.CLOSED])
+    closed_trades = {s.structure_id: repository.get_trades_for_structure(s.structure_id) for s in closed}
+    cache = container.live_cache
+    prices = {symbol: data["price"] for symbol, data in cache.prices.items()}
+    stale = [symbol for symbol, data in cache.prices.items() if data.get("is_stale")]
+    summary = calculate_portfolio_pnl(open_structures, open_trades, prices, stale, closed, closed_trades)
+    return summary["total_pnl"]
+
+
+def _baseline_status(baseline: float) -> str:
+    if not baseline:
+        return "No reset active — Total PnL shows the true account total."
+    sign = "+" if baseline >= 0 else "-"
+    return f"🔄 Reset active: Total PnL is shown relative to a {sign}${abs(baseline):,.0f} baseline."
+
+
+def open_reset_confirm(n_clicks):
+    """Show what the new zero point would be before actually resetting anything."""
+    if not n_clicks:
+        raise PreventUpdate
+    raw = _raw_total_pnl()
+    text = (
+        f"This will set your current Total PnL (${raw:,.0f}) as the new zero point. "
+        "No structures, trades or transaction costs are deleted — you can undo this anytime "
+        "with 'Clear Reset'."
+    )
+    return True, text
+
+
+def cancel_reset_pnl(n_clicks):
+    if not n_clicks:
+        raise PreventUpdate
+    return False
+
+
+def confirm_reset_pnl(n_clicks):
+    """Store the current raw total_pnl as the baseline; Home then shows everything relative to it."""
+    if not n_clicks:
+        raise PreventUpdate
+    baseline = _raw_total_pnl()
+    container.repository.set_setting(KEY_PNL_BASELINE, baseline)
+    logger.info("Total PnL reset: baseline set to %.2f", baseline)
+    return False, _baseline_status(baseline)
+
+
+def clear_pnl_reset(n_clicks):
+    """Remove the baseline so Home goes back to showing the true, unadjusted total."""
+    if not n_clicks:
+        raise PreventUpdate
+    container.repository.set_setting(KEY_PNL_BASELINE, 0.0)
+    logger.info("Total PnL reset cleared")
+    return _baseline_status(0.0)
+
+
+# ----------------------------------------------------------------------
 # Data management
 # ----------------------------------------------------------------------
 
@@ -285,6 +355,7 @@ def register_settings_callbacks(app) -> None:
         Output("settings-teams-webhook", "value"),
         Output("settings-teams-enabled", "value"),
         Output("settings-token-status", "children"),
+        Output("settings-pnl-baseline-status", "children"),
         Input("url", "pathname"),
     )(load_settings)
 
@@ -356,6 +427,32 @@ def register_settings_callbacks(app) -> None:
             *[Input(field, "value") for field in fields],
             prevent_initial_call=True,
         )(_reset_label(label))
+
+    app.callback(
+        Output("settings-reset-pnl-collapse", "is_open"),
+        Output("settings-reset-pnl-confirm-text", "children"),
+        Input("settings-reset-pnl-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )(open_reset_confirm)
+
+    app.callback(
+        Output("settings-reset-pnl-collapse", "is_open", allow_duplicate=True),
+        Input("settings-cancel-reset-pnl-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )(cancel_reset_pnl)
+
+    app.callback(
+        Output("settings-reset-pnl-collapse", "is_open", allow_duplicate=True),
+        Output("settings-pnl-baseline-status", "children", allow_duplicate=True),
+        Input("settings-confirm-reset-pnl-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )(confirm_reset_pnl)
+
+    app.callback(
+        Output("settings-pnl-baseline-status", "children", allow_duplicate=True),
+        Input("settings-clear-pnl-reset-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )(clear_pnl_reset)
 
     app.callback(
         Output("settings-sync-status", "children", allow_duplicate=True),

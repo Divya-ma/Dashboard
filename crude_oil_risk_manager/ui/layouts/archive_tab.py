@@ -100,6 +100,7 @@ def build_table_rows(rows: list[dict]) -> list[dict]:
             "entry_price": _or_dash(row["entry_price"], lambda v: round(v, 4)),
             "exit_price": _or_dash(row["exit_price"], lambda v: round(v, 4)),
             "lots": _or_dash(row["lots"], lambda v: f"{v:g}"),
+            "transaction_costs": row["transaction_costs"],
             "realized_pnl": row["realized_pnl"],
             "result": row["result"],
         }
@@ -132,7 +133,8 @@ def build_detail(row: dict | None) -> html.Div | None:
         [
             fact("Entry Price", _or_dash(row["entry_price"], lambda v: f"{v:,.2f}")),
             fact("Exit Price", _or_dash(row["exit_price"], lambda v: f"{v:,.2f}")),
-            fact("Realized PnL", money(pnl), {"color": pnl_color}),
+            fact("Transaction Cost", money(row["transaction_costs"])),
+            fact("Realized PnL (net of TC)", money(pnl), {"color": pnl_color}),
             fact("Days Held", _or_dash(row["days_held"])),
         ]
     )
@@ -216,7 +218,11 @@ TABLE_COLUMNS = [
     {"id": "exit_price", "name": "Exit Price (pts)", "type": "any"},
     {"id": "lots", "name": "Lots", "type": "any"},
     {
-        "id": "realized_pnl", "name": "Realized PnL ($)", "type": "numeric",
+        "id": "transaction_costs", "name": "Transaction Cost ($)", "type": "numeric",
+        "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, symbol=Symbol.yes, symbol_prefix="$"),
+    },
+    {
+        "id": "realized_pnl", "name": "Realized PnL ($, net of TC)", "type": "numeric",
         "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, symbol=Symbol.yes, symbol_prefix="$"),
     },
     {"id": "result", "name": "Result"},

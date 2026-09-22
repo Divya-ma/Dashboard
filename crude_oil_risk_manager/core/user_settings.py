@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from core.alerts import ENABLED_SETTING_KEY, WEBHOOK_SETTING_KEY
 
 KEY_API_TOKEN = "api_access_token"
+KEY_PNL_BASELINE = "pnl_reset_baseline"
 KEY_PNL_STOP = "alert_portfolio_pnl_stop"
 KEY_STRUCTURE_MAX_LOSS = "alert_structure_max_loss"
 KEY_STALENESS = "staleness_threshold_seconds"

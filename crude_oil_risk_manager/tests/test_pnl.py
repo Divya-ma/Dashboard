@@ -15,6 +15,7 @@ from core.models import (
     TradeEventType,
 )
 from core.pnl import (
+    apply_pnl_reset_baseline,
     build_pnl_record,
     calculate_average_entry_price,
     calculate_leg_realized_pnl,
@@ -23,6 +24,7 @@ from core.pnl import (
     calculate_net_exposure,
     calculate_portfolio_pnl,
     calculate_structure_realized_pnl,
+    calculate_structure_transaction_costs,
     calculate_structure_unrealized_pnl,
     calculate_todays_pnl,
     calculate_todays_realized_pnl,
@@ -557,3 +559,40 @@ def test_net_exposure_excludes_untraded_legs():
     structure = make_structure(legs=[traded, untraded])
     exposure = calculate_net_exposure([structure])
     assert exposure == {"CL": {"CLZ26": 5.0}}
+
+
+# ---------- transaction costs / account reset ----------
+
+
+def test_structure_transaction_costs_sums_every_trade_event():
+    trades = [
+        Trade(structure_id="s", leg_id="l", event_type=TradeEventType.TRADE, lots=1, price=75.0,
+              direction="buy", transaction_cost=5.0),
+        Trade(structure_id="s", leg_id="l", event_type=TradeEventType.FULL_EXIT, lots=1, price=76.0,
+              direction="sell", realized_pnl=1000.0, transaction_cost=5.0),
+    ]
+    assert calculate_structure_transaction_costs(trades) == 10.0
+
+
+def test_apply_pnl_reset_baseline_shifts_only_cumulative_fields():
+    summary = {
+        "total_pnl": 1000.0,
+        "total_realized_all_time": 800.0,
+        "total_unrealized": 200.0,
+        "total_realized": 600.0,
+    }
+    shifted = apply_pnl_reset_baseline(summary, 1000.0)
+    assert shifted["total_pnl"] == 0.0
+    assert shifted["total_realized_all_time"] == -200.0
+    assert shifted["pnl_baseline"] == 1000.0
+    # untouched
+    assert shifted["total_unrealized"] == 200.0
+    assert shifted["total_realized"] == 600.0
+    # original dict is not mutated
+    assert summary["total_pnl"] == 1000.0
+
+
+def test_apply_pnl_reset_baseline_is_noop_for_falsy_baseline():
+    summary = {"total_pnl": 1000.0, "total_realized_all_time": 800.0}
+    assert apply_pnl_reset_baseline(summary, 0.0) == summary
+    assert apply_pnl_reset_baseline(summary, None) == summary

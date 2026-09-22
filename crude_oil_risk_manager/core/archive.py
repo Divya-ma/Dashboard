@@ -2,14 +2,15 @@
 
 Nothing here touches the database: callers pass CLOSED structures and their trades.
 Realized PnL is the sum of the structure's saved exit trades (the value persisted at
-exit, never recomputed). Dates come from the trades (entry) and the structure's
-closed_at (exit); prices from core.structure_view.
+exit, never recomputed), net of every transaction cost booked on the structure
+(entry/add and exit) — see core.pnl.calculate_net_realized_pnl. Dates come from the
+trades (entry) and the structure's closed_at (exit); prices from core.structure_view.
 """
 
 from datetime import date, datetime
 
 from core.models import Structure, Trade, TradeEventType
-from core.pnl import calculate_structure_realized_pnl
+from core.pnl import calculate_net_realized_pnl, calculate_structure_transaction_costs
 from core.structure_view import structure_entry_price, structure_exit_price
 
 RESULT_WIN, RESULT_LOSS, RESULT_FLAT = "Win", "Loss", "Flat"
@@ -62,7 +63,8 @@ def build_archive_rows(structures: list[Structure], trades_by_structure: dict[st
         entry_date = _date_or_none(entries[0].timestamp if entries else None)
         exit_date = _date_or_none(structure.closed_at or (exits[-1].timestamp if exits else None))
         entered_lots = sum(t.lots for t in entries) if entries else None
-        pnl = calculate_structure_realized_pnl(trades)
+        pnl = calculate_net_realized_pnl(trades)
+        transaction_costs = calculate_structure_transaction_costs(trades)
         legs = _legs_detail(structure, entered_lots)
         rows.append(
             {
@@ -79,6 +81,7 @@ def build_archive_rows(structures: list[Structure], trades_by_structure: dict[st
                 "exit_price": structure_exit_price(structure, trades),
                 "lots": entered_lots,
                 "realized_pnl": pnl,
+                "transaction_costs": transaction_costs,
                 "result": result_for(pnl),
                 "notes": structure.notes or "",
             }

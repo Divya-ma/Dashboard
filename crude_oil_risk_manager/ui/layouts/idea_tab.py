@@ -76,16 +76,23 @@ def _table(headers: list[str], rows: list[list]) -> html.Table:
 
 
 def build_risk_reward(analysis: IdeaAnalysis) -> dbc.Row:
-    return dbc.Row(
-        [
-            _metric("Risk (pts)", _pts(analysis.risk), COLORS["ACCENT_RED"]),
-            _metric("Reward (pts)", _pts(analysis.reward), COLORS["ACCENT_GREEN"]),
-            _metric("R:R Ratio", f"{analysis.rr_ratio:.1f} : 1", COLORS["ACCENT_YELLOW"]),
-            _metric("Lots", f"{analysis.idea.total_lots}"),
-            _metric("Est. $ Risk", f"${analysis.dollar_risk:,.0f}", COLORS["ACCENT_RED"]),
-            _metric("Est. $ Reward", f"${analysis.dollar_reward:,.0f}", COLORS["ACCENT_GREEN"]),
+    metrics = [
+        _metric("Risk (pts)", _pts(analysis.risk), COLORS["ACCENT_RED"]),
+        _metric("Reward (pts)", _pts(analysis.reward), COLORS["ACCENT_GREEN"]),
+        _metric("R:R Ratio", f"{analysis.rr_ratio:.1f} : 1", COLORS["ACCENT_YELLOW"]),
+        _metric("Lots", f"{analysis.idea.total_lots}"),
+        _metric("Est. $ Risk (gross)", f"${analysis.dollar_risk:,.0f}", COLORS["ACCENT_RED"]),
+        _metric("Est. $ Reward (gross)", f"${analysis.dollar_reward:,.0f}", COLORS["ACCENT_GREEN"]),
+    ]
+    if analysis.transaction_cost:
+        net_accent = COLORS["ACCENT_GREEN"] if analysis.net_dollar_reward > 0 else COLORS["ACCENT_RED"]
+        metrics += [
+            _metric("Est. Transaction Cost (round trip)", f"${analysis.transaction_cost:,.0f}", COLORS["ACCENT_YELLOW"]),
+            _metric("Net R:R Ratio", f"{analysis.net_rr_ratio:.1f} : 1", COLORS["ACCENT_YELLOW"]),
+            _metric("Est. $ Risk (net of TC)", f"${analysis.net_dollar_risk:,.0f}", COLORS["ACCENT_RED"]),
+            _metric("Est. $ Reward (net of TC)", f"${analysis.net_dollar_reward:,.0f}", net_accent),
         ]
-    )
+    return dbc.Row(metrics)
 
 
 def build_historical_context(analysis: IdeaAnalysis) -> list:
@@ -172,7 +179,7 @@ def build_output(analysis: IdeaAnalysis, warnings: list[str], lookback_days: int
         return html.Div(build_messages(analysis.errors, warnings))
     return html.Div(
         [
-            *build_messages([], warnings),
+            *build_messages([], [*warnings, *analysis.warnings]),
             _section("A. Risk / Reward Summary", [
                 build_risk_reward(analysis),
                 html.Div(f"Est. $ uses ${DOLLARS_PER_POINT_PER_LOT:g} per point per lot × total lots.", style=_MUTED),
@@ -248,6 +255,7 @@ def _input_panel() -> dbc.Card:
             ]
         ),
         html.Div("Stop and target are price levels, not distances.", style={**_MUTED, "marginBottom": "12px"}),
+        dbc.Row([_number_field("Est. Transaction Cost ($, round trip, optional)", "idea-transaction-cost", "e.g. 20")]),
         html.Div("Lookback for analysis", style=_LABEL),
         dbc.Select(id="idea-lookback", options=LOOKBACK_OPTIONS, value=DEFAULT_LOOKBACK, className="mb-3"),
         dbc.Button(

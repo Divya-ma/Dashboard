@@ -333,20 +333,20 @@ def test_step_visibility():
 
 def test_render_leg_rows_for_template_add_and_remove(monkeypatch):
     trigger(monkeypatch, "store-builder-template")
-    children, rows, add_style = bc.render_leg_rows("fly", None, [], [], [], [])
+    children, rows, add_style = bc.render_leg_rows("fly", None, [], [], [], [], [])
     assert len(children) == 3 and [r["ratio"] for r in rows] == [1, -2, 1] and add_style == {"display": "none"}
 
     trigger(monkeypatch, "btn-add-leg")
-    children, rows, add_style = bc.render_leg_rows("custom", 1, [], ["CLZ26"], [1], [])
+    children, rows, add_style = bc.render_leg_rows("custom", 1, [], ["CLZ26"], [1], [0.0], [])
     assert len(rows) == 2 and rows[0]["symbol"] == "CLZ26" and add_style == {}
 
     trigger(monkeypatch, {"type": "leg-remove", "index": 0})
-    children, rows, _ = bc.render_leg_rows("custom", 1, [1, None], ["CLZ26", "CLF27"], [1, 1], [])
+    children, rows, _ = bc.render_leg_rows("custom", 1, [1, None], ["CLZ26", "CLF27"], [1, 1], [0.0, 0.0], [])
     assert [r["symbol"] for r in rows] == ["CLF27"]
 
     trigger(monkeypatch, {"type": "leg-remove", "index": 0}, value=None)  # newly created button, not a click
     with pytest.raises(PreventUpdate):
-        bc.render_leg_rows("custom", 1, [None], ["CLZ26"], [1], [])
+        bc.render_leg_rows("custom", 1, [None], ["CLZ26"], [1], [0.0], [])
 
 
 def test_fill_symbol_from_saved():
@@ -373,7 +373,7 @@ def test_check_correlation_button_only(env):
 
 def save_args(**overrides):
     args = dict(
-        n_clicks=1, name="Saved", template="spread", symbols=["CLZ26", "CLF27"], ratios=[1, -1],
+        n_clicks=1, name="Saved", template="spread", symbols=["CLZ26", "CLF27"], ratios=[1, -1], tcs=[0.0, 0.0],
         multiplier=1000, tick_size=0.01, tick_value=10, notes=None,
         status_filter="active", product_filter="all", sort_by="name", portfolio_pnl={}, live_prices={},
     )

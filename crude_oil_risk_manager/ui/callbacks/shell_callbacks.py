@@ -19,12 +19,13 @@ from adapters.base import APIError, AuthenticationError, SymbolTranslator
 from config.settings import settings
 from core.models import AlertLevel, StructureStatus, TradeEventType
 from core.pnl import (
+    apply_pnl_reset_baseline,
     build_pnl_record,
     calculate_portfolio_pnl,
     calculate_todays_pnl,
     calculate_todays_realized_pnl,
 )
-from core.user_settings import KEY_API_TOKEN, KEY_PNL_STOP
+from core.user_settings import KEY_API_TOKEN, KEY_PNL_BASELINE, KEY_PNL_STOP
 from ui.container import NO_UPDATE_LABEL, container
 from ui.layouts.placeholder import (
     archive_layout,
@@ -293,6 +294,8 @@ def refresh_portfolio_pnl(n_intervals, live_prices):
     prices = _price_map(live_prices)
     stale = _stale_symbols(live_prices)
     summary = calculate_portfolio_pnl(structures, trades, prices, stale, closed, closed_trades)
+    baseline = container.repository.get_setting(KEY_PNL_BASELINE, 0.0) or 0.0
+    summary = apply_pnl_reset_baseline(summary, baseline)
     all_trades = [t for group in (*trades.values(), *closed_trades.values()) for t in group]
     summary["todays_realized_pnl"] = calculate_todays_realized_pnl(all_trades)
     _add_structure_details(summary, structures, stale)

@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS legs (
     average_entry_price REAL,
     is_naked INTEGER NOT NULL DEFAULT 0,
     direction TEXT NOT NULL DEFAULT 'buy',   -- 'buy' or 'sell': flips the PnL sign
-    leg_order INTEGER NOT NULL DEFAULT 0    -- preserves user-defined ordering of legs
+    leg_order INTEGER NOT NULL DEFAULT 0,    -- preserves user-defined ordering of legs
+    transaction_cost_per_lot REAL NOT NULL DEFAULT 0.0  -- $/lot, one side (entry OR exit)
 );
 
 CREATE TABLE IF NOT EXISTS trades (
@@ -56,7 +57,8 @@ CREATE TABLE IF NOT EXISTS trades (
     realized_pnl REAL,
     notes TEXT DEFAULT '',
     stop_loss_price REAL,
-    target_price REAL
+    target_price REAL,
+    transaction_cost REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS pnl_records (
@@ -68,7 +70,8 @@ CREATE TABLE IF NOT EXISTS pnl_records (
     timestamp TEXT NOT NULL,
     last_price_used TEXT NOT NULL,          -- JSON: {symbol: price}
     is_stale INTEGER NOT NULL DEFAULT 0,
-    stale_symbols TEXT NOT NULL DEFAULT '[]' -- JSON array
+    stale_symbols TEXT NOT NULL DEFAULT '[]', -- JSON array
+    transaction_costs REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS alerts (

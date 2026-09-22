@@ -95,6 +95,11 @@ def _leg_entry(leg: Leg) -> float | None:
     return leg.average_entry_price if leg.average_entry_price is not None else leg.entry_price
 
 
+def structure_transaction_cost(structure: Structure, lots: float) -> float:
+    """Sum of leg.transaction_cost_per_lot * lots across the structure's legs (one side)."""
+    return sum(leg.transaction_cost_per_lot * lots for leg in structure.legs)
+
+
 # ----------------------------------------------------------------------
 # Validation
 # ----------------------------------------------------------------------
@@ -209,6 +214,7 @@ def enter_trade(
         notes=notes,
         stop_loss_price=stop_loss_price,
         target_price=target_price,
+        transaction_cost=structure_transaction_cost(structure, lots),
     )
     verb = "added" if is_add else "entered"
     return EntryResult(legs=legs, trade=trade, status=StructureStatus.OPEN, audit_note=f"trade {verb}: {lots:g} lots at {price:g}")
@@ -238,6 +244,7 @@ def exit_structure(structure: Structure, price, lots, notes: str | None) -> Exit
         raise TradeError(errors)
 
     realized = structure_pnl(structure, entry_price, price, lots)
+    exit_tc = structure_transaction_cost(structure, lots)
     trade = Trade(
         structure_id=structure.structure_id,
         leg_id=structure.legs[0].leg_id,
@@ -247,9 +254,11 @@ def exit_structure(structure: Structure, price, lots, notes: str | None) -> Exit
         direction="sell" if structure.legs[0].direction == "buy" else "buy",  # the closing side
         realized_pnl=realized,
         notes=notes,
+        transaction_cost=exit_tc,
     )
     legs = [leg.model_copy(update={"lots": 0.0}) for leg in structure.legs]
     return ExitResult(
         legs=legs, trade=trade, realized_pnl=realized,
-        audit_note=f"full exit: {lots:g} lots at {price:g}, realized {realized:+,.0f}",
+        audit_note=f"full exit: {lots:g} lots at {price:g}, realized {realized:+,.0f} gross"
+        + (f" (exit cost {exit_tc:,.0f})" if exit_tc else ""),
     )

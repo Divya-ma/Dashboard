@@ -52,6 +52,7 @@ class TradeIdea:
     entry: float
     stop: float
     target: float
+    transaction_cost: float = 0.0  # estimated round-trip (entry + exit) $ cost of the idea
 
     @property
     def total_lots(self) -> int:
@@ -76,6 +77,10 @@ class IdeaAnalysis:
     rr_ratio: float = 0.0
     dollar_risk: float = 0.0
     dollar_reward: float = 0.0
+    transaction_cost: float = 0.0
+    net_dollar_risk: float = 0.0
+    net_dollar_reward: float = 0.0
+    net_rr_ratio: float = 0.0
     stats: dict = field(default_factory=dict)
     unit_series: pd.Series | None = None
     observations: int = 0
@@ -102,13 +107,15 @@ def _number(value) -> float | None:
 
 
 def parse_idea_inputs(
-    structure_type: str, symbols: list, directions: list, lots: list, entry, stop, target
+    structure_type: str, symbols: list, directions: list, lots: list, entry, stop, target, transaction_cost=None
 ) -> tuple[TradeIdea | None, list[str], list[str]]:
     """Validate the form values. Returns (idea or None, blocking errors, non-blocking warnings).
 
     Errors: a missing symbol or non-whole lots, a missing entry/stop/target, or a stop/target
     equal to the entry or to each other. A stop or target on the wrong side of the entry for
-    the first leg's direction is only a warning.
+    the first leg's direction is only a warning. `transaction_cost` is the estimated
+    round-trip (entry + exit) $ cost of the idea; blank/None defaults to 0.0, negative is an
+    error.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -139,10 +146,13 @@ def parse_idea_inputs(
             errors.append("Target cannot equal entry price")
         if levels["stop"] == levels["target"] and levels["stop"] != levels["entry"]:
             errors.append("Stop and target cannot be the same price")
+    tc = _number(transaction_cost) or 0.0
+    if tc < 0:
+        errors.append("Transaction cost cannot be negative.")
     if errors:
         return None, errors, warnings
 
-    idea = TradeIdea(legs=legs, entry=levels["entry"], stop=levels["stop"], target=levels["target"])
+    idea = TradeIdea(legs=legs, entry=levels["entry"], stop=levels["stop"], target=levels["target"], transaction_cost=tc)
     long_side = idea.side == "buy"
     if (idea.stop > idea.entry) == long_side:
         warnings.append(
@@ -217,6 +227,15 @@ def analyze_trade_idea(
     result.rr_ratio = result.reward / result.risk
     result.dollar_risk = result.risk * idea.total_lots * DOLLARS_PER_POINT_PER_LOT
     result.dollar_reward = result.reward * idea.total_lots * DOLLARS_PER_POINT_PER_LOT
+    result.transaction_cost = idea.transaction_cost
+    result.net_dollar_risk = result.dollar_risk + idea.transaction_cost
+    result.net_dollar_reward = result.dollar_reward - idea.transaction_cost
+    result.net_rr_ratio = result.net_dollar_reward / result.net_dollar_risk if result.net_dollar_risk > 0 else 0.0
+    if idea.transaction_cost and result.dollar_reward > 0 and result.net_dollar_reward <= 0:
+        result.warnings.append(
+            f"Profitable before transaction costs (est. ${result.dollar_reward:,.0f} reward), but a loss "
+            f"after the ${idea.transaction_cost:,.0f} round-trip cost."
+        )
 
     try:
         full = idea_daily_series(idea, data_loader).dropna().sort_index()

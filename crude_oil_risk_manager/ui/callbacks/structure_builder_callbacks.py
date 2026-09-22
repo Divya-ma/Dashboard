@@ -64,6 +64,17 @@ def _legs(symbols, ratios) -> list[dict]:
     return [{"symbol": normalize_symbol(s), "ratio": r} for s, r in zip(symbols or [], ratios or [])]
 
 
+def _tc_values(tcs) -> list[float]:
+    """Leg transaction costs from the form: blank/invalid -> 0.0."""
+    out = []
+    for t in tcs or []:
+        try:
+            out.append(max(0.0, float(t)))
+        except (TypeError, ValueError):
+            out.append(0.0)
+    return out
+
+
 # ----------------------------------------------------------------------
 # Modal / template / steps
 # ----------------------------------------------------------------------
@@ -129,7 +140,7 @@ def _contract_options() -> list[str]:
     return sorted(c.symbol for c in container.repository.get_all_contracts())
 
 
-def render_leg_rows(template, add_clicks, remove_clicks, symbols, ratios, current_legs):
+def render_leg_rows(template, add_clicks, remove_clicks, symbols, ratios, tcs, current_legs):
     """Rebuild the leg rows after a template pick, '+ Add Leg' or a remove click, keeping typed values."""
     trigger = callback_context.triggered_id
     remove_index = None
@@ -142,12 +153,16 @@ def render_leg_rows(template, add_clicks, remove_clicks, symbols, ratios, curren
     else:
         raise PreventUpdate
 
-    current = _legs(symbols, ratios) if symbols else (current_legs or [])
+    if symbols:
+        legs, tc_values = _legs(symbols, ratios), _tc_values(tcs)
+        current = [{**leg, "tc": tc_values[i] if i < len(tc_values) else 0.0} for i, leg in enumerate(legs)]
+    else:
+        current = current_legs or []
     rows = next_leg_rows(template, event, current, remove_index)
     custom = template == "custom"
     options = _contract_options() if rows else []
     children = [
-        build_leg_row(i, row["symbol"], row["ratio"], options, removable=custom and len(rows) > 1)
+        build_leg_row(i, row["symbol"], row["ratio"], row.get("tc", 0.0), options, removable=custom and len(rows) > 1)
         for i, row in enumerate(rows)
     ]
     return children, rows, (SHOWN if custom else HIDDEN)
@@ -198,19 +213,32 @@ def update_validation_messages(step, legs_store, symbols, ratios):
     return render_messages(errors, warnings)
 
 
-def render_review(step, template, symbols, ratios, name, multiplier, tick_size, tick_value, notes, correlation_rows):
+def render_review(step, template, symbols, ratios, tcs, name, multiplier, tick_size, tick_value, notes, correlation_rows):
     if step != STEP_COUNT:
         raise PreventUpdate
     legs = _legs(symbols, ratios)
+    tc_values = _tc_values(tcs)
     net, ignored = net_outright_equivalent(legs)
     label = STRUCTURE_TEMPLATES.get(template or "", {}).get("label", "—")
     text = {"color": COLORS["TEXT_PRIMARY"]}
+    total_tc = sum(tc_values)
     sections = [
         html.H4(name or "(no name)", style=text),
         html.Div(f"{label} · Multiplier {multiplier or '—'} · Tick size {tick_size or '—'} · Tick value {tick_value or '—'}",
                  style={"color": COLORS["TEXT_SECONDARY"], "marginBottom": "12px"}),
-        data_table(["Leg", "Symbol", "Ratio"], [[str(i), l["symbol"] or "—", f"{l['ratio']:+g}" if l["ratio"] else "—"]
-                                                  for i, l in enumerate(legs, start=1)]),
+        data_table(
+            ["Leg", "Symbol", "Ratio", "TC/lot (1 side)"],
+            [
+                [str(i), l["symbol"] or "—", f"{l['ratio']:+g}" if l["ratio"] else "—",
+                 f"${tc_values[i - 1]:,.2f}" if i - 1 < len(tc_values) and tc_values[i - 1] else "—"]
+                for i, l in enumerate(legs, start=1)
+            ],
+        ),
+        html.Div(
+            f"Transaction cost per lot entered ({total_tc:,.2f}): charged again (using the exit lots) when this "
+            "structure is exited.",
+            style={"color": COLORS["TEXT_SECONDARY"], "marginTop": "8px"},
+        ) if total_tc else None,
         html.H6("Net Outright Equivalent (per 1 lot)", style={**text, "marginTop": "16px"}),
         render_exposure_table(net, ignored),
     ]
@@ -229,7 +257,7 @@ def render_review(step, template, symbols, ratios, name, multiplier, tick_size, 
 
 
 def save_structure(
-    n_clicks, name, template, symbols, ratios, multiplier, tick_size, tick_value, notes,
+    n_clicks, name, template, symbols, ratios, tcs, multiplier, tick_size, tick_value, notes,
     status_filter, product_filter, sort_by, portfolio_pnl, live_prices,
 ):
     """Build and save a SHELL structure; on errors keep the modal open and show them."""
@@ -238,7 +266,8 @@ def save_structure(
     repository = container.repository
     try:
         built = build_shell_structure(
-            name, template, symbols, ratios, multiplier, tick_size, tick_value, notes, repository.get_contract
+            name, template, symbols, ratios, multiplier, tick_size, tick_value, notes, repository.get_contract,
+            tcs=tcs,
         )
         save_shell_structure(repository, built)
     except StructureBuildError as exc:
@@ -261,6 +290,7 @@ def save_structure(
 
 _LEG_SYMBOLS = {"type": "leg-symbol", "index": ALL}
 _LEG_RATIOS = {"type": "leg-ratio", "index": ALL}
+_LEG_TCS = {"type": "leg-tc", "index": ALL}
 
 
 def register_structure_builder_callbacks(app) -> None:
@@ -332,6 +362,7 @@ def register_structure_builder_callbacks(app) -> None:
         Input({"type": "leg-remove", "index": ALL}, "n_clicks"),
         State(_LEG_SYMBOLS, "value"),
         State(_LEG_RATIOS, "value"),
+        State(_LEG_TCS, "value"),
         State("store-builder-legs", "data"),
         prevent_initial_call=True,
     )(render_leg_rows)
@@ -376,6 +407,7 @@ def register_structure_builder_callbacks(app) -> None:
         State("store-builder-template", "data"),
         State(_LEG_SYMBOLS, "value"),
         State(_LEG_RATIOS, "value"),
+        State(_LEG_TCS, "value"),
         State("builder-name", "value"),
         State("builder-multiplier", "value"),
         State("builder-tick-size", "value"),
@@ -396,6 +428,7 @@ def register_structure_builder_callbacks(app) -> None:
         State("store-builder-template", "data"),
         State(_LEG_SYMBOLS, "value"),
         State(_LEG_RATIOS, "value"),
+        State(_LEG_TCS, "value"),
         State("builder-multiplier", "value"),
         State("builder-tick-size", "value"),
         State("builder-tick-value", "value"),

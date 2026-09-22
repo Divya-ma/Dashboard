@@ -37,7 +37,7 @@ def load_open_structures(pathname):
 
 def analyze(
     n_clicks, structure_type, symbol_1, direction_1, lots_1, symbol_2, direction_2, lots_2,
-    symbol_3, direction_3, lots_3, entry, stop, target, lookback, open_structures,
+    symbol_3, direction_3, lots_3, entry, stop, target, transaction_cost, lookback, open_structures,
 ):
     """Validate the idea, analyze it against local history and render sections A-D."""
     if not n_clicks:
@@ -47,7 +47,7 @@ def analyze(
         [symbol_1, symbol_2, symbol_3],
         [direction_1, direction_2, direction_3],
         [lots_1, lots_2, lots_3],
-        entry, stop, target,
+        entry, stop, target, transaction_cost,
     )
     if idea is None:
         return build_messages(errors, warnings)
@@ -91,6 +91,7 @@ def register_idea_callbacks(app) -> None:
         State("idea-entry", "value"),
         State("idea-stop", "value"),
         State("idea-target", "value"),
+        State("idea-transaction-cost", "value"),
         State("idea-lookback", "value"),
         State("idea-open-structures", "data"),
         prevent_initial_call=True,

@@ -61,16 +61,19 @@ class BuiltStructure:
 def next_leg_rows(
     template: str | None, event: str, current_rows: list[dict], remove_index: int | None = None
 ) -> list[dict]:
-    """Leg rows ({"symbol", "ratio"}) after a template pick, "+ Add Leg" or a remove click."""
+    """Leg rows ({"symbol", "ratio", "tc"}) after a template pick, "+ Add Leg" or a remove click.
+
+    "tc" is the leg's transaction cost per lot for a single side ($); it defaults to 0.0.
+    """
     spec = STRUCTURE_TEMPLATES.get(template or "")
     if spec is None:
         return []
     if event == EVENT_TEMPLATE:
-        return [{"symbol": None, "ratio": ratio} for ratio in spec["ratios"]]
+        return [{"symbol": None, "ratio": ratio, "tc": 0.0} for ratio in spec["ratios"]]
     if spec["legs"] is not None:  # only Custom has an editable number of legs
         return current_rows
     if event == EVENT_ADD:
-        return [*current_rows, {"symbol": None, "ratio": 1}]
+        return [*current_rows, {"symbol": None, "ratio": 1, "tc": 0.0}]
     if event == EVENT_REMOVE and remove_index is not None and len(current_rows) > 1:
         return [row for i, row in enumerate(current_rows) if i != remove_index]
     return current_rows
@@ -95,12 +98,28 @@ def _contract_for_symbol(symbol: str, multiplier: float, tick_size: float, tick_
     )
 
 
+def _parse_tc(value, leg_number: int, errors: list[str]) -> float:
+    """Transaction cost per lot (one side): blank/None -> 0.0; must be >= 0."""
+    if value is None or value == "":
+        return 0.0
+    try:
+        tc = float(value)
+    except (TypeError, ValueError):
+        errors.append(f"Leg {leg_number} transaction cost must be a number.")
+        return 0.0
+    if tc < 0:
+        errors.append(f"Leg {leg_number} transaction cost cannot be negative.")
+        return 0.0
+    return tc
+
+
 def build_shell_structure(
-    name, template, symbols, ratios, multiplier, tick_size, tick_value, notes, get_contract
+    name, template, symbols, ratios, multiplier, tick_size, tick_value, notes, get_contract, tcs=None
 ) -> BuiltStructure:
     """Validate the builder inputs and build a SHELL structure (no lots, no entry prices).
 
-    `get_contract(symbol)` returns the saved Contract or None. Raises
+    `get_contract(symbol)` returns the saved Contract or None. `tcs` is the per-leg
+    transaction cost ($/lot, one side); missing/blank entries default to 0.0. Raises
     StructureBuildError listing every blocking problem at once.
     """
     errors: list[str] = []
@@ -112,6 +131,8 @@ def build_shell_structure(
         errors.append("Structure name is required.")
 
     rows = [{"symbol": normalize_symbol(s), "ratio": r} for s, r in zip(symbols or [], ratios or [])]
+    tc_values = [_parse_tc(t, i + 1, errors) for i, t in enumerate((tcs or [])[: len(rows)])]
+    tc_values += [0.0] * (len(rows) - len(tc_values))
     messages = validate_structure_legs(rows)
     leg_errors, warnings = split_validation_messages(messages)
     errors.extend(leg_errors)
@@ -155,7 +176,10 @@ def build_shell_structure(
                 contracts[symbol] = _contract_for_symbol(symbol, **numbers)
                 new_contracts.append(contracts[symbol])
 
-        legs = [Leg(contract=contracts[row["symbol"]], ratio=int(row["ratio"])) for row in rows]
+        legs = [
+            Leg(contract=contracts[row["symbol"]], ratio=int(row["ratio"]), transaction_cost_per_lot=tc)
+            for row, tc in zip(rows, tc_values)
+        ]
         structure = Structure(
             name=name,
             structure_type=StructureType(template),

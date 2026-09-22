@@ -16,6 +16,7 @@ from dash import ALL, Input, Output, State, html, no_update
 from dash.exceptions import PreventUpdate
 
 from core.models import StructureStatus
+from core.pnl import calculate_structure_transaction_costs
 from core.structure_builder import StructureBuildError
 from core.structure_edit import apply_leg_edits
 from core.structure_view import prices_from_store, structure_entry_price, structure_live_price
@@ -200,11 +201,17 @@ def open_exit_confirmation(n_clicks, exit_price, lots, structure_id):
     except TradeError as exc:
         body = [html.Div(f"⛔ {message}", style={"color": COLORS["ACCENT_RED"]}) for message in exc.errors]
         return True, body, True
+    prior_tc = calculate_structure_transaction_costs(container.repository.get_trades_for_structure(structure_id))
+    total_tc = prior_tc + result.trade.transaction_cost
+    net_pnl = result.realized_pnl - total_tc
     body = [
         html.P(f"Are you sure you want to close this structure at {exit_price:g}?"),
-        html.P(["Realized PnL: ", pnl_span(result.realized_pnl, fontWeight="bold")]),
-        html.P("This cannot be undone.", style={"color": COLORS["ACCENT_YELLOW"]}),
+        html.P(["Realized PnL (before transaction costs): ", pnl_span(result.realized_pnl, fontWeight="bold")]),
     ]
+    if total_tc:
+        body.append(html.P(f"Total transaction cost (entry + exit): -${total_tc:,.0f}", style={"color": COLORS["ACCENT_YELLOW"]}))
+        body.append(html.P(["Net realized PnL: ", pnl_span(net_pnl, fontWeight="bold")]))
+    body.append(html.P("This cannot be undone.", style={"color": COLORS["ACCENT_YELLOW"]}))
     return True, body, False
 
 
@@ -223,6 +230,7 @@ def execute_full_exit(
         raise PreventUpdate
     repository = container.repository
     structure = _load(structure_id)
+    prior_tc = calculate_structure_transaction_costs(repository.get_trades_for_structure(structure_id))
     try:
         result = exit_structure(structure, exit_price, lots, notes)
         repository.update_structure_legs(structure_id, result.legs, result.audit_note)
@@ -235,7 +243,8 @@ def execute_full_exit(
         return (no_update, no_update, *_toast("Could not save the exit; see the server log.", ok=False), False)
 
     rows = _grid_rows(status_filter, product_filter, sort_by, portfolio_pnl, live_prices)
-    message = f"{structure.name} closed at {exit_price:g}. Realized PnL: {format_pnl(result.realized_pnl)}"
+    net_pnl = result.realized_pnl - prior_tc - result.trade.transaction_cost
+    message = f"{structure.name} closed at {exit_price:g}. Realized PnL (net of TC): {format_pnl(net_pnl)}"
     # The portfolio PnL stop is re-checked on the next 5s PnL refresh (shell_callbacks.check_alerts).
     return (False, rows, *_toast(message, header="Structure closed"), False)
 
