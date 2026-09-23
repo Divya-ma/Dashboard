@@ -1,5 +1,6 @@
 """Tests for core.structure_utils, core.structure_builder, the builder layout and its callbacks."""
 
+import numpy as np
 import pytest
 from dash.exceptions import PreventUpdate
 
@@ -273,6 +274,87 @@ def test_check_portfolio_correlation_carries_the_real_error_reason(monkeypatch):
     monkeypatch.setattr(sb, "get_correlation_with_portfolio", fake)
     rows = sb.check_portfolio_correlation(["CLG27"], [structure("a", ["CLZ26"], [1])], 60, object())
     assert rows[0]["error"] == "no local data for CLG27"
+
+
+def test_check_portfolio_correlation_prewarms_missing_symbols_before_computing(monkeypatch):
+    """A DataLoader.ensure_cached is called once, up front, with every symbol involved."""
+    calls = []
+
+    class FakeLoader:
+        def ensure_cached(self, symbols):
+            calls.append(list(symbols))
+
+    monkeypatch.setattr(
+        sb, "get_correlation_with_portfolio",
+        lambda candidate, portfolio_symbols, window, loader: {s: {"correlation": None} for s in portfolio_symbols},
+    )
+    portfolio = [structure("A", ["CLZ26"], [1])]
+    sb.check_portfolio_correlation(["CLF27"], portfolio, 60, FakeLoader())
+
+    assert calls == [["CLF27", "CLZ26"]]
+
+
+def test_check_portfolio_correlation_prewarm_failure_does_not_block_the_check(monkeypatch):
+    class BrokenLoader:
+        def ensure_cached(self, symbols):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        sb, "get_correlation_with_portfolio",
+        lambda candidate, portfolio_symbols, window, loader: {s: {"correlation": 0.5} for s in portfolio_symbols},
+    )
+    rows = sb.check_portfolio_correlation(["CLF27"], [structure("A", ["CLZ26"], [1])], 60, BrokenLoader())
+    assert rows[0]["correlation"] == 0.5
+
+
+def test_check_portfolio_correlation_missing_data_loader_ensure_cached_is_skipped(monkeypatch):
+    """A data_loader without ensure_cached (e.g. a bare test stub) is tolerated, not required."""
+    monkeypatch.setattr(
+        sb, "get_correlation_with_portfolio",
+        lambda candidate, portfolio_symbols, window, loader: {s: {"correlation": 0.5} for s in portfolio_symbols},
+    )
+    rows = sb.check_portfolio_correlation(["CLF27"], [structure("A", ["CLZ26"], [1])], 60, object())
+    assert rows[0]["correlation"] == 0.5
+
+
+def test_check_portfolio_correlation_adds_a_whole_portfolio_row(tmp_path, create_synthetic_parquet):
+    from adapters.mock.mock_historical import MockHistoricalAdapter
+    from core.data_loader import DataLoader
+
+    base = 75.0 + np.cumsum(np.random.default_rng(1).normal(0.0, 1.0, 60))
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
+    loader = DataLoader(str(tmp_path), MockHistoricalAdapter())
+
+    rows = sb.check_portfolio_correlation(["CLF27"], [structure("A", ["CLZ26"], [1])], 30, loader)
+
+    portfolio_rows = [r for r in rows if r["existing_symbol"] == "PORTFOLIO"]
+    assert len(portfolio_rows) == 1
+    assert portfolio_rows[0]["correlation"] == pytest.approx(1.0)
+    assert portfolio_rows[0]["existing_structure"].startswith("Whole Portfolio")
+
+
+def test_check_portfolio_correlation_no_portfolio_row_when_no_open_exposure():
+    rows = sb.check_portfolio_correlation(["CLF27"], [], 30, object())
+    assert rows == []
+
+
+# ---------- active_composite_symbols ----------
+
+
+def test_active_composite_symbols_only_active_structures_with_an_exchange_symbol(repo):
+    def save(name, symbols, ratios, status):
+        s = structure(name, symbols, ratios, status=status)
+        for leg in s.legs:
+            repo.save_contract(leg.contract)
+        repo.save_structure(s)
+
+    save("spread", ["CLZ26", "CLF27"], [1, -1], StructureStatus.OPEN)
+    save("shell spread", ["CLZ26", "CLG27"], [1, -1], StructureStatus.SHELL)
+    save("odd ratio", ["CLZ26", "CLF27"], [1, -3], StructureStatus.PARTIALLY_CLOSED)  # no composite symbol
+    save("closed", ["CLZ26"], [1], StructureStatus.CLOSED)  # not active
+
+    assert set(sb.active_composite_symbols(repo)) == {"CLZ26-F27", "CLZ26-G27"}
 
 
 # ---------- layout ----------

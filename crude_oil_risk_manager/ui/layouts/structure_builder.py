@@ -93,7 +93,9 @@ def render_correlation_table(rows: list[dict]):
             correlation = html.Span(reason, style=_MUTED)
             chip = html.Span(label, style={"color": color})
         else:
-            correlation = f"{row['correlation']:+.2f}"
+            window_used = row.get("window_used")
+            suffix = f" ({window_used}d)" if window_used else ""
+            correlation = f"{row['correlation']:+.2f}{suffix}"
             hedge = row["classification"] == "negatively_correlated"
             chip = html.Span(
                 label,

@@ -7,13 +7,16 @@ import pytest
 from adapters.mock.mock_historical import MockHistoricalAdapter
 from core.correlation import (
     build_correlation_matrix,
+    build_portfolio_difference_series,
     calculate_correlation,
     calculate_rolling_correlation,
     classify_correlation,
+    correlate_against_portfolio_series,
     get_correlation_with_portfolio,
 )
 from core.data_loader import DataLoader
 from core.exceptions import DataNotAvailableError, InsufficientDataError
+from core.models import Contract, Leg, Structure, StructureStatus, StructureType
 
 
 def random_closes(n: int, seed: int, start: float = 75.0) -> np.ndarray:
@@ -173,6 +176,83 @@ def test_portfolio_correlation_reports_the_real_failure_reason(tmp_path, loader,
     assert ok["CLF27"]["error"] is None
 
 
+# ---------- get_correlation_with_portfolio: window fallback ----------
+
+
+def test_portfolio_correlation_falls_back_to_available_window(tmp_path, loader, create_synthetic_parquet):
+    """Fewer than `window` observations still yields a correlation, not a blank result."""
+    base = random_closes(30, seed=1)
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
+
+    result = get_correlation_with_portfolio("CLZ26", ["CLF27"], 60, loader)
+
+    assert result["CLF27"]["correlation"] == pytest.approx(1.0)
+    assert result["CLF27"]["window_used"] == 29  # 30 closes -> 29 diffs, fewer than the 60-day window
+    assert "Only 29" in result["CLF27"]["error"]
+
+
+def test_portfolio_correlation_below_floor_is_still_none(tmp_path, loader, create_synthetic_parquet):
+    create_synthetic_parquet(tmp_path, "CLZ26", n_days=10, seed=1)
+    create_synthetic_parquet(tmp_path, "CLF27", n_days=10, seed=2)
+    result = get_correlation_with_portfolio("CLZ26", ["CLF27"], 60, loader)
+    assert result["CLF27"]["correlation"] is None
+
+
+# ---------- build_portfolio_difference_series / correlate_against_portfolio_series ----------
+
+
+def _open_structure(name: str, symbol: str, lots: float = 1.0) -> Structure:
+    leg = Leg(
+        contract=Contract(product="CL", contract_month=12, contract_year=2026, symbol=symbol,
+                          multiplier=1000, tick_size=0.01, tick_value=10),
+        ratio=1, lots=lots, entry_price=1.0, direction="buy",
+    )
+    return Structure(name=name, structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[leg], status=StructureStatus.OPEN)
+
+
+def test_build_portfolio_difference_series_combines_weighted_legs(tmp_path, loader, create_synthetic_parquet):
+    base = random_closes(60, seed=1)
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    structure = _open_structure("A", "CLZ26", lots=2.0)
+
+    series = build_portfolio_difference_series([structure], loader)
+
+    assert series is not None
+    assert series.name == "Portfolio"
+    expected = pd.Series(base).diff().dropna().to_numpy() * (2.0 * 1000.0)
+    assert series.to_numpy() == pytest.approx(expected)
+
+
+def test_build_portfolio_difference_series_none_when_no_exposure(loader):
+    assert build_portfolio_difference_series([], loader) is None
+
+
+def test_build_portfolio_difference_series_skips_symbols_without_local_data(tmp_path, loader, create_synthetic_parquet):
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(60, seed=1))
+    structures = [_open_structure("A", "CLZ26"), _open_structure("B", "CLF27")]
+    series = build_portfolio_difference_series(structures, loader)
+    assert series is not None and len(series) == 59  # only CLZ26 contributes; CLF27 has no local data
+
+
+def test_correlate_against_portfolio_series(tmp_path, loader, create_synthetic_parquet):
+    base = random_closes(60, seed=1)
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
+    portfolio_series = build_portfolio_difference_series([_open_structure("A", "CLZ26")], loader)
+
+    result = correlate_against_portfolio_series("CLF27", portfolio_series, 30, loader)
+
+    assert result["correlation"] == pytest.approx(1.0)
+    assert result["classification"] == "highly_correlated"
+
+
+def test_correlate_against_portfolio_series_missing_candidate(loader):
+    portfolio_series = pd.Series([1.0, 2.0, 3.0])
+    result = correlate_against_portfolio_series("CLZ26", portfolio_series, 30, loader)
+    assert result["correlation"] is None and result["error"]
+
+
 # ---------- DataLoader ----------
 
 
@@ -251,3 +331,47 @@ def test_get_available_date_range(tmp_path, loader, create_synthetic_parquet):
     earliest, latest = date_range
     assert (latest - earliest).days == 9
     assert loader.get_available_date_range("CLF27") is None
+
+
+# ---------- DataLoader.ensure_cached ----------
+
+
+def test_ensure_cached_skips_symbols_already_local(tmp_path, create_synthetic_parquet):
+    create_synthetic_parquet(tmp_path, "CLZ26", n_days=10, seed=1)
+
+    class Adapter(MockHistoricalAdapter):
+        def backfill_symbols(self, symbols, start, end=None):
+            raise AssertionError("should not be called for an already-cached symbol")
+
+    loader = DataLoader(str(tmp_path), Adapter())
+    assert loader.ensure_cached(["CLZ26"]) == {}
+
+
+def test_ensure_cached_batches_missing_symbols_in_one_call(tmp_path):
+    calls = []
+
+    class Adapter(MockHistoricalAdapter):
+        def backfill_symbols(self, symbols, start, end=None):
+            calls.append(list(symbols))
+            return {s: 10 for s in symbols}
+
+    loader = DataLoader(str(tmp_path), Adapter())
+    result = loader.ensure_cached(["CLZ26", "CLF27", "CLZ26"])  # duplicate collapsed
+
+    assert calls == [["CLZ26", "CLF27"]]
+    assert result == {"CLZ26": "ok", "CLF27": "ok"}
+
+
+def test_ensure_cached_without_adapter_support(tmp_path):
+    loader = DataLoader(str(tmp_path), MockHistoricalAdapter())
+    assert loader.ensure_cached(["CLZ26"]) == {"CLZ26": "no backfill support"}
+
+
+def test_ensure_cached_never_raises_on_adapter_failure(tmp_path):
+    class Adapter(MockHistoricalAdapter):
+        def backfill_symbols(self, symbols, start, end=None):
+            raise RuntimeError("no API token configured")
+
+    loader = DataLoader(str(tmp_path), Adapter())
+    result = loader.ensure_cached(["CLZ26"])
+    assert result == {"CLZ26": "no API token configured"}

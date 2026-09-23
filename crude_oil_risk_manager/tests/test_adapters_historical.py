@@ -4,6 +4,7 @@ adapters.historical.vendor.VendorHistoricalAdapter / RateLimitedQueue.
 
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -218,6 +219,122 @@ def test_run_morning_sync_fetches_symbols_not_synced_today(vendor_adapter, repo,
 
     result = vendor_adapter.run_morning_sync(repo)
     assert result == {"CLZ26": "ok"}
+
+
+# ---------- get_symbols_needing_sync: extra_symbols ----------
+
+
+def test_get_symbols_needing_sync_includes_extra_symbols(vendor_adapter, repo):
+    assert vendor_adapter.get_symbols_needing_sync(repo, extra_symbols=["CLZ26-F27"]) == ["CLZ26-F27"]
+    vendor_adapter._update_sync_log("CLZ26-F27", status="ok", row_count=1)
+    assert vendor_adapter.get_symbols_needing_sync(repo, extra_symbols=["CLZ26-F27"]) == []
+
+
+# ---------- backfill_symbols (batched) ----------
+
+
+def test_backfill_symbols_batches_into_one_api_call(vendor_adapter, mocker):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 1, 5, tzinfo=timezone.utc)
+
+    def fake_fetch(api_symbols, interval, start=None, end=None, count=None):
+        return {sym: make_ohlc_df(sym, [start]) for sym in api_symbols}
+
+    fetch_mock = mocker.patch.object(vendor_adapter, "_fetch_from_api", side_effect=fake_fetch)
+    counts = vendor_adapter.backfill_symbols(["CLZ26", "CLF27", "CLG27"], start, end)
+
+    fetch_mock.assert_called_once()
+    assert counts == {"CLZ26": 1, "CLF27": 1, "CLG27": 1}
+    assert vendor_adapter._load_local("CLZ26") is not None
+
+
+def test_backfill_symbols_falls_back_per_symbol_when_range_too_long(vendor_adapter, mocker):
+    start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(days=25_000)  # comfortably > 10,000 rows
+    backfill_mock = mocker.patch.object(vendor_adapter, "backfill_symbol", return_value=7)
+
+    counts = vendor_adapter.backfill_symbols(["CLZ26", "CLF27"], start, end)
+
+    assert backfill_mock.call_count == 2
+    assert counts == {"CLZ26": 7, "CLF27": 7}
+
+
+def test_backfill_symbols_raises_when_start_after_end(vendor_adapter):
+    start = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    end = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError):
+        vendor_adapter.backfill_symbols(["CLZ26"], start, end)
+
+
+def test_backfill_symbols_empty_list_is_noop(vendor_adapter, mocker):
+    fetch_mock = mocker.patch.object(vendor_adapter, "_fetch_from_api")
+    assert vendor_adapter.backfill_symbols([], datetime.now(timezone.utc)) == {}
+    fetch_mock.assert_not_called()
+
+
+# ---------- run_morning_sync: full backfill vs incremental split ----------
+
+
+def test_run_morning_sync_full_backfills_symbols_with_no_local_history(vendor_adapter, repo, mocker):
+    from core.models import Contract
+
+    repo.save_contract(
+        Contract(product="CL", contract_month=12, contract_year=2026, symbol="CLZ26",
+                 multiplier=1000.0, tick_size=0.01, tick_value=10.0)
+    )
+
+    def fake_fetch(api_symbols, interval, start=None, end=None, count=None):
+        assert count is None  # full backfill uses a date range, not "latest 1 candle"
+        return {api_symbols[0]: make_ohlc_df(api_symbols[0], [start])}
+
+    fetch_mock = mocker.patch.object(vendor_adapter, "_fetch_from_api", side_effect=fake_fetch)
+    result = vendor_adapter.run_morning_sync(repo)
+
+    fetch_mock.assert_called_once()
+    assert result == {"CLZ26": "ok"}
+    assert vendor_adapter._load_local("CLZ26") is not None
+
+
+def test_run_morning_sync_mixes_full_backfill_and_incremental(vendor_adapter, repo, mocker):
+    from core.models import Contract
+
+    repo.save_contract(
+        Contract(product="CL", contract_month=12, contract_year=2026, symbol="CLZ26",
+                 multiplier=1000.0, tick_size=0.01, tick_value=10.0)
+    )
+    # CLF27 already has local history -> only needs the "latest candle" incremental path.
+    # Written directly (not via _save_local, which would also mark today's sync log "ok"
+    # and make get_symbols_needing_sync skip it outright).
+    path = Path(vendor_adapter._data_dir) / "CL" / "CLF27.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    make_ohlc_df("CLF27", [datetime(2025, 1, 1, tzinfo=timezone.utc)]).to_parquet(path, index=False)
+
+    calls = []
+
+    def fake_fetch(api_symbols, interval, start=None, end=None, count=None):
+        calls.append((tuple(api_symbols), count))
+        return {sym: make_ohlc_df(sym, [datetime.now(timezone.utc)]) for sym in api_symbols}
+
+    mocker.patch.object(vendor_adapter, "_fetch_from_api", side_effect=fake_fetch)
+    result = vendor_adapter.run_morning_sync(repo, extra_symbols=["CLF27"])
+
+    assert result == {"CLZ26": "ok", "CLF27": "ok"}
+    assert len(calls) == 2  # one batched call for the full-backfill bucket, one for the incremental bucket
+    full_backfill_call = next(c for c in calls if c[1] is None)
+    incremental_call = next(c for c in calls if c[1] == 1)
+    assert full_backfill_call[0] == ("CLZ26",)
+    assert incremental_call[0] == ("CLF27",)
+
+
+def test_run_morning_sync_extra_symbols_are_backfilled(vendor_adapter, repo, mocker):
+    mocker.patch.object(
+        vendor_adapter, "_fetch_from_api",
+        side_effect=lambda api_symbols, interval, start=None, end=None, count=None: {
+            s: make_ohlc_df(s, [datetime.now(timezone.utc)]) for s in api_symbols
+        },
+    )
+    result = vendor_adapter.run_morning_sync(repo, extra_symbols=["CLZ26-F27"])
+    assert result == {"CLZ26-F27": "ok"}
 
 
 # ---------- backfill_symbol ----------

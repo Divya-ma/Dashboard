@@ -99,6 +99,46 @@ class DataLoader:
                 f"Backfill returned 0 rows for {symbol} ({range_desc})."
             )
 
+    def ensure_cached(
+        self, symbols: list[str], start: date | None = None, end: date | None = None
+    ) -> dict[str, str]:
+        """Best-effort bulk backfill of every symbol in `symbols` with no local Parquet file.
+
+        Batches every missing symbol into as few adapter API calls as possible (via the
+        adapter's optional backfill_symbols) instead of letting each one hit load_close_series'
+        one-call-per-symbol backfill path individually. Meant to be called once, up front,
+        before a burst of per-symbol reads (e.g. a correlation check against several open
+        structures) so that burst mostly hits the local cache instead of a sequence of
+        rate-limited API calls, one per never-seen symbol.
+
+        Never raises. Returns {symbol: "ok" | "0 rows returned" | "no backfill support" | <error>}
+        for symbols that were missing; already-cached symbols are left out of the result.
+        """
+        missing = [s for s in dict.fromkeys(symbols) if self.get_available_date_range(s) is None]
+        if not missing:
+            return {}
+
+        backfill_many = getattr(self._adapter, "backfill_symbols", None)
+        if backfill_many is None:
+            return {symbol: "no backfill support" for symbol in missing}
+
+        default_start = datetime.now(timezone.utc) - timedelta(days=_DEFAULT_BACKFILL_DAYS)
+        backfill_start = default_start
+        if start is not None:
+            requested = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+            backfill_start = min(requested, default_start)
+        backfill_end = None
+        if end is not None:
+            backfill_end = datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
+
+        try:
+            counts = backfill_many(missing, backfill_start, backfill_end)
+        except (APIError, RuntimeError, ValueError) as exc:
+            logger.warning("Bulk backfill failed for %s: %s", missing, exc)
+            return {symbol: str(exc) for symbol in missing}
+
+        return {symbol: ("ok" if counts.get(symbol) else "0 rows returned") for symbol in missing}
+
     @staticmethod
     def _filter_range(series: pd.Series, start: date | None, end: date | None) -> pd.Series:
         if start is not None:

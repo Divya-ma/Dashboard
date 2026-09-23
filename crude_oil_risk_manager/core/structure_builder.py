@@ -13,7 +13,12 @@ from datetime import datetime, timedelta, timezone
 from pydantic import ValidationError
 
 from adapters.base import LETTER_TO_MONTH
-from core.correlation import classify_correlation, get_correlation_with_portfolio
+from core.correlation import (
+    build_portfolio_difference_series,
+    classify_correlation,
+    correlate_against_portfolio_series,
+    get_correlation_with_portfolio,
+)
 from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError
 from core.models import Contract, Leg, Structure, StructureStatus, StructureType
@@ -224,6 +229,30 @@ def backfill_symbols_async(historical_adapter, symbols: list[str]) -> threading.
 # ----------------------------------------------------------------------
 
 
+# Statuses the Structure Builder's correlation check compares a candidate against, and
+# the same set the background historical sync keeps warm via active_composite_symbols.
+ACTIVE_STRUCTURE_STATUSES = [StructureStatus.SHELL, StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
+
+
+def active_composite_symbols(repository) -> list[str]:
+    """Exchange-quoted composite symbols of every shell/open/partially-closed structure.
+
+    Feeds the background historical sync (adapters.historical.vendor.VendorHistoricalAdapter.
+    run_morning_sync's `extra_symbols`) so a structure's composite symbol is already cached
+    locally by the time someone runs a correlation check against it, instead of only ever
+    being fetched lazily — one API call at a time — the first time a check happens to touch
+    it. Structures with no single exchange-quoted symbol (custom, cross-product, >4 legs)
+    are skipped, same as check_portfolio_correlation.
+    """
+    structures = repository.get_all_structures(status_filter=ACTIVE_STRUCTURE_STATUSES)
+    seen: list[str] = []
+    for structure in structures:
+        symbol = structure_symbol(structure)
+        if symbol and symbol not in seen:
+            seen.append(symbol)
+    return seen
+
+
 def structure_symbol(structure: Structure) -> str | None:
     """Exchange-quoted symbol of an existing structure, or None if it has none."""
     return compose_structure_symbol(
@@ -254,21 +283,37 @@ def check_portfolio_correlation(
     window: int,
     data_loader: DataLoader,
 ) -> list[dict]:
-    """One row per (candidate, existing structure): correlation, classification, message.
+    """One row per (candidate, existing structure), plus one 'vs whole portfolio' row per
+    candidate: correlation, classification, message.
 
-    Structures without an exchange-quoted symbol (custom, cross-product) are
-    left out. Missing data never raises; the row carries correlation=None.
+    Structures without an exchange-quoted symbol (custom, cross-product) are left out of
+    the pairwise rows, but still contribute to the portfolio-level row via their own legs
+    (see build_portfolio_difference_series). Missing data never raises; a row carries
+    correlation=None instead.
+
+    Before computing anything, every candidate and existing structure symbol missing from
+    the local cache is bulk-backfilled in as few batched API calls as possible
+    (DataLoader.ensure_cached), instead of the one-API-call-per-missing-symbol path this
+    used to fall into — which, at 7 calls/minute, made the first correlation check against
+    several never-seen symbols painfully slow.
     """
     names_by_symbol: dict[str, list[str]] = {}
     for structure in portfolio:
         symbol = structure_symbol(structure)
         if symbol:
             names_by_symbol.setdefault(symbol, []).append(structure.name)
-    if not names_by_symbol:
-        return []
+
+    ensure_cached = getattr(data_loader, "ensure_cached", None)
+    if ensure_cached is not None:
+        try:
+            ensure_cached([*candidates, *names_by_symbol])
+        except Exception:  # noqa: BLE001 - a failed pre-warm must never block the correlation check
+            logger.exception("Bulk pre-warm before correlation check failed")
 
     rows = []
     for candidate in candidates:
+        if not names_by_symbol:
+            break
         try:
             results = get_correlation_with_portfolio(candidate, list(names_by_symbol), window, data_loader)
         except (CrudeOilRiskError, ValueError) as exc:
@@ -283,7 +328,31 @@ def check_portfolio_correlation(
                     "existing_structure": ", ".join(names_by_symbol[existing]),
                     "correlation": correlation,
                     "classification": classify_correlation(correlation),
+                    "window_used": entry.get("window_used", 0),
                     "error": entry.get("error"),
                 }
             )
+
+    try:
+        portfolio_series = build_portfolio_difference_series(portfolio, data_loader) if portfolio else None
+    except Exception:  # noqa: BLE001 - the portfolio-level check must never break the whole correlation check
+        logger.exception("Could not build the portfolio-level correlation series")
+        portfolio_series = None
+
+    if portfolio_series is not None:
+        for candidate in candidates:
+            entry = correlate_against_portfolio_series(candidate, portfolio_series, window, data_loader)
+            correlation = entry["correlation"]
+            rows.append(
+                {
+                    "candidate": candidate,
+                    "existing_symbol": "PORTFOLIO",
+                    "existing_structure": "Whole Portfolio (dollar-weighted, all open structures)",
+                    "correlation": correlation,
+                    "classification": classify_correlation(correlation),
+                    "window_used": entry.get("window_used", 0),
+                    "error": entry.get("error"),
+                }
+            )
+
     return rows

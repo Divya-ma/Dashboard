@@ -24,10 +24,16 @@ from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError, InsufficientDataError
 from core.models import Structure
 from core.structure_utils import normalize_symbol
+from core.var import leg_dollar_weights
 
 logger = logging.getLogger(__name__)
 
 _HIGH_THRESHOLD = 0.7
+
+# Floor for the portfolio-correlation-check fallback below: below this many aligned
+# observations no correlation is attempted at all, matching DataLoader.align_series'
+# own _MIN_COMMON_DATES floor.
+_MIN_CORRELATION_OBSERVATIONS = 20
 
 
 def _validate_window(window: int) -> None:
@@ -162,6 +168,36 @@ def classify_correlation(correlation: float | None) -> str:
     return "uncorrelated"
 
 
+def _correlate_aligned(
+    series_a: pd.Series, series_b: pd.Series, window: int, data_loader: DataLoader, label_a: str, label_b: str
+) -> dict:
+    """Best-effort core shared by get_correlation_with_portfolio and correlate_against_portfolio_series.
+
+    Aligns two price-difference series and correlates on min(window, observations available)
+    instead of requiring the full window up front — a candidate/existing pair with, say, 25
+    common days and a 60-day requested window used to raise InsufficientDataError and show
+    nothing at all; it now shows a correlation computed on those 25 days, with "error" set to
+    a caveat (not a failure) noting the window was reduced. align_series' own floor of 20
+    common dates still applies below that a correlation is not attempted.
+    """
+    entry = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "common_dates": 0, "error": None}
+    try:
+        entry["common_dates"] = len(series_a.index.intersection(series_b.index))
+        aligned_a, aligned_b = data_loader.align_series(series_a, series_b)
+        effective_window = min(window, len(aligned_a))
+        corr = _pearson_last_window(aligned_a, aligned_b, effective_window, label_a, label_b)
+    except (CrudeOilRiskError, ValueError) as exc:
+        entry["error"] = str(exc)
+        return entry
+
+    entry["correlation"] = corr
+    entry["classification"] = classify_correlation(corr)
+    entry["window_used"] = effective_window
+    if effective_window < window:
+        entry["error"] = f"Only {effective_window} of the requested {window}-day window available."
+    return entry
+
+
 def get_correlation_with_portfolio(
     candidate_symbol: str,
     portfolio_symbols: list[str],
@@ -177,12 +213,15 @@ def get_correlation_with_portfolio(
     token configured", "InsufficientDataError: ...") so the caller can show *why*
     instead of a blanket "insufficient data" — this is what feeds the Structure
     Builder's live correlation check. window_used is the number of observations
-    actually used in the correlation.
+    actually used in the correlation, which may be less than `window` (see
+    _correlate_aligned) when full history is not yet available.
 
     load_price_differences backfills a symbol with no local data on demand, so a
     brand-new leg is fetched here rather than failing outright; that backfill runs
     synchronously (this is a user-triggered "Refresh Correlation" click, not a poll),
-    so it can take a while the first time a symbol is used.
+    so it can take a while the first time a symbol is used. Callers should bulk
+    pre-warm with DataLoader.ensure_cached first (see core.structure_builder.
+    check_portfolio_correlation) to avoid backfilling one symbol at a time here.
     """
     _validate_window(window)
     results: dict[str, dict] = {}
@@ -190,39 +229,83 @@ def get_correlation_with_portfolio(
     candidate_diffs = None
     candidate_error: str | None = None
     try:
-        candidate_diffs = data_loader.load_price_differences(candidate_symbol, min_rows=window)
+        candidate_diffs = data_loader.load_price_differences(
+            candidate_symbol, min_rows=min(window, _MIN_CORRELATION_OBSERVATIONS)
+        )
     except CrudeOilRiskError as exc:
         candidate_error = str(exc)
         logger.warning("Cannot load candidate %s: %s", candidate_symbol, exc)
 
     for existing in portfolio_symbols:
-        entry = {
-            "correlation": None,
-            "classification": "insufficient_data",
-            "window_used": 0,
-            "common_dates": 0,
-            "error": candidate_error,
-        }
-        results[existing] = entry
         if candidate_diffs is None:
+            results[existing] = {
+                "correlation": None, "classification": "insufficient_data",
+                "window_used": 0, "common_dates": 0, "error": candidate_error,
+            }
             continue
-
         try:
-            existing_diffs = data_loader.load_price_differences(existing, min_rows=window)
-            common_dates = len(candidate_diffs.index.intersection(existing_diffs.index))
-            entry["common_dates"] = common_dates
-            aligned_a, aligned_b = data_loader.align_series(candidate_diffs, existing_diffs)
-            corr = _pearson_last_window(aligned_a, aligned_b, window, candidate_symbol, existing)
-        except (CrudeOilRiskError, ValueError) as exc:
-            entry["error"] = str(exc)
+            existing_diffs = data_loader.load_price_differences(
+                existing, min_rows=min(window, _MIN_CORRELATION_OBSERVATIONS)
+            )
+        except CrudeOilRiskError as exc:
             logger.warning("Correlation failed for %s / %s: %s", candidate_symbol, existing, exc)
+            results[existing] = {
+                "correlation": None, "classification": "insufficient_data",
+                "window_used": 0, "common_dates": 0, "error": str(exc),
+            }
             continue
-
-        entry["correlation"] = corr
-        entry["classification"] = classify_correlation(corr)
-        entry["window_used"] = window
+        results[existing] = _correlate_aligned(candidate_diffs, existing_diffs, window, data_loader, candidate_symbol, existing)
 
     return results
+
+
+def build_portfolio_difference_series(structures: list[Structure], data_loader: DataLoader) -> pd.Series | None:
+    """One dollar-weighted daily P&L-difference series for the whole portfolio.
+
+    Reuses core.var.leg_dollar_weights, so this is exactly the same "portfolio" the VaR &
+    Scenarios tab's portfolio_pnl_var already correlates its own way — a single number a
+    candidate structure can be checked against, instead of only pairwise-vs-each-structure.
+    Local Parquet only (never backfills), so callers control when a backfill happens; a
+    symbol with no local history is simply left out of the weighted sum, which understates
+    the portfolio's true composition until that symbol is backfilled. None if there is no
+    open exposure or no symbol has usable local history.
+    """
+    weights = leg_dollar_weights(structures)
+    if not weights:
+        return None
+
+    terms = []
+    for symbol, weight in weights.items():
+        try:
+            terms.append(_load_local_differences(symbol, data_loader) * weight)
+        except CrudeOilRiskError:
+            continue
+    if not terms:
+        return None
+
+    combined = pd.concat(terms, axis=1, join="inner").sum(axis=1)
+    combined.name = "Portfolio"
+    return combined
+
+
+def correlate_against_portfolio_series(
+    candidate_symbol: str,
+    portfolio_series: pd.Series,
+    window: int,
+    data_loader: DataLoader,
+) -> dict:
+    """Best-effort correlation of a candidate's own price differences against one combined
+    portfolio series (see build_portfolio_difference_series). Never raises; same result
+    shape and window-fallback behaviour as get_correlation_with_portfolio's per-pair entries.
+    """
+    _validate_window(window)
+    try:
+        candidate_diffs = data_loader.load_price_differences(
+            candidate_symbol, min_rows=min(window, _MIN_CORRELATION_OBSERVATIONS)
+        )
+    except CrudeOilRiskError as exc:
+        return {"correlation": None, "classification": "insufficient_data", "window_used": 0, "common_dates": 0, "error": str(exc)}
+    return _correlate_aligned(candidate_diffs, portfolio_series, window, data_loader, candidate_symbol, "Portfolio")
 
 
 # ----------------------------------------------------------------------

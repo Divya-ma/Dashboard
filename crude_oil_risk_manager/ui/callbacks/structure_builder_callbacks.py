@@ -16,8 +16,8 @@ from dash import ALL, MATCH, Input, Output, State, callback_context, html, no_up
 from dash.exceptions import PreventUpdate
 
 from config.settings import settings
-from core.models import StructureStatus
 from core.structure_builder import (
+    ACTIVE_STRUCTURE_STATUSES,
     EVENT_ADD,
     EVENT_REMOVE,
     EVENT_TEMPLATE,
@@ -55,7 +55,6 @@ from ui.layouts.structure_builder import (
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_STATUSES = [StructureStatus.SHELL, StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
 _CARD_PREFIX = "template-card-"
 _MUTED = {"color": COLORS["TEXT_SECONDARY"], "fontSize": "13px"}
 
@@ -195,7 +194,7 @@ def check_correlation(n_clicks, symbols, ratios, template):
         return html.Div("Enter at least one valid leg symbol first.", style=_MUTED), []
 
     window = int(repository.get_setting(KEY_CORRELATION_WINDOW, settings.DEFAULT_CORRELATION_WINDOW))
-    portfolio = repository.get_all_structures(status_filter=_ACTIVE_STATUSES)
+    portfolio = repository.get_all_structures(status_filter=ACTIVE_STRUCTURE_STATUSES)
     rows = check_portfolio_correlation(candidates, portfolio, window, container.data_loader)
     return render_correlation_table(rows), rows
 

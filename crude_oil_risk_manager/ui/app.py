@@ -24,6 +24,7 @@ from adapters.live.fairvalue import FairValueLiveAdapter  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
 from core.data_loader import DataLoader  # noqa: E402
+from core.structure_builder import active_composite_symbols  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_STALENESS  # noqa: E402
 from db.repository import Repository  # noqa: E402
 from ui.callbacks.correlation_callbacks import register_correlation_callbacks  # noqa: E402
@@ -99,7 +100,8 @@ container.data_loader = DataLoader(_resolve_path(settings.HISTORICAL_DATA_DIR), 
 
 def _run_morning_sync() -> None:
     try:
-        historical_adapter.run_morning_sync(repository)
+        extra_symbols = active_composite_symbols(repository)
+        historical_adapter.run_morning_sync(repository, extra_symbols=extra_symbols)
     except Exception:  # noqa: BLE001 - a background sync failure must never take the app down
         logger.exception("Morning sync crashed")
 

@@ -35,6 +35,9 @@ _MAX_ROWS_PER_REQUEST = 10_000
 _OHLC_COLUMNS = ["symbol", "timestamp", "open", "high", "low", "close", "volume"]
 _SYNC_LOG_COLUMNS = ["symbol", "last_sync_utc", "row_count", "status", "error_msg"]
 
+# Same look-back core.data_loader.DataLoader and core.structure_builder use for an on-demand backfill.
+_FULL_BACKFILL_DAYS = 365 * 3
+
 
 class RateLimitedQueue:
     """Token-bucket rate limiter ensuring API calls never exceed calls_per_minute."""
@@ -94,6 +97,12 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         directory = self._data_dir / api_code
         directory.mkdir(parents=True, exist_ok=True)
         return directory / f"{api_symbol}.parquet"
+
+    def _has_local_history(self, symbol: str) -> bool:
+        """True if an internal symbol already has any cached Parquet data at all."""
+        api_symbol = SymbolTranslator.internal_to_api(symbol)
+        df = self._load_local(api_symbol)
+        return df is not None and not df.empty
 
     def _load_local(self, api_symbol: str) -> pd.DataFrame | None:
         """Load the cached Parquet file for an API symbol, translating symbol to internal."""
@@ -370,16 +379,26 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
     # Morning sync
     # ------------------------------------------------------------------
 
-    def get_symbols_needing_sync(self, repository: Repository) -> list[str]:
+    def get_symbols_needing_sync(
+        self, repository: Repository, extra_symbols: list[str] | None = None
+    ) -> list[str]:
         """Return internal symbols whose sync_log entry is missing, not from today (UTC),
-        or not status "ok" (so a failed sync is retried)."""
-        contracts = repository.get_all_contracts()
+        or not status "ok" (so a failed sync is retried).
+
+        `extra_symbols` (e.g. active structures' composite symbols, which are never in
+        repository.get_all_contracts()) are checked against the same sync log and folded
+        into the result, so they get the same daily-freshness treatment as saved contracts.
+        """
+        symbols = [c.symbol for c in repository.get_all_contracts()]
+        for symbol in extra_symbols or []:
+            if symbol not in symbols:
+                symbols.append(symbol)
+
         today = datetime.now(timezone.utc).date()
         log_df = self._read_sync_log()
 
         needing: list[str] = []
-        for contract in contracts:
-            symbol = contract.symbol
+        for symbol in symbols:
             row = log_df[log_df["symbol"] == symbol]
             if row.empty:
                 needing.append(symbol)
@@ -408,14 +427,8 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         files = [p for p in self._data_dir.glob("*/*.parquet") if p.parent.name != "_metadata"]
         return {"symbol_count": len(files), "total_bytes": sum(p.stat().st_size for p in files)}
 
-    def run_morning_sync(self, repository: Repository) -> dict[str, str]:
-        """Fetch the latest 1D candle for all symbols not yet synced today. Synchronous."""
-        logger.info("Morning sync: starting at %s", datetime.now(timezone.utc).isoformat())
-        symbols = self.get_symbols_needing_sync(repository)
-        if not symbols:
-            logger.info("Morning sync: all symbols up to date")
-            return {}
-
+    def _sync_latest_candle(self, symbols: list[str]) -> dict[str, str]:
+        """Incremental daily sync: fetch just the latest 1D candle for symbols already cached."""
         results: dict[str, str] = {}
         api_symbols = [SymbolTranslator.internal_to_api(s) for s in symbols]
         try:
@@ -425,7 +438,6 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
             for symbol in symbols:
                 self._update_sync_log(symbol, status="error", error_msg=str(exc))
                 results[symbol] = f"error: {exc}"
-            logger.info("Morning sync: completed at %s", datetime.now(timezone.utc).isoformat())
             return results
 
         for symbol in symbols:
@@ -445,6 +457,54 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
                 logger.error("Morning sync: failed to save %s: %s", symbol, exc)
                 self._update_sync_log(symbol, status="error", error_msg=str(exc))
                 results[symbol] = f"error: {exc}"
+        return results
+
+    def run_morning_sync(
+        self, repository: Repository, extra_symbols: list[str] | None = None
+    ) -> dict[str, str]:
+        """Keep every tracked symbol's local Parquet cache current. Synchronous.
+
+        `extra_symbols` (see get_symbols_needing_sync) lets the caller fold in symbols that
+        are not saved contracts, e.g. active structures' composite spread/fly symbols — the
+        symbols a portfolio correlation check needs but that are otherwise never kept warm,
+        which used to mean they were only ever backfilled lazily, one at a time, the first
+        time someone happened to run a correlation check that touched them.
+
+        Symbols needing sync are split into two batched requests instead of one call per
+        symbol: those with no local data at all get a full history backfill (see
+        backfill_symbols), everything else gets the usual latest-1-candle update.
+        """
+        logger.info("Morning sync: starting at %s", datetime.now(timezone.utc).isoformat())
+        symbols = self.get_symbols_needing_sync(repository, extra_symbols)
+        if not symbols:
+            logger.info("Morning sync: all symbols up to date")
+            return {}
+
+        new_symbols = [s for s in symbols if not self._has_local_history(s)]
+        stale_symbols = [s for s in symbols if s not in new_symbols]
+        results: dict[str, str] = {}
+
+        if new_symbols:
+            logger.info(
+                "Morning sync: full backfill needed for %d symbol(s) with no local history: %s",
+                len(new_symbols), new_symbols,
+            )
+            start = datetime.now(timezone.utc) - timedelta(days=_FULL_BACKFILL_DAYS)
+            try:
+                counts = self.backfill_symbols(new_symbols, start)
+                for symbol in new_symbols:
+                    rows = counts.get(symbol, 0)
+                    results[symbol] = "ok" if rows else "error: 0 rows returned"
+                    if not rows:
+                        self._update_sync_log(symbol, status="error", error_msg="0 rows returned")
+            except (APIError, RuntimeError, ValueError) as exc:
+                logger.error("Morning sync: full backfill failed: %s", exc)
+                for symbol in new_symbols:
+                    self._update_sync_log(symbol, status="error", error_msg=str(exc))
+                    results[symbol] = f"error: {exc}"
+
+        if stale_symbols:
+            results.update(self._sync_latest_candle(stale_symbols))
 
         logger.info("Morning sync: completed at %s", datetime.now(timezone.utc).isoformat())
         return results
@@ -495,6 +555,44 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
 
         self._update_sync_log(log_label, status="ok")
         return total_saved
+
+    def backfill_symbols(
+        self, symbols: list[str], start: datetime, end: datetime | None = None
+    ) -> dict[str, int]:
+        """Full-history backfill for many internal symbols, batching up to 50 per API call.
+
+        _fetch_from_api already chunks its symbol list by _MAX_INSTRUMENTS_PER_REQUEST, so
+        this issues ceil(len(symbols)/50) calls total instead of one call per symbol — the
+        gap this closes is DataLoader/backfill_symbol only ever backfilling one symbol at a
+        time, which under a 7-calls/minute budget made warming several never-seen symbols
+        (e.g. every open structure's composite symbol) take one rate-limit slot each.
+
+        Only valid when the whole (start, end) range fits in a single request's row budget
+        (~27 years of daily bars) — true for every normal backfill window. A longer range
+        falls back to the slower per-symbol chunked path (backfill_symbol) instead of
+        guessing how to split a multi-symbol, multi-chunk request.
+        """
+        end = end or datetime.now(timezone.utc)
+        if start > end:
+            raise ValueError(f"start ({start}) must be <= end ({end})")
+        if not symbols:
+            return {}
+
+        total_days = (end - start).days + 1
+        if total_days > _MAX_ROWS_PER_REQUEST:
+            return {symbol: self.backfill_symbol(symbol, start, end) for symbol in symbols}
+
+        api_symbols = [SymbolTranslator.internal_to_api(s) for s in symbols]
+        fetched = self._fetch_from_api(api_symbols, "1D", start=start, end=end)
+
+        results: dict[str, int] = {}
+        for symbol, api_symbol in zip(symbols, api_symbols):
+            df = fetched.get(api_symbol, pd.DataFrame(columns=_OHLC_COLUMNS))
+            local_df = self._load_local(api_symbol)
+            merged = pd.concat([local_df, df]) if local_df is not None else df
+            self._save_local(api_symbol, merged)
+            results[symbol] = len(df)
+        return results
 
     def backfill_symbol(self, symbol: str, start: datetime, end: datetime | None = None) -> int:
         """Fetch full 1D history for an internal symbol from start to end (default: today)."""
