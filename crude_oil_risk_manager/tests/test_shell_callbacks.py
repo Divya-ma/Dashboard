@@ -154,7 +154,7 @@ def test_resolve_layout_prefers_real_module_when_it_exists(monkeypatch):
 
 @pytest.mark.parametrize(
     "ticks,expected",
-    [(0, "Next refresh in: 60s"), (1, "Next refresh in: 59s"), (59, "Next refresh in: 1s"), (60, "Next refresh in: 60s")],
+    [(0, "Next refresh in: 10s"), (1, "Next refresh in: 9s"), (9, "Next refresh in: 1s"), (10, "Next refresh in: 10s")],
 )
 def test_update_countdown(ticks, expected):
     assert cb.update_countdown(ticks, 0) == expected

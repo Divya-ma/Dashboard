@@ -12,7 +12,7 @@ body replaced, so their buttons always exist.
 
 import logging
 
-from dash import ALL, Input, Output, State, html, no_update
+from dash import ALL, Input, Output, State, callback_context, html, no_update
 from dash.exceptions import PreventUpdate
 
 from core.models import StructureStatus
@@ -20,7 +20,14 @@ from core.pnl import calculate_structure_transaction_costs
 from core.structure_builder import StructureBuildError
 from core.structure_edit import apply_leg_edits
 from core.structure_view import prices_from_store, structure_entry_price, structure_live_price
-from core.trade_entry import TradeError, enter_trade, exit_structure, structure_open_lots, structure_pnl
+from core.trade_entry import (
+    TradeError,
+    enter_trade,
+    exit_structure,
+    recompute_structure_from_trades,
+    structure_open_lots,
+    structure_pnl,
+)
 from ui.callbacks.structures_callbacks import reuse_closed_structure, toast_update as _toast, update_active_structures
 from ui.container import container
 from ui.layouts.shell import COLORS
@@ -331,6 +338,109 @@ def save_edit(n_clicks, symbols, ratios, structure_id, live_prices):
 
 
 # ----------------------------------------------------------------------
+# Delete structure / delete trade
+# ----------------------------------------------------------------------
+
+
+def open_delete_structure_confirm(n_clicks, structure_id):
+    """Ask for confirmation before permanently deleting a whole structure."""
+    if not n_clicks:
+        raise PreventUpdate
+    structure = _load(structure_id)
+    trade_count = len(container.repository.get_trades_for_structure(structure_id))
+    body = [
+        html.P(f"Permanently delete '{structure.name}'?"),
+        html.P(
+            f"This removes the structure, all {trade_count} trade(s) and its PnL history. "
+            "This cannot be undone — use this for a structure created with the wrong parameters, "
+            "not to close out a real position (use Exit Structure for that).",
+            style={"color": COLORS["ACCENT_YELLOW"]},
+        ),
+    ]
+    return True, body, {"kind": "structure", "id": structure_id}
+
+
+def open_delete_trade_confirm(delete_clicks, structure_id):
+    """Ask for confirmation before deleting one trade, previewing what will be recomputed."""
+    trigger = callback_context.triggered_id
+    if not isinstance(trigger, dict) or trigger.get("type") != "trade-delete-btn":
+        raise PreventUpdate
+    if not callback_context.triggered[0]["value"]:
+        raise PreventUpdate  # the button was just created (id assigned), not actually clicked
+    trade_id = trigger["index"]
+    trades = {t.trade_id: t for t in container.repository.get_trades_for_structure(structure_id)}
+    trade = trades.get(trade_id)
+    if trade is None:
+        raise PreventUpdate
+    body = [
+        html.P(
+            f"Delete the {trade.event_type.value.replace('_', ' ')} of {trade.lots:g} lots "
+            f"at {trade.price:g} ({trade.timestamp:%Y-%m-%d %H:%M})?"
+        ),
+        html.P(
+            "Lots, entry price and PnL will be recomputed as if this trade had never been "
+            "entered; any later trades on this structure are replayed on top of that. This cannot be undone.",
+            style={"color": COLORS["ACCENT_YELLOW"]},
+        ),
+    ]
+    return True, body, {"kind": "trade", "id": trade_id}
+
+
+def cancel_delete(n_clicks):
+    if not n_clicks:
+        raise PreventUpdate
+    return False, None
+
+
+def _delete_trade_and_recompute(structure_id: str, trade_id: str) -> None:
+    """Remove one trade and replay every remaining trade so lots, entry price, status and
+    any surviving exit's realized PnL land exactly where they'd be without it."""
+    repository = container.repository
+    structure = repository.get_structure(structure_id)
+    if structure is None:
+        return
+    remaining = [t for t in repository.get_trades_for_structure(structure_id) if t.trade_id != trade_id]
+    result = recompute_structure_from_trades(structure, remaining)
+    repository.delete_trade(trade_id)
+    repository.update_structure_legs(structure_id, result.structure.legs, result.audit_note)
+    repository.set_structure_lifecycle(
+        structure_id, result.structure.status, result.structure.closed_at, result.structure.close_trigger
+    )
+    for exit_trade_id, (realized_pnl, transaction_cost) in result.exit_trade_updates.items():
+        repository.update_trade_realized_pnl(exit_trade_id, realized_pnl, transaction_cost)
+
+
+def execute_delete(
+    n_clicks, pending, structure_id, live_prices,
+    status_filter, product_filter, sort_by, portfolio_pnl,
+):
+    """Dispatch to structure or trade deletion depending on what was confirmed."""
+    if not n_clicks or not pending:
+        raise PreventUpdate
+    kind, target_id = pending.get("kind"), pending.get("id")
+    rows_args = (status_filter, product_filter, sort_by, portfolio_pnl, live_prices)
+
+    try:
+        if kind == "structure":
+            structure = container.repository.get_structure(target_id)
+            name = structure.name if structure else "Structure"
+            container.repository.delete_structure(target_id)
+            rows = _grid_rows(*rows_args)
+            return (False, False, no_update, rows, None, *_toast(f"'{name}' deleted.", header="Structure deleted"))
+        if kind == "trade":
+            _delete_trade_and_recompute(structure_id, target_id)
+            rows = _grid_rows(*rows_args)
+            body = _render_body(structure_id, live_prices)
+            return (False, no_update, body, rows, None, *_toast("Trade deleted; PnL recomputed.", header="Trade deleted"))
+        raise PreventUpdate
+    except TradeError as exc:
+        return (False, no_update, no_update, no_update, None, *_toast(exc.errors, ok=False, header="Delete failed"))
+    except Exception:  # noqa: BLE001
+        logger.exception("Delete failed for %s %s", kind, target_id)
+        return (False, no_update, no_update, no_update, None, *_toast("Could not delete; see the server log.", ok=False))
+
+
+# ----------------------------------------------------------------------
 # Registration
 # ----------------------------------------------------------------------
 
@@ -502,3 +612,46 @@ def register_structure_detail_callbacks(app) -> None:
         State("store-live-prices", "data"),
         prevent_initial_call=True,
     )(save_edit)
+
+    app.callback(
+        Output("modal-confirm-delete", "is_open", allow_duplicate=True),
+        Output("modal-confirm-delete-body", "children", allow_duplicate=True),
+        Output("store-pending-delete", "data", allow_duplicate=True),
+        Input("btn-delete-structure", "n_clicks"),
+        State("store-selected-structure-id", "data"),
+        prevent_initial_call=True,
+    )(open_delete_structure_confirm)
+
+    app.callback(
+        Output("modal-confirm-delete", "is_open", allow_duplicate=True),
+        Output("modal-confirm-delete-body", "children", allow_duplicate=True),
+        Output("store-pending-delete", "data", allow_duplicate=True),
+        Input({"type": "trade-delete-btn", "index": ALL}, "n_clicks"),
+        State("store-selected-structure-id", "data"),
+        prevent_initial_call=True,
+    )(open_delete_trade_confirm)
+
+    app.callback(
+        Output("modal-confirm-delete", "is_open", allow_duplicate=True),
+        Output("store-pending-delete", "data", allow_duplicate=True),
+        Input("btn-cancel-delete", "n_clicks"),
+        prevent_initial_call=True,
+    )(cancel_delete)
+
+    app.callback(
+        Output("modal-confirm-delete", "is_open", allow_duplicate=True),
+        Output("modal-structure-detail", "is_open", allow_duplicate=True),
+        _body_dup(),
+        Output("structures-active-grid", "rowData", allow_duplicate=True),
+        Output("store-pending-delete", "data", allow_duplicate=True),
+        *_TOAST_OUTPUTS,
+        Input("btn-confirm-delete-final", "n_clicks"),
+        State("store-pending-delete", "data"),
+        State("store-selected-structure-id", "data"),
+        State("store-live-prices", "data"),
+        State("filter-structure-status", "value"),
+        State("filter-structure-product", "value"),
+        State("filter-structure-sort", "value"),
+        State("store-portfolio-pnl", "data"),
+        prevent_initial_call=True,
+    )(execute_delete)

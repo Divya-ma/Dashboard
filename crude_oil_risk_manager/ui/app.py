@@ -160,6 +160,7 @@ def serve_layout() -> html.Div:
             dcc.Store(id="store-live-prices", data={}),
             dcc.Store(id="store-portfolio-pnl", data={}),
             dcc.Store(id="store-selected-structure-id", data=None),
+            dcc.Store(id="store-pending-delete", data=None),
             dcc.Store(id="store-builder-template", data=None),
             dcc.Store(id="store-builder-legs", data=[]),
             dcc.Store(id="store-builder-step", data=1),

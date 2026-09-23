@@ -381,6 +381,47 @@ class Repository:
                 },
             )
 
+    def set_structure_lifecycle(
+        self,
+        structure_id: str,
+        status: StructureStatus,
+        closed_at,
+        close_trigger: str | None,
+    ) -> None:
+        """Directly set status/closed_at/close_trigger, unlike update_structure_status's
+        COALESCE-based update (which can only fill in a NULL, never clear a field back to
+        one). Used only by the delete-trade recompute flow: deleting a structure's exit
+        trade can reopen it, which needs closed_at/close_trigger cleared, not preserved.
+        """
+        now = _utcnow_iso()
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE structures
+                    SET status = :status, last_modified_at = :last_modified_at,
+                        closed_at = :closed_at, close_trigger = :close_trigger
+                    WHERE structure_id = :structure_id
+                    """
+                ),
+                {
+                    "status": status.value,
+                    "last_modified_at": now,
+                    "closed_at": closed_at.isoformat() if closed_at else None,
+                    "close_trigger": close_trigger,
+                    "structure_id": structure_id,
+                },
+            )
+
+    def delete_structure(self, structure_id: str) -> None:
+        """Permanently delete a structure and everything scoped to it (legs, trades, PnL
+        history). Contracts are shared across structures and are never deleted."""
+        with self._engine.begin() as conn:
+            conn.execute(text("DELETE FROM pnl_records WHERE structure_id = :sid"), {"sid": structure_id})
+            conn.execute(text("DELETE FROM trades WHERE structure_id = :sid"), {"sid": structure_id})
+            conn.execute(text("DELETE FROM legs WHERE structure_id = :sid"), {"sid": structure_id})
+            conn.execute(text("DELETE FROM structures WHERE structure_id = :sid"), {"sid": structure_id})
+
     def update_structure_legs(
         self, structure_id: str, legs: list[Leg], audit_note: str = "legs updated"
     ) -> None:
@@ -476,6 +517,29 @@ class Repository:
                     "target_price": trade.target_price,
                     "transaction_cost": trade.transaction_cost,
                 },
+            )
+
+    def delete_trade(self, trade_id: str) -> None:
+        """Permanently delete a single trade record. Callers must recompute and persist the
+        structure's leg state (and any surviving exit's realized PnL) themselves — see
+        core.trade_entry.recompute_structure_from_trades — this only removes the row."""
+        with self._engine.begin() as conn:
+            conn.execute(text("DELETE FROM trades WHERE trade_id = :trade_id"), {"trade_id": trade_id})
+
+    def update_trade_realized_pnl(self, trade_id: str, realized_pnl: float | None, transaction_cost: float) -> None:
+        """Update a trade's stored realized_pnl/transaction_cost after recomputing history
+        (e.g. an earlier trade in the same structure was deleted, shifting the entry price
+        this exit's realized PnL was computed against). Nothing else about the trade changes."""
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE trades
+                    SET realized_pnl = :realized_pnl, transaction_cost = :transaction_cost
+                    WHERE trade_id = :trade_id
+                    """
+                ),
+                {"realized_pnl": realized_pnl, "transaction_cost": transaction_cost, "trade_id": trade_id},
             )
 
     def get_trades_for_structure(self, structure_id: str) -> list[Trade]:

@@ -85,9 +85,13 @@ def _header(structure: Structure, has_trades: bool) -> html.Div:
     edit_label = "🔒 Edit" if has_trades else "✏️ Edit"
     edit = [
         dbc.Button(
+            "🗑 Delete Structure", id="btn-delete-structure", color="danger", outline=True, size="sm",
+            style={"float": "right", "marginLeft": "8px"},
+        ),
+        dbc.Button(
             edit_label, id="btn-edit-structure", color="secondary", outline=True, size="sm",
             style={"float": "right"}, disabled=structure.status == StructureStatus.CLOSED,
-        )
+        ),
     ]
     if has_trades:
         edit.append(
@@ -252,10 +256,22 @@ def _trade_history(trades: list[Trade]) -> html.Div:
                 pnl_span(trade.realized_pnl) if trade.realized_pnl is not None else EMPTY,
                 f"-${trade.transaction_cost:,.0f}" if trade.transaction_cost else EMPTY,
                 trade.notes or EMPTY,
+                dbc.Button(
+                    "🗑", id={"type": "trade-delete-btn", "index": trade.trade_id},
+                    color="danger", outline=True, size="sm", title="Delete this trade",
+                ),
             ]
         )
     return html.Div(
-        [html.H6("Trade History", style=_TEXT), _table(["Date/Time", "Event", "Price", "Lots", "Realized PnL", "Transaction Cost", "Notes"], rows)],
+        [
+            html.H6("Trade History", style=_TEXT),
+            _table(["Date/Time", "Event", "Price", "Lots", "Realized PnL", "Transaction Cost", "Notes", ""], rows),
+            html.Div(
+                "Deleting a trade recomputes lots, entry price and PnL as if it had never "
+                "been entered; any later trades on this structure are replayed on top of that.",
+                style=_MUTED,
+            ),
+        ],
         style={"marginBottom": "20px"},
     )
 
@@ -440,6 +456,30 @@ def confirm_edit_modal() -> dbc.Modal:
             ),
         ],
         id="modal-confirm-edit",
+        centered=True,
+        backdrop="static",
+        is_open=False,
+    )
+
+
+def confirm_delete_modal() -> dbc.Modal:
+    """Shared confirmation for both 'Delete Structure' and a per-trade 'Delete Trade' click.
+
+    Which one is pending lives in store-pending-delete; the body text is filled in by the
+    callback that opens this (it knows what's about to be deleted), not here.
+    """
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("Confirm Delete"), close_button=False),
+            dbc.ModalBody(id="modal-confirm-delete-body"),
+            dbc.ModalFooter(
+                [
+                    dbc.Button("Cancel", id="btn-cancel-delete", color="secondary", outline=True),
+                    dbc.Button("Delete", id="btn-confirm-delete-final", color="danger"),
+                ]
+            ),
+        ],
+        id="modal-confirm-delete",
         centered=True,
         backdrop="static",
         is_open=False,

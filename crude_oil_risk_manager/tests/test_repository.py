@@ -178,6 +178,25 @@ def test_update_structure_status_sets_closed_at(repo):
     assert fetched.closed_at is not None
 
 
+def test_set_structure_lifecycle_can_clear_closed_at_and_trigger(repo):
+    """Unlike update_structure_status, this can reopen a structure (used when deleting its
+    exit trade)."""
+    structure = Structure(
+        name="Reopen", structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[make_leg()],
+        status=StructureStatus.OPEN,
+    )
+    repo.save_structure(structure)
+    repo.update_structure_status(structure.structure_id, StructureStatus.CLOSED, close_trigger="manual")
+    assert repo.get_structure(structure.structure_id).closed_at is not None
+
+    repo.set_structure_lifecycle(structure.structure_id, StructureStatus.OPEN, None, None)
+
+    fetched = repo.get_structure(structure.structure_id)
+    assert fetched.status == StructureStatus.OPEN
+    assert fetched.closed_at is None
+    assert fetched.close_trigger is None
+
+
 def test_update_structure_legs_appends_audit_note(repo):
     leg = make_leg()
     structure = Structure(
@@ -247,6 +266,64 @@ def test_get_trades_for_leg(repo):
     trades = repo.get_trades_for_leg(leg.leg_id)
     assert len(trades) == 1
     assert trades[0].leg_id == leg.leg_id
+
+
+def test_delete_trade_removes_only_that_trade(repo):
+    leg = make_leg()
+    structure = Structure(name="Del Trade", structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[leg], status=StructureStatus.OPEN)
+    repo.save_structure(structure)
+    keep = Trade(structure_id=structure.structure_id, leg_id=leg.leg_id, event_type=TradeEventType.TRADE, lots=5, price=70.0, direction="buy")
+    remove = Trade(structure_id=structure.structure_id, leg_id=leg.leg_id, event_type=TradeEventType.ADD, lots=5, price=80.0, direction="buy")
+    repo.save_trade(keep)
+    repo.save_trade(remove)
+
+    repo.delete_trade(remove.trade_id)
+
+    remaining = repo.get_trades_for_structure(structure.structure_id)
+    assert [t.trade_id for t in remaining] == [keep.trade_id]
+
+
+def test_update_trade_realized_pnl(repo):
+    leg = make_leg()
+    structure = Structure(name="Exit Update", structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[leg], status=StructureStatus.CLOSED)
+    repo.save_structure(structure)
+    trade = Trade(
+        structure_id=structure.structure_id, leg_id=leg.leg_id, event_type=TradeEventType.FULL_EXIT,
+        lots=5, price=90.0, direction="sell", realized_pnl=1000.0, transaction_cost=5.0,
+    )
+    repo.save_trade(trade)
+
+    repo.update_trade_realized_pnl(trade.trade_id, 2500.0, 12.5)
+
+    (updated,) = repo.get_trades_for_structure(structure.structure_id)
+    assert updated.realized_pnl == pytest.approx(2500.0)
+    assert updated.transaction_cost == pytest.approx(12.5)
+
+
+def test_delete_structure_removes_structure_legs_trades_and_pnl(repo):
+    leg = make_leg()
+    structure = Structure(name="To Delete", structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[leg], status=StructureStatus.OPEN)
+    repo.save_structure(structure)
+    trade = Trade(structure_id=structure.structure_id, leg_id=leg.leg_id, event_type=TradeEventType.TRADE, lots=5, price=70.0, direction="buy")
+    repo.save_trade(trade)
+    repo.save_pnl_record(PnLRecord(structure_id=structure.structure_id, unrealized_pnl=100.0, realized_pnl=0.0, total_pnl=100.0))
+
+    repo.delete_structure(structure.structure_id)
+
+    assert repo.get_structure(structure.structure_id) is None
+    assert repo.get_trades_for_structure(structure.structure_id) == []
+    assert repo.get_latest_pnl(structure.structure_id) is None
+    with repo._engine.connect() as conn:
+        leg_count = conn.execute(
+            text("SELECT COUNT(*) FROM legs WHERE structure_id = :sid"), {"sid": structure.structure_id}
+        ).scalar()
+    assert leg_count == 0
+    # the contract itself is untouched (shared across structures)
+    assert repo.get_contract(leg.contract.symbol) is not None
+
+
+def test_delete_structure_of_unknown_id_is_a_noop(repo):
+    repo.delete_structure("does-not-exist")  # must not raise
 
 
 def test_save_pnl_record_then_get_latest_pnl(repo):

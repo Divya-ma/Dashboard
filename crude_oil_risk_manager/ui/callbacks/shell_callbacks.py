@@ -25,7 +25,7 @@ from core.pnl import (
     calculate_todays_pnl,
     calculate_todays_realized_pnl,
 )
-from core.user_settings import KEY_API_TOKEN, KEY_PNL_BASELINE, KEY_PNL_STOP
+from core.user_settings import KEY_API_TOKEN, KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE, KEY_PNL_STOP
 from ui.container import NO_UPDATE_LABEL, container
 from ui.layouts.placeholder import (
     archive_layout,
@@ -40,10 +40,16 @@ from ui.layouts.shell import COLORS, stale_indicator
 
 logger = logging.getLogger(__name__)
 
-# A poll newer than this is served from the server-side cache, so page loads and
-# extra browser tabs cannot burn the API's 7-requests/minute budget.
-LIVE_CACHE_TTL_SECONDS = 50
-POLL_PERIOD_SECONDS = 60
+# A poll newer than this is served from the server-side cache, so a page load or an
+# extra browser tab landing between two ticks of interval-live-poll doesn't burn an
+# extra call from the API's 7-requests/minute budget. Must stay comfortably under
+# POLL_PERIOD_SECONDS or every real poll would be served stale cache instead of
+# actually refreshing — these two were left at their pre-/fairvalue/ values (a 60s
+# poll) after the switch to a 10s poll in ui/app.py's LIVE_POLL_INTERVAL_MS, which
+# silently stretched the real refresh cadence to once per 50s and left the sidebar
+# countdown counting down from a period the poll no longer used.
+LIVE_CACHE_TTL_SECONDS = 8
+POLL_PERIOD_SECONDS = 10
 
 _OPEN_STATUSES = [StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
 
@@ -295,7 +301,8 @@ def refresh_portfolio_pnl(n_intervals, live_prices):
     stale = _stale_symbols(live_prices)
     summary = calculate_portfolio_pnl(structures, trades, prices, stale, closed, closed_trades)
     baseline = container.repository.get_setting(KEY_PNL_BASELINE, 0.0) or 0.0
-    summary = apply_pnl_reset_baseline(summary, baseline)
+    realized_baseline = container.repository.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0) or 0.0
+    summary = apply_pnl_reset_baseline(summary, baseline, realized_baseline)
     all_trades = [t for group in (*trades.values(), *closed_trades.values()) for t in group]
     summary["todays_realized_pnl"] = calculate_todays_realized_pnl(all_trades)
     _add_structure_details(summary, structures, stale)

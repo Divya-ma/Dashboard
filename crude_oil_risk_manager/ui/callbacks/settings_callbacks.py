@@ -20,6 +20,7 @@ from core.user_settings import (
     KEY_CORRELATION_WINDOW,
     KEY_MARGIN_LIMIT,
     KEY_PNL_BASELINE,
+    KEY_PNL_REALIZED_BASELINE,
     KEY_PNL_STOP,
     KEY_ROLL_WARNING_DAYS,
     KEY_STALENESS,
@@ -92,7 +93,10 @@ def load_settings(pathname):
         webhook,
         bool(teams_enabled),
         _token_status(token),
-        _baseline_status(repo.get_setting(KEY_PNL_BASELINE, 0.0) or 0.0),
+        _baseline_status(
+            repo.get_setting(KEY_PNL_BASELINE, 0.0) or 0.0,
+            repo.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0) or 0.0,
+        ),
     )
 
 
@@ -221,8 +225,8 @@ def test_teams(n_clicks, webhook_url):
 _OPEN_STATUSES = [StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
 
 
-def _raw_total_pnl() -> float:
-    """Current portfolio total_pnl (unrealized + realized - transaction costs), ignoring any reset baseline."""
+def _raw_pnl_summary() -> dict:
+    """Current portfolio PnL summary (total_pnl, total_realized_all_time, ...), ignoring any reset baseline."""
     repository = container.repository
     open_structures = repository.get_all_structures(status_filter=_OPEN_STATUSES)
     open_trades = {s.structure_id: repository.get_trades_for_structure(s.structure_id) for s in open_structures}
@@ -231,15 +235,31 @@ def _raw_total_pnl() -> float:
     cache = container.live_cache
     prices = {symbol: data["price"] for symbol, data in cache.prices.items()}
     stale = [symbol for symbol, data in cache.prices.items() if data.get("is_stale")]
-    summary = calculate_portfolio_pnl(open_structures, open_trades, prices, stale, closed, closed_trades)
-    return summary["total_pnl"]
+    return calculate_portfolio_pnl(open_structures, open_trades, prices, stale, closed, closed_trades)
 
 
-def _baseline_status(baseline: float) -> str:
-    if not baseline:
+def _raw_total_pnl() -> float:
+    """Current portfolio total_pnl (unrealized + realized - transaction costs), ignoring any reset baseline."""
+    return _raw_pnl_summary()["total_pnl"]
+
+
+def _baseline_status(total_pnl_baseline: float, realized_baseline: float | None = None) -> str:
+    """Status text for the Account Reset section.
+
+    A reset is "active" whenever either baseline was captured — checking only
+    total_pnl_baseline used to say "No reset active" even right after a real reset,
+    for any portfolio with zero open exposure (total_pnl is always 0.0 there, which
+    is unrelated to whether a reset happened).
+    """
+    if realized_baseline is None:
+        realized_baseline = total_pnl_baseline
+    if not total_pnl_baseline and not realized_baseline:
         return "No reset active — Total PnL shows the true account total."
-    sign = "+" if baseline >= 0 else "-"
-    return f"🔄 Reset active: Total PnL is shown relative to a {sign}${abs(baseline):,.0f} baseline."
+    sign = "+" if realized_baseline >= 0 else "-"
+    return (
+        f"🔄 Reset active: Total Realized PnL (All Time) is shown relative to a "
+        f"{sign}${abs(realized_baseline):,.0f} baseline."
+    )
 
 
 def open_reset_confirm(n_clicks):
@@ -262,20 +282,31 @@ def cancel_reset_pnl(n_clicks):
 
 
 def confirm_reset_pnl(n_clicks):
-    """Store the current raw total_pnl as the baseline; Home then shows everything relative to it."""
+    """Store the current raw total_pnl AND total_realized_all_time as their own baselines.
+
+    Two separate baselines are needed: total_pnl includes live unrealized PnL and
+    total_realized_all_time never does, so capturing only one (as this used to) left the
+    other reading a non-zero leftover — usually the unrealized PnL open at reset time —
+    instead of $0 right after the reset. See core.pnl.apply_pnl_reset_baseline.
+    """
     if not n_clicks:
         raise PreventUpdate
-    baseline = _raw_total_pnl()
-    container.repository.set_setting(KEY_PNL_BASELINE, baseline)
-    logger.info("Total PnL reset: baseline set to %.2f", baseline)
-    return False, _baseline_status(baseline)
+    summary = _raw_pnl_summary()
+    container.repository.set_setting(KEY_PNL_BASELINE, summary["total_pnl"])
+    container.repository.set_setting(KEY_PNL_REALIZED_BASELINE, summary["total_realized_all_time"])
+    logger.info(
+        "Total PnL reset: baseline set to %.2f (realized baseline %.2f)",
+        summary["total_pnl"], summary["total_realized_all_time"],
+    )
+    return False, _baseline_status(summary["total_pnl"], summary["total_realized_all_time"])
 
 
 def clear_pnl_reset(n_clicks):
-    """Remove the baseline so Home goes back to showing the true, unadjusted total."""
+    """Remove both baselines so Home goes back to showing the true, unadjusted totals."""
     if not n_clicks:
         raise PreventUpdate
     container.repository.set_setting(KEY_PNL_BASELINE, 0.0)
+    container.repository.set_setting(KEY_PNL_REALIZED_BASELINE, 0.0)
     logger.info("Total PnL reset cleared")
     return _baseline_status(0.0)
 

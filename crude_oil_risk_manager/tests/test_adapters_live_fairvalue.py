@@ -61,7 +61,8 @@ def test_no_open_structures_or_watchlist_means_no_request(adapter, repo, mocker)
     get.assert_not_called()
 
 
-def test_requests_leg_symbols_of_open_structures_only(adapter, repo, mocker):
+def test_requests_leg_symbols_of_open_and_shell_structures(adapter, repo, mocker):
+    """SHELL structures are included (every leg, since none is "traded" yet); CLOSED is not."""
     repo.set_setting("api_access_token", "tok")
     save_open_structure(repo, "Open CL", [make_leg()], status=StructureStatus.OPEN)
     save_open_structure(
@@ -76,11 +77,30 @@ def test_requests_leg_symbols_of_open_structures_only(adapter, repo, mocker):
     )
     get = mocker.patch(
         "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": [_fairvalue_row()]}),
+        return_value=mocker.Mock(status_code=200, json=lambda: {"data": [_fairvalue_row(), _fairvalue_row(contract="COZ26")]}),
     )
     prices = adapter.get_live_prices([])
-    assert get.call_args.kwargs["params"]["products"] == "CLZ26"
-    assert set(prices) == {"CLZ26"}
+    requested = set(get.call_args.kwargs["params"]["products"].split(","))
+    assert requested == {"CLZ26", "COZ26"}  # CLZ26 (open, traded) + BRNZ26->COZ26 (shell, untraded)
+    assert set(prices) == {"CLZ26", "BRNZ26"}
+
+
+def test_shell_structure_partially_traded_legs_are_all_included_anyway(adapter, repo, mocker):
+    """A SHELL structure has no traded legs by definition, so is_traded is never checked for it."""
+    repo.set_setting("api_access_token", "tok")
+    save_open_structure(
+        repo, "Shell spread",
+        [make_leg(lots=0.0, entry_price=None, average_entry_price=None),
+         make_leg(contract=make_contract(symbol="CLF27"), ratio=-1, lots=0.0, entry_price=None, average_entry_price=None)],
+        status=StructureStatus.SHELL,
+    )
+    get = mocker.patch(
+        "adapters.live.fairvalue.requests.get",
+        return_value=mocker.Mock(status_code=200, json=lambda: {"data": []}),
+    )
+    adapter.get_live_prices([])
+    requested = set(get.call_args.kwargs["params"]["products"].split(","))
+    assert requested == {"CLZ26", "CLF27"}
 
 
 def test_partially_closed_structures_are_treated_as_open(adapter, repo, mocker):
@@ -117,6 +137,16 @@ def test_ignores_the_symbols_argument_entirely(adapter, repo, mocker):
     )
     adapter.get_live_prices(["XYZ99", "totally-unrelated"])
     assert get.call_args.kwargs["params"]["products"] == "CLZ26"
+
+
+def test_empty_target_logs_a_warning_once_not_every_poll(adapter, repo, caplog):
+    """The 'nothing to poll' case used to be a totally silent no-op with no log line at all."""
+    repo.set_setting("api_access_token", "tok")
+    with caplog.at_level("WARNING", logger="adapters.live.fairvalue"):
+        assert adapter.get_live_prices([]) == {}
+        assert adapter.get_live_prices([]) == {}
+    warnings = [r for r in caplog.records if "nothing to poll" in r.message]
+    assert len(warnings) == 1  # logged once (target unchanged from empty -> empty on the 2nd call)
 
 
 def test_untranslatable_watchlist_symbol_is_skipped_not_fatal(adapter, repo, mocker):

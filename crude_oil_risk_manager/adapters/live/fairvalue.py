@@ -10,13 +10,19 @@ adapter stays under that limit on its own, without needing a token-bucket limite
 
 Contract selection (the "products" query param) is NOT simply the caller's `symbols`
 argument. Per spec the live feed must cover only:
-  1. every unique leg symbol across OPEN (and legacy PARTIALLY_CLOSED) structures, and
+  1. every currently-traded leg symbol across OPEN (and legacy PARTIALLY_CLOSED)
+     structures, plus every leg of a SHELL structure (nothing in it is "traded" yet by
+     definition, so all of its legs are included — you want a live price while still
+     deciding whether to enter a structure, not only after), and
   2. the correlation watchlist's instrument symbols,
 rebuilt on structure/watchlist change rather than on every poll. This adapter
 re-derives (1) fresh from the repository on every call (two cheap, already-indexed
 SQLite reads) and only logs/rebuilds its cached view when the resulting symbol set
 actually differs from the previous poll, so nothing is redundantly recomputed every
-10 seconds. (2) is read from the `WATCHLIST_SETTING_KEY` settings-table entry.
+10 seconds. (2) is read from the `WATCHLIST_SETTING_KEY` settings-table entry. If the
+combined set is empty, a poll is a silent no-op (no HTTP request, nothing to log) —
+get_live_prices logs a one-time warning the first time this happens so it is not
+mistaken for a working-but-quiet feed.
 
 KNOWN GAP: nothing in this codebase currently writes `WATCHLIST_SETTING_KEY`. The
 correlation watchlist today lives only in a client-side session dcc.Store
@@ -56,7 +62,9 @@ _REQUEST_TIMEOUT_SECONDS = 10
 # symbols to be picked up here — see the KNOWN GAP note in the module docstring.
 WATCHLIST_SETTING_KEY = "correlation_watchlist_symbols"
 
-_OPEN_STATUSES = [StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
+# Structure statuses whose legs feed the live poll: SHELL is included (see module docstring)
+# so a structure you're still evaluating gets live prices, not just one you've already traded.
+_LIVE_FEED_STATUSES = [StructureStatus.SHELL, StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
 
 
 class FairValueLiveAdapter(LiveDataAdapter):
@@ -65,7 +73,10 @@ class FairValueLiveAdapter(LiveDataAdapter):
     def __init__(self, repository: Repository, staleness_threshold_seconds: float):
         self._repository = repository
         self._staleness_threshold_seconds = staleness_threshold_seconds
-        self._last_symbols: frozenset[str] = frozenset()  # product set requested on the previous poll
+        # Product set requested on the previous poll; None until the first poll so that
+        # poll always logs once (including the "nothing to poll" case) even if the target
+        # set turns out to be empty from the very start.
+        self._last_symbols: frozenset[str] | None = None
 
     def set_staleness_threshold(self, seconds: float) -> None:
         """Change the staleness threshold used to flag prices as stale."""
@@ -95,14 +106,21 @@ class FairValueLiveAdapter(LiveDataAdapter):
     # ------------------------------------------------------------------
 
     def _open_structure_leg_symbols(self) -> set[str]:
-        """Unique internal leg symbols across every OPEN/PARTIALLY_CLOSED structure."""
-        structures = self._repository.get_all_structures(status_filter=_OPEN_STATUSES)
-        return {
-            leg.contract.symbol
-            for structure in structures
-            for leg in structure.legs
-            if leg.is_traded
-        }
+        """Unique internal leg symbols to keep live for every SHELL/OPEN/PARTIALLY_CLOSED structure.
+
+        OPEN/PARTIALLY_CLOSED structures contribute only their currently-traded legs
+        (leg.is_traded) — a partial exit can leave some legs flat, and there's no reason
+        to poll those. A SHELL structure has no traded legs yet by definition, so every
+        one of its legs is included instead (see module docstring).
+        """
+        structures = self._repository.get_all_structures(status_filter=_LIVE_FEED_STATUSES)
+        symbols: set[str] = set()
+        for structure in structures:
+            if structure.status == StructureStatus.SHELL:
+                symbols.update(leg.contract.symbol for leg in structure.legs)
+            else:
+                symbols.update(leg.contract.symbol for leg in structure.legs if leg.is_traded)
+        return symbols
 
     def _watchlist_symbols(self) -> set[str]:
         """Instrument symbols from the persisted correlation watchlist, if any (see module docstring)."""
@@ -126,10 +144,18 @@ class FairValueLiveAdapter(LiveDataAdapter):
         happens to pass in.
         """
         target = self._target_symbols()
-        if target != self._last_symbols:
-            logger.info(
-                "Live feed contract list changed: %d -> %d symbols", len(self._last_symbols), len(target)
-            )
+        if self._last_symbols is None or target != self._last_symbols:
+            if not target:
+                logger.warning(
+                    "Live feed has nothing to poll: no SHELL/OPEN/PARTIALLY_CLOSED structure legs "
+                    "and no correlation watchlist symbols. No live prices will be requested until "
+                    "that changes."
+                )
+            else:
+                logger.info(
+                    "Live feed contract list changed: %d -> %d symbols",
+                    len(self._last_symbols or ()), len(target),
+                )
             self._last_symbols = frozenset(target)
         if not target:
             return {}

@@ -1,5 +1,7 @@
 """Tests for core.trade_entry, core.structure_edit, the detail layout and its callbacks."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from dash.exceptions import PreventUpdate
 
@@ -9,7 +11,7 @@ from core.structure_builder import StructureBuildError
 from core.structure_edit import apply_leg_edits
 from core.structure_view import structure_entry_price
 from core.trade_entry import (
-    TradeError, allocate_leg_entry_prices, enter_trade, exit_structure, structure_pnl,
+    TradeError, allocate_leg_entry_prices, enter_trade, exit_structure, recompute_structure_from_trades, structure_pnl,
 )
 from db.repository import Repository
 from ui.callbacks import structure_detail_callbacks as dc
@@ -116,6 +118,97 @@ def test_exit_rejects_partial_and_wrong_status():
         exit_structure(outright(), 77.0, 10, None)
     with pytest.raises(TradeError, match="Exit price"):
         exit_structure(s, None, 10, None)
+
+
+# ---------- core.trade_entry: recompute_structure_from_trades (delete-trade support) ----------
+
+
+def _mk_trade(structure, event_type, lots, price, direction="buy", timestamp=None, realized_pnl=None):
+    kwargs = dict(
+        structure_id=structure.structure_id, leg_id=structure.legs[0].leg_id, event_type=event_type,
+        lots=lots, price=price, direction=direction, realized_pnl=realized_pnl,
+    )
+    if timestamp is not None:
+        kwargs["timestamp"] = timestamp
+    return Trade(**kwargs)
+
+
+def test_recompute_deleting_the_only_trade_reverts_to_shell():
+    s = outright(StructureStatus.OPEN, lots=10, entry=75.0)
+    result = recompute_structure_from_trades(s, [])
+    assert result.structure.status == StructureStatus.SHELL
+    leg = result.structure.legs[0]
+    assert leg.lots == 0 and leg.entry_price is None and leg.average_entry_price is None
+    assert result.exit_trade_updates == {}
+
+
+def test_recompute_deleting_the_first_trade_promotes_the_next_add():
+    """Delete the original TRADE, leaving only a later ADD: that ADD becomes the new entry."""
+    s = outright()
+    remaining = [_mk_trade(s, TradeEventType.ADD, 10, 76.0)]
+    result = recompute_structure_from_trades(s, remaining)
+    assert result.structure.status == StructureStatus.OPEN
+    leg = result.structure.legs[0]
+    assert leg.lots == 10 and leg.average_entry_price == pytest.approx(76.0)
+
+
+def test_recompute_deleting_an_add_shifts_the_average():
+    s = outright()
+    remaining = [_mk_trade(s, TradeEventType.TRADE, 10, 70.0)]  # the later ADD@80 was deleted
+    result = recompute_structure_from_trades(s, remaining)
+    leg = result.structure.legs[0]
+    assert leg.lots == 10 and leg.average_entry_price == pytest.approx(70.0)
+
+
+def test_recompute_reopens_when_the_exit_trade_is_excluded():
+    """The surviving list already excludes the trade being deleted — deleting a FULL_EXIT
+    means it's simply absent here, and the structure must come back OPEN, not CLOSED."""
+    s = outright()
+    remaining = [_mk_trade(s, TradeEventType.TRADE, 10, 70.0)]
+    result = recompute_structure_from_trades(s, remaining)
+    assert result.structure.status == StructureStatus.OPEN
+    assert result.structure.closed_at is None and result.structure.close_trigger is None
+
+
+_T1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_T2 = _T1 + timedelta(days=1)
+
+
+def test_recompute_refreshes_a_surviving_exit_trades_realized_pnl():
+    """The exit's stored realized_pnl is always recomputed from the replayed entry price,
+    not trusted as-is — it may be stale once an earlier trade's history has changed."""
+    s = outright()
+    entry = _mk_trade(s, TradeEventType.TRADE, 10, 70.0, timestamp=_T1)
+    exit_trade = _mk_trade(s, TradeEventType.FULL_EXIT, 10, 90.0, direction="sell", realized_pnl=999999.0, timestamp=_T2)
+    result = recompute_structure_from_trades(s, [exit_trade, entry])  # order in the list must not matter
+    assert result.structure.status == StructureStatus.CLOSED
+    assert result.exit_trade_updates[exit_trade.trade_id][0] == pytest.approx(200000.0)  # (90-70)*10*1000
+
+
+def test_recompute_lot_mismatch_before_a_surviving_exit_raises():
+    """Deleting a trade whose lots the surviving FULL_EXIT still expects is rejected rather
+    than silently recorded against the wrong lot count."""
+    s = outright()
+    entry = _mk_trade(s, TradeEventType.TRADE, 10, 70.0, timestamp=_T1)  # only 10 lots survive
+    exit_trade = _mk_trade(s, TradeEventType.FULL_EXIT, 20, 90.0, direction="sell", timestamp=_T2)  # expects 20 lots
+    with pytest.raises(TradeError, match="Partial exits are not supported"):
+        recompute_structure_from_trades(s, [entry, exit_trade])
+
+
+def test_recompute_rejects_partial_exit_and_roll_trades():
+    s = outright()
+    for bad_type in (TradeEventType.PARTIAL_EXIT, TradeEventType.ROLL):
+        with pytest.raises(TradeError, match="Cannot recompute past"):
+            recompute_structure_from_trades(s, [_mk_trade(s, bad_type, 10, 70.0)])
+
+
+def test_recompute_does_not_need_live_prices_for_a_multi_leg_structure():
+    """Multi-leg allocation normally needs live prices; recompute must not depend on them."""
+    s = spread()
+    remaining = [_mk_trade(s, TradeEventType.TRADE, 5, 1.25)]
+    result = recompute_structure_from_trades(s, remaining)
+    assert result.structure.status == StructureStatus.OPEN
+    assert structure_entry_price(result.structure) == pytest.approx(1.25)
 
 
 # ---------- core.structure_edit ----------
@@ -345,6 +438,118 @@ def test_audit_notes_can_accumulate_beyond_500_chars(repo):
     for i in range(12):
         repo.update_structure_legs(sid, repo.get_structure(sid).legs, f"audit line number {i} " + "x" * 30)
     assert len(repo.get_structure(sid).notes) > 500
+
+
+# ---------- delete structure / delete trade ----------
+
+
+def trigger_delete_btn(monkeypatch, trade_id, value=1):
+    """Simulate the pattern-matched {"type": "trade-delete-btn", "index": trade_id} click."""
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.triggered_id = {"type": "trade-delete-btn", "index": trade_id}
+    ctx.triggered = [{"prop_id": "x.n_clicks", "value": value}]
+    monkeypatch.setattr(dc, "callback_context", ctx)
+
+
+DELETE_ARGS = ("active", "all", "name", {})  # status_filter, product_filter, sort_by, portfolio_pnl
+
+
+def test_open_delete_structure_confirm(repo):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    repo.save_trade(Trade(structure_id=sid, leg_id=repo.get_structure(sid).legs[0].leg_id,
+                          event_type=TradeEventType.TRADE, lots=10, price=75.0, direction="buy"))
+
+    is_open, body, pending = dc.open_delete_structure_confirm(1, sid)
+    assert is_open is True and "Outright" in str(body) and "1 trade(s)" in str(body)
+    assert pending == {"kind": "structure", "id": sid}
+    with pytest.raises(PreventUpdate):
+        dc.open_delete_structure_confirm(None, sid)
+
+
+def test_open_delete_trade_confirm(repo, monkeypatch):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    trade = Trade(structure_id=sid, leg_id=repo.get_structure(sid).legs[0].leg_id,
+                  event_type=TradeEventType.TRADE, lots=10, price=75.0, direction="buy")
+    repo.save_trade(trade)
+
+    trigger_delete_btn(monkeypatch, trade.trade_id)
+    is_open, body, pending = dc.open_delete_trade_confirm([1], sid)
+    assert is_open is True and "recomputed" in str(body)
+    assert pending == {"kind": "trade", "id": trade.trade_id}
+
+    trigger_delete_btn(monkeypatch, trade.trade_id, value=None)  # newly-created button, not a real click
+    with pytest.raises(PreventUpdate):
+        dc.open_delete_trade_confirm([None], sid)
+
+    trigger_delete_btn(monkeypatch, "unknown-trade-id")
+    with pytest.raises(PreventUpdate):
+        dc.open_delete_trade_confirm([1], sid)
+
+
+def test_cancel_delete():
+    assert dc.cancel_delete(1) == (False, None)
+    with pytest.raises(PreventUpdate):
+        dc.cancel_delete(None)
+
+
+def test_execute_delete_removes_structure_and_closes_both_modals(repo):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    pending = {"kind": "structure", "id": sid}
+
+    confirm_open, detail_open, body, rows, cleared, toast_open, message, icon, header = dc.execute_delete(
+        1, pending, sid, LIVE_STORE, *DELETE_ARGS
+    )
+    assert confirm_open is False and detail_open is False and cleared is None
+    assert icon == "success" and "deleted" in message
+    assert repo.get_structure(sid) is None
+    assert rows == []
+
+
+def test_execute_delete_removes_trade_and_recomputes_pnl(repo):
+    sid = save(repo, outright())
+    dc.confirm_trade_entry(1, 70.0, 10, "buy", None, None, None, sid, LIVE_STORE, *GRID)
+    (trade_to_delete,) = repo.get_trades_for_structure(sid)
+    dc.confirm_trade_entry(1, 80.0, 10, "buy", None, None, None, sid, LIVE_STORE, *GRID)  # ADD@80
+
+    pending = {"kind": "trade", "id": trade_to_delete.trade_id}
+    confirm_open, detail_open, body, rows, cleared, toast_open, message, icon, header = dc.execute_delete(
+        1, pending, sid, LIVE_STORE, *DELETE_ARGS
+    )
+
+    assert confirm_open is False and detail_open is dc.no_update and cleared is None
+    assert icon == "success" and "recomputed" in message
+    saved = repo.get_structure(sid)
+    assert saved.legs[0].lots == 10 and saved.legs[0].average_entry_price == pytest.approx(80.0)
+    (remaining_trade,) = repo.get_trades_for_structure(sid)
+    assert remaining_trade.price == 80.0
+    assert "Trade History" in str(body)
+
+
+def test_execute_delete_no_pending_or_no_click_prevents_update():
+    with pytest.raises(PreventUpdate):
+        dc.execute_delete(None, {"kind": "trade", "id": "x"}, "sid", {}, *DELETE_ARGS)
+    with pytest.raises(PreventUpdate):
+        dc.execute_delete(1, None, "sid", {}, *DELETE_ARGS)
+
+
+def test_execute_delete_surfaces_trade_error_without_deleting(repo):
+    """Deleting a trade that would break a surviving exit's lot count is rejected, not silently applied."""
+    sid = save(repo, outright())
+    leg_id = repo.get_structure(sid).legs[0].leg_id
+    entry = Trade(structure_id=sid, leg_id=leg_id, event_type=TradeEventType.TRADE, lots=10, price=70.0, direction="buy")
+    exit_trade = Trade(structure_id=sid, leg_id=leg_id, event_type=TradeEventType.FULL_EXIT, lots=20, price=90.0,
+                       direction="sell", realized_pnl=200000.0)
+    repo.save_trade(entry)
+    repo.save_trade(exit_trade)
+
+    pending = {"kind": "trade", "id": entry.trade_id}
+    result = dc.execute_delete(1, pending, sid, LIVE_STORE, *DELETE_ARGS)
+    assert result[-2] == "danger"  # icon is the second-to-last output; nothing was deleted
+    assert [t.trade_id for t in repo.get_trades_for_structure(sid)] == [entry.trade_id, exit_trade.trade_id]
 
 
 # ---------- direction, stop / target, reuse ----------

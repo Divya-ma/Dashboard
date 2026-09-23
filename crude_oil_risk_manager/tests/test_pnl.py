@@ -574,17 +574,20 @@ def test_structure_transaction_costs_sums_every_trade_event():
     assert calculate_structure_transaction_costs(trades) == 10.0
 
 
-def test_apply_pnl_reset_baseline_shifts_only_cumulative_fields():
+def test_apply_pnl_reset_baseline_with_separate_realized_baseline_zeroes_both():
+    """total_pnl and total_realized_all_time need their own baseline (see the docstring):
+    total_pnl includes live unrealized PnL, total_realized_all_time never does."""
     summary = {
         "total_pnl": 1000.0,
         "total_realized_all_time": 800.0,
         "total_unrealized": 200.0,
         "total_realized": 600.0,
     }
-    shifted = apply_pnl_reset_baseline(summary, 1000.0)
+    shifted = apply_pnl_reset_baseline(summary, 1000.0, 800.0)
     assert shifted["total_pnl"] == 0.0
-    assert shifted["total_realized_all_time"] == -200.0
+    assert shifted["total_realized_all_time"] == 0.0
     assert shifted["pnl_baseline"] == 1000.0
+    assert shifted["pnl_realized_baseline"] == 800.0
     # untouched
     assert shifted["total_unrealized"] == 200.0
     assert shifted["total_realized"] == 600.0
@@ -592,7 +595,30 @@ def test_apply_pnl_reset_baseline_shifts_only_cumulative_fields():
     assert summary["total_pnl"] == 1000.0
 
 
+def test_apply_pnl_reset_baseline_without_realized_baseline_falls_back_to_shared_one():
+    """Backward-compat path for a caller that hasn't captured a separate realized baseline —
+    matches the old (buggy) behavior of reusing total_pnl's baseline for both fields."""
+    summary = {"total_pnl": 1000.0, "total_realized_all_time": 800.0}
+    shifted = apply_pnl_reset_baseline(summary, 1000.0)
+    assert shifted["total_pnl"] == 0.0
+    assert shifted["total_realized_all_time"] == -200.0  # NOT zero: no unrealized-aware baseline given
+    assert shifted["pnl_realized_baseline"] == 1000.0
+
+
+def test_apply_pnl_reset_baseline_applies_realized_baseline_even_when_total_pnl_baseline_is_zero():
+    """Regression: a portfolio with no open exposure always has total_pnl == 0.0 (there's no
+    unrealized component and no open realized trades), which used to be wrongly treated as
+    "no reset is active" and silently dropped a perfectly real, non-zero realized_baseline —
+    total_realized_all_time (all-time realized from closed structures) never got zeroed."""
+    summary = {"total_pnl": 0.0, "total_realized_all_time": 29582.2}
+    shifted = apply_pnl_reset_baseline(summary, 0.0, 29582.2)
+    assert shifted["total_pnl"] == 0.0
+    assert shifted["total_realized_all_time"] == 0.0
+
+
 def test_apply_pnl_reset_baseline_is_noop_for_falsy_baseline():
     summary = {"total_pnl": 1000.0, "total_realized_all_time": 800.0}
-    assert apply_pnl_reset_baseline(summary, 0.0) == summary
-    assert apply_pnl_reset_baseline(summary, None) == summary
+    assert apply_pnl_reset_baseline(summary, 0.0)["total_pnl"] == 1000.0
+    assert apply_pnl_reset_baseline(summary, 0.0)["total_realized_all_time"] == 800.0
+    assert apply_pnl_reset_baseline(summary, None)["total_pnl"] == 1000.0
+    assert apply_pnl_reset_baseline(summary, None)["total_realized_all_time"] == 800.0

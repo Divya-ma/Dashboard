@@ -338,23 +338,38 @@ def calculate_portfolio_pnl(
 # ----------------------------------------------------------------------
 
 
-def apply_pnl_reset_baseline(summary: dict, baseline: float) -> dict:
-    """Shift the account-level cumulative PnL fields by a previously-recorded baseline.
+def apply_pnl_reset_baseline(
+    summary: dict, total_pnl_baseline: float | None = 0.0, realized_baseline: float | None = None
+) -> dict:
+    """Shift the account-level cumulative PnL fields by their own baseline, captured at reset.
 
-    Lets a trader "zero out" the Total PnL shown on Home (Settings > Account Reset)
-    without touching any stored structure, trade or PnL-history data: `baseline` is the
-    raw total_pnl captured at the moment of reset, and every calculation from then on is
-    shown relative to it. Only the two account-level cumulative fields shift
-    (total_pnl, total_realized_all_time); per-structure figures, total_unrealized and
-    total_realized are left exactly as calculated so an individual position's PnL is
-    never misleading. A falsy baseline (0.0 / None, i.e. no reset active) is a no-op.
+    Lets a trader "zero out" the cumulative PnL figures shown on Home (Settings > Account
+    Reset) without touching any stored structure, trade or PnL-history data. total_pnl and
+    total_realized_all_time are DIFFERENT quantities — the former includes live unrealized
+    PnL, the latter never does — so a single shared baseline can zero at most one of them
+    at the moment of reset; the other would be left off by whatever unrealized PnL existed
+    at that moment instead of reading zero. `total_pnl_baseline` and `realized_baseline`
+    should each be that field's own raw value captured together at reset time.
+    `realized_baseline` defaults to `total_pnl_baseline` only for backward compatibility
+    with a caller that hasn't captured one; a real reset should always pass both.
+
+    Each baseline is applied independently — a missing/None baseline defaults to 0.0 (a
+    no-op subtraction) rather than skipping the whole call. A portfolio with no open
+    exposure always has total_pnl == 0.0, which used to be (wrongly) treated as "no reset
+    is active" and silently dropped a perfectly real, non-zero realized_baseline; total_pnl
+    being 0 and a reset being active are unrelated facts.
+
+    Per-structure figures, total_unrealized and total_realized are left exactly as
+    calculated so an individual position's PnL is never misleading.
     """
-    if not baseline:
-        return summary
+    total_pnl_baseline = total_pnl_baseline or 0.0
+    if realized_baseline is None:
+        realized_baseline = total_pnl_baseline
     summary = dict(summary)
-    summary["total_pnl"] = summary["total_pnl"] - baseline
-    summary["total_realized_all_time"] = summary["total_realized_all_time"] - baseline
-    summary["pnl_baseline"] = baseline
+    summary["total_pnl"] = summary["total_pnl"] - total_pnl_baseline
+    summary["total_realized_all_time"] = summary["total_realized_all_time"] - realized_baseline
+    summary["pnl_baseline"] = total_pnl_baseline
+    summary["pnl_realized_baseline"] = realized_baseline
     return summary
 
 

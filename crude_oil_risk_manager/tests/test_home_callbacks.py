@@ -104,7 +104,7 @@ def test_realized_bar_missing_values_show_dash():
 
 def test_reset_note_shown_only_when_baseline_active():
     assert hc.update_home_metrics(payload())[2] == ""
-    result = hc.update_home_metrics(payload(pnl_baseline=5000.0))
+    result = hc.update_home_metrics(payload(pnl_realized_baseline=5000.0))
     assert "$5,000" in result[2] and "Reset active" in result[2]
 
 

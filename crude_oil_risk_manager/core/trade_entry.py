@@ -262,3 +262,82 @@ def exit_structure(structure: Structure, price, lots, notes: str | None) -> Exit
         audit_note=f"full exit: {lots:g} lots at {price:g}, realized {realized:+,.0f} gross"
         + (f" (exit cost {exit_tc:,.0f})" if exit_tc else ""),
     )
+
+
+# ----------------------------------------------------------------------
+# Delete a trade: recompute everything downstream of it
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class RecomputeResult:
+    """Result of replaying a structure's surviving trades after one was deleted."""
+
+    structure: Structure
+    # trade_id -> (realized_pnl, transaction_cost) for every FULL_EXIT trade whose stored
+    # figures must be updated (they depend on the entry price, which can shift once an
+    # earlier trade is removed from the history).
+    exit_trade_updates: dict[str, tuple[float, float]]
+    audit_note: str
+
+
+def recompute_structure_from_trades(structure: Structure, trades: list[Trade]) -> RecomputeResult:
+    """Rebuild leg state, status and every FULL_EXIT trade's realized_pnl from scratch.
+
+    Used after deleting a trade: `trades` is the SURVIVING history (the deleted one already
+    excluded), replayed in chronological order against a fresh SHELL copy of the structure,
+    using the exact same enter_trade/exit_structure functions a live trade entry would use.
+    This guarantees every derived figure (lots, entry/average price, direction, status,
+    closed_at, and any surviving exit's realized PnL) lands exactly where it would be had
+    the deleted trade never happened, instead of reversing one trade's math in place —
+    which is much easier to get subtly wrong once average-price adds are involved.
+
+    Only TRADE, ADD and FULL_EXIT are replayed (the only event types core.trade_entry can
+    produce elsewhere in the app); a PARTIAL_EXIT or ROLL trade in `trades` raises
+    TradeError, since there is no pure function here to replay it.
+
+    Multi-leg entry-price allocation (see allocate_leg_entry_prices) needs an "other legs"
+    price purely to split a structure price across legs algebraically — only the weighted
+    SUM matters for P&L (see that function's docstring), so each leg's own currently-stored
+    entry price is reused as a stable placeholder. This means recomputing never depends on
+    the live feed being available.
+    """
+    ordered = sorted(trades, key=lambda t: t.timestamp)
+    anchors = {leg.contract.symbol: (_leg_entry(leg) or 0.0) for leg in structure.legs}
+    shell_legs = [
+        leg.model_copy(
+            update={"lots": 0.0, "entry_price": None, "average_entry_price": None, "direction": "buy", "is_naked": False}
+        )
+        for leg in structure.legs
+    ]
+    current = structure.model_copy(
+        update={"legs": shell_legs, "status": StructureStatus.SHELL, "closed_at": None, "close_trigger": None}
+    )
+    exit_updates: dict[str, tuple[float, float]] = {}
+
+    for trade in ordered:
+        if trade.event_type in (TradeEventType.TRADE, TradeEventType.ADD):
+            result = enter_trade(
+                current, trade.price, trade.lots, trade.direction, trade.notes, anchors,
+                stop_loss_price=trade.stop_loss_price, target_price=trade.target_price,
+            )
+            current = current.model_copy(update={"legs": result.legs, "status": result.status})
+        elif trade.event_type == TradeEventType.FULL_EXIT:
+            result = exit_structure(current, trade.price, trade.lots, trade.notes)
+            current = current.model_copy(
+                update={
+                    "legs": result.legs, "status": StructureStatus.CLOSED,
+                    "closed_at": trade.timestamp, "close_trigger": "manual",
+                }
+            )
+            exit_updates[trade.trade_id] = (result.realized_pnl, result.trade.transaction_cost)
+        else:
+            raise TradeError(
+                [f"Cannot recompute past a {trade.event_type.value} trade; delete newer trades first."]
+            )
+
+    return RecomputeResult(
+        structure=current,
+        exit_trade_updates=exit_updates,
+        audit_note=f"recomputed after a trade was deleted ({len(ordered)} remaining trade(s) replayed)",
+    )

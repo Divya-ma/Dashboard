@@ -395,15 +395,67 @@ def test_confirm_reset_pnl_stores_baseline_and_reports_status(env, repo):
     is_open, status = sc.confirm_reset_pnl(1)
     assert is_open is False
     assert repo.get_setting("pnl_reset_baseline") == 0.0
+    assert repo.get_setting("pnl_reset_realized_baseline") == 0.0
     assert "No reset active" in status
+
+
+def _save_open_structure_with_unrealized_pnl(repo, env, entry_price=75.0, live_price=80.0, lots=1.0):
+    """One open outright leg with a live price above entry, so total_unrealized > 0."""
+    from core.models import Contract, Leg, Structure, StructureStatus, StructureType
+
+    contract = Contract(product="CL", contract_month=12, contract_year=2026, symbol="CLZ26",
+                        multiplier=1000, tick_size=0.01, tick_value=10)
+    leg = Leg(contract=contract, ratio=1, lots=lots, entry_price=entry_price, average_entry_price=entry_price)
+    structure = Structure(name="Open CL", structure_type=StructureType.OUTRIGHT, products=["CL"],
+                          legs=[leg], status=StructureStatus.OPEN)
+    repo.save_contract(contract)
+    repo.save_structure(structure)
+    env.live_cache.prices = {"CLZ26": {"price": live_price, "is_stale": False}}
+
+
+def test_confirm_reset_pnl_captures_separate_baselines_for_total_pnl_and_realized(env, repo):
+    """total_pnl (includes unrealized) and total_realized_all_time (never does) must get
+    their own baseline, or the Home top bar doesn't actually read $0 after a reset."""
+    _save_open_structure_with_unrealized_pnl(repo, env)  # unrealized = (80-75) * 1 * 1000 = $5,000, realized = $0
+
+    sc.confirm_reset_pnl(1)
+
+    assert repo.get_setting("pnl_reset_baseline") == pytest.approx(5000.0)
+    assert repo.get_setting("pnl_reset_realized_baseline") == pytest.approx(0.0)
+
+
+def test_confirm_reset_pnl_zeroes_realized_pnl_with_no_open_exposure(env, repo):
+    """Regression: a portfolio with only CLOSED structures (no open exposure at all) has
+    total_pnl == 0.0 by definition — Account Reset must still zero the real, non-zero
+    all-time realized PnL from those closed structures, not silently no-op."""
+    from core.models import Contract, Leg, Structure, StructureStatus, StructureType, Trade, TradeEventType
+
+    contract = Contract(product="CL", contract_month=12, contract_year=2026, symbol="CLZ26",
+                        multiplier=1000, tick_size=0.01, tick_value=10)
+    leg = Leg(contract=contract, ratio=1, lots=0.0, entry_price=None, average_entry_price=None)
+    structure = Structure(name="Closed CL", structure_type=StructureType.OUTRIGHT, products=["CL"],
+                          legs=[leg], status=StructureStatus.CLOSED)
+    repo.save_contract(contract)
+    repo.save_structure(structure)
+    repo.save_trade(Trade(
+        structure_id=structure.structure_id, leg_id=leg.leg_id, event_type=TradeEventType.FULL_EXIT,
+        lots=1.0, price=80.0, direction="buy", realized_pnl=5000.0,
+    ))
+
+    sc.confirm_reset_pnl(1)
+
+    assert repo.get_setting("pnl_reset_baseline") == pytest.approx(0.0)
+    assert repo.get_setting("pnl_reset_realized_baseline") == pytest.approx(5000.0)
 
 
 def test_clear_pnl_reset_zeroes_the_baseline(env, repo):
     repo.set_setting("pnl_reset_baseline", 5000.0)
+    repo.set_setting("pnl_reset_realized_baseline", 3000.0)
     with pytest.raises(PreventUpdate):
         sc.clear_pnl_reset(None)
     status = sc.clear_pnl_reset(1)
     assert repo.get_setting("pnl_reset_baseline") == 0.0
+    assert repo.get_setting("pnl_reset_realized_baseline") == 0.0
     assert "No reset active" in status
 
 
@@ -411,3 +463,10 @@ def test_baseline_status_formats_positive_and_negative():
     assert sc._baseline_status(0.0) == "No reset active — Total PnL shows the true account total."
     assert "+$5,000" in sc._baseline_status(5000.0)
     assert "-$5,000" in sc._baseline_status(-5000.0)
+
+
+def test_baseline_status_is_active_from_realized_baseline_alone():
+    """A portfolio with no open exposure always has total_pnl == 0.0 — that must not be
+    read as "no reset active" when a real, non-zero realized baseline was captured."""
+    assert sc._baseline_status(0.0, 29582.2) != "No reset active — Total PnL shows the true account total."
+    assert "+$29,582" in sc._baseline_status(0.0, 29582.2)

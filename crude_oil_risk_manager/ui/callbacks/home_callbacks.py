@@ -110,7 +110,7 @@ def update_home_metrics(portfolio_pnl):
     banner_style, banner_children = _stale_banner(portfolio_pnl)
     total_text, total_style = _realized_value(portfolio_pnl.get("total_realized_all_time"))
     today_text, today_style = _realized_value(portfolio_pnl.get("todays_realized_pnl"))
-    reset_note = _reset_note(portfolio_pnl.get("pnl_baseline"))
+    reset_note = _reset_note(portfolio_pnl.get("pnl_realized_baseline"))
 
     return (
         total_text,

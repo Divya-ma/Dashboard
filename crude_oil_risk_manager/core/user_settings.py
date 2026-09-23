@@ -13,6 +13,10 @@ from core.alerts import ENABLED_SETTING_KEY, WEBHOOK_SETTING_KEY
 
 KEY_API_TOKEN = "api_access_token"
 KEY_PNL_BASELINE = "pnl_reset_baseline"
+# total_realized_all_time needs its own baseline: it excludes live unrealized PnL, so
+# shifting it by the same baseline as total_pnl only reads zero right after a reset if
+# unrealized PnL happened to be zero at that moment. See core.pnl.apply_pnl_reset_baseline.
+KEY_PNL_REALIZED_BASELINE = "pnl_reset_realized_baseline"
 KEY_PNL_STOP = "alert_portfolio_pnl_stop"
 KEY_STRUCTURE_MAX_LOSS = "alert_structure_max_loss"
 KEY_STALENESS = "staleness_threshold_seconds"

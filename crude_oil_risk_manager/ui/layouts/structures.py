@@ -11,7 +11,7 @@ from dash import html
 
 from ui.layouts.home import GRID_THEME
 from ui.layouts.shell import COLORS
-from ui.layouts.structure_detail import confirm_edit_modal, confirm_exit_modal, detail_toast
+from ui.layouts.structure_detail import confirm_delete_modal, confirm_edit_modal, confirm_exit_modal, detail_toast
 
 ROW_HEIGHT = 48
 
@@ -212,6 +212,6 @@ def structures_layout() -> html.Div:
             header, filter_bar, active_grid, closed_section,
             _detail_modal(),
             # Later in the DOM than the detail modal, so they stack above it.
-            confirm_exit_modal(), confirm_edit_modal(), detail_toast(),
+            confirm_exit_modal(), confirm_edit_modal(), confirm_delete_modal(), detail_toast(),
         ]
     )
