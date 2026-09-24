@@ -24,6 +24,11 @@ KEY_MARGIN_LIMIT = "margin_limit"
 KEY_ROLL_WARNING_DAYS = "roll_warning_days"
 KEY_VAR_CONFIDENCE = "var_confidence"
 KEY_CORRELATION_WINDOW = "correlation_window"
+# The rolling-correlation window (Time Series / Year Overlay / Summary Table) is a
+# different calculation from the point-in-time one KEY_CORRELATION_WINDOW drives
+# (core.correlation.calculate_rolling_correlation vs calculate_correlation) and needs its
+# own default.
+KEY_ROLLING_CORRELATION_WINDOW = "rolling_correlation_window"
 KEY_TEAMS_WEBHOOK = WEBHOOK_SETTING_KEY
 KEY_TEAMS_ENABLED = ENABLED_SETTING_KEY
 
@@ -105,7 +110,7 @@ def validate_thresholds(
     }
 
 
-def validate_defaults(var_confidence, correlation_window) -> dict[str, float | int]:
+def validate_defaults(var_confidence, correlation_window, rolling_correlation_window) -> dict[str, float | int]:
     """Validate the analysis defaults and return {settings_key: value}."""
     confidence = parse_number(var_confidence, "VaR Confidence Level")
     if confidence not in VAR_CONFIDENCE_CHOICES:
@@ -115,6 +120,13 @@ def validate_defaults(var_confidence, correlation_window) -> dict[str, float | i
         KEY_CORRELATION_WINDOW: parse_number(
             correlation_window,
             "Correlation Window",
+            minimum=MIN_CORRELATION_WINDOW,
+            maximum=MAX_CORRELATION_WINDOW,
+            integer=True,
+        ),
+        KEY_ROLLING_CORRELATION_WINDOW: parse_number(
+            rolling_correlation_window,
+            "Rolling Correlation Window",
             minimum=MIN_CORRELATION_WINDOW,
             maximum=MAX_CORRELATION_WINDOW,
             integer=True,

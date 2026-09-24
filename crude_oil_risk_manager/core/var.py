@@ -384,6 +384,177 @@ def portfolio_pnl_var(
     return result
 
 
+# ----------------------------------------------------------------------
+# Monte Carlo VaR (correlation-matrix, Cholesky-simulated)
+# ----------------------------------------------------------------------
+#
+# L = cholesky(C); simulated_returns = L @ draws; simulated_pnl = weights . simulated_returns;
+# VaR = -percentile(simulated_pnl, (1-confidence)*100). `draws` come from a distribution the
+# caller picks per symbol (Normal(mean, std) or Uniform(low, high)); the Cholesky factor of the
+# correlation matrix then imposes the observed cross-symbol correlation on those independent
+# draws. This is a distinct method from the historical-simulation VaR above: it does not resample
+# actual historical days, it generates new scenarios from an assumed distribution shaped by the
+# correlation matrix, so it can produce scenarios outside the historical range.
+
+DISTRIBUTION_NORMAL = "normal"
+DISTRIBUTION_UNIFORM = "uniform"
+
+DEFAULT_MC_SIMULATIONS = 10_000
+_MAX_MC_SIMULATIONS = 200_000
+_MIN_MC_SIMULATIONS = 100
+
+
+def _nearest_correlation_psd(matrix: np.ndarray) -> np.ndarray:
+    """Repair a correlation matrix into a valid (symmetric, PSD, unit-diagonal) one.
+
+    Pairwise-estimated correlation matrices (each cell from its own best-available date
+    range, as build_correlation_matrix produces) are not guaranteed positive semi-definite,
+    and missing pairs are NaN. NaNs are treated as uncorrelated (0.0), the matrix is
+    symmetrized, negative eigenvalues are clipped to a small positive floor, and the result
+    is rescaled back to unit diagonal so it stays a valid correlation matrix for Cholesky.
+    """
+    clean = np.nan_to_num(matrix, nan=0.0)
+    np.fill_diagonal(clean, 1.0)
+    clean = (clean + clean.T) / 2.0
+    eigvals, eigvecs = np.linalg.eigh(clean)
+    eigvals = np.clip(eigvals, 1e-10, None)
+    repaired = eigvecs @ np.diag(eigvals) @ eigvecs.T
+    scale = np.sqrt(np.diag(repaired))
+    repaired = repaired / np.outer(scale, scale)
+    np.fill_diagonal(repaired, 1.0)
+    return repaired
+
+
+def _validate_distribution(distribution: str, dist_params: dict) -> None:
+    if distribution == DISTRIBUTION_NORMAL:
+        if dist_params.get("std", 0) < 0:
+            raise ValueError(f"std must be >= 0, got {dist_params.get('std')}")
+    elif distribution == DISTRIBUTION_UNIFORM:
+        if dist_params.get("low", 0) > dist_params.get("high", 0):
+            raise ValueError(
+                f"low ({dist_params.get('low')}) must be <= high ({dist_params.get('high')})"
+            )
+    else:
+        raise ValueError(f"Unknown distribution '{distribution}', expected '{DISTRIBUTION_NORMAL}' or '{DISTRIBUTION_UNIFORM}'")
+
+
+def simulate_correlated_pnl(
+    correlation_matrix: pd.DataFrame,
+    dollar_weights: dict[str, float],
+    distribution: str,
+    dist_params: dict,
+    n_simulations: int = DEFAULT_MC_SIMULATIONS,
+    seed: int | None = None,
+) -> np.ndarray:
+    """Simulated portfolio P&L for `n_simulations` correlated draws.
+
+    L = cholesky(nearest-PSD(C)); draws ~ distribution(dist_params), one column per symbol,
+    independent before correlating; simulated_returns = draws @ L.T applies the correlation;
+    simulated_pnl = simulated_returns @ weight_vector. `dollar_weights` is dollar P&L per
+    1.0-point move for each symbol (see leg_dollar_weights / outright_weights * multiplier).
+    Symbols with a zero weight contribute nothing but are still simulated (so the requested
+    correlation structure is respected even for hedge legs with a net-zero weight).
+    """
+    if not dollar_weights:
+        return np.zeros(0, dtype=float)
+    if not _MIN_MC_SIMULATIONS <= n_simulations <= _MAX_MC_SIMULATIONS:
+        raise ValueError(f"n_simulations must be between {_MIN_MC_SIMULATIONS} and {_MAX_MC_SIMULATIONS}, got {n_simulations}")
+    _validate_distribution(distribution, dist_params)
+
+    symbols = list(dollar_weights)
+    matrix = correlation_matrix.reindex(index=symbols, columns=symbols).to_numpy(dtype=float)
+    psd = _nearest_correlation_psd(matrix)
+    cholesky_factor = np.linalg.cholesky(psd)
+
+    rng = np.random.default_rng(seed)
+    n = len(symbols)
+    if distribution == DISTRIBUTION_NORMAL:
+        draws = rng.normal(dist_params.get("mean", 0.0), dist_params.get("std", 1.0), size=(n_simulations, n))
+    else:
+        draws = rng.uniform(dist_params.get("low", -1.0), dist_params.get("high", 1.0), size=(n_simulations, n))
+
+    simulated_returns = draws @ cholesky_factor.T
+    weight_vector = np.array([dollar_weights[s] for s in symbols])
+    return simulated_returns @ weight_vector
+
+
+@dataclass
+class MonteCarloVarResult:
+    """Monte Carlo VaR of a set of correlated positions, or why there is none."""
+
+    pnl: pd.Series | None = None
+    var: dict[float, float] = field(default_factory=dict)
+    cutoff: dict[float, float] = field(default_factory=dict)
+    n_simulations: int = 0
+    distribution: str = DISTRIBUTION_NORMAL
+    dist_params: dict = field(default_factory=dict)
+    symbols_included: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    @property
+    def observations(self) -> int:
+        """Alias so callers that render historical- and Monte-Carlo-VaR results the same way
+        (e.g. ui.layouts.var_tab.build_var_cards) can read a common "how many scenarios" field."""
+        return 0 if self.pnl is None else len(self.pnl)
+
+    @property
+    def requested(self) -> int:
+        return self.n_simulations
+
+
+def monte_carlo_var(
+    dollar_weights: dict[str, float],
+    data_loader: DataLoader,
+    distribution: str,
+    dist_params: dict,
+    confidence_levels: tuple[float, ...] = (0.95, 0.99),
+    correlation_window: int = 60,
+    n_simulations: int = DEFAULT_MC_SIMULATIONS,
+    seed: int | None = None,
+) -> MonteCarloVarResult:
+    """Correlation-matrix Monte Carlo VaR for a book of dollar-weighted positions.
+
+    Builds the symbols' pairwise correlation matrix (core.correlation.build_correlation_matrix,
+    best-effort: a pair with no usable history is left uncorrelated rather than failing the
+    whole run), then delegates to simulate_correlated_pnl. Symbols with no correlation data at
+    all still simulate as uncorrelated with everything else (a data_warning is added), since a
+    Monte Carlo run should never silently drop a position the way historical-simulation VaR
+    does for missing price history.
+    """
+    from core.correlation import build_correlation_matrix  # local import: avoids a cycle at module load
+
+    result = MonteCarloVarResult(distribution=distribution, dist_params=dict(dist_params), n_simulations=n_simulations)
+    if not dollar_weights:
+        result.error = "No positions — nothing to simulate"
+        return result
+    for confidence in confidence_levels:
+        _validate_inputs(confidence, 1)
+
+    symbols = sorted(dollar_weights)
+    result.symbols_included = symbols
+    if len(symbols) == 1:
+        matrix = pd.DataFrame([[1.0]], index=symbols, columns=symbols)
+    else:
+        matrix = build_correlation_matrix(symbols, correlation_window, data_loader)
+        if matrix.isna().to_numpy().any():
+            result.warnings.append(
+                "Some symbol pairs had insufficient shared history; those pairs are treated as "
+                "uncorrelated (0.0), which may understate diversification benefit or risk."
+            )
+
+    try:
+        pnl = simulate_correlated_pnl(matrix, dollar_weights, distribution, dist_params, n_simulations, seed)
+    except ValueError as exc:
+        result.error = str(exc)
+        return result
+
+    result.pnl = pd.Series(pnl)
+    for confidence in confidence_levels:
+        result.var[confidence], result.cutoff[confidence] = _var_from_scenarios(pnl, confidence)
+    return result
+
+
 def get_var_term_structure(
     symbol: str,
     net_lots: float,

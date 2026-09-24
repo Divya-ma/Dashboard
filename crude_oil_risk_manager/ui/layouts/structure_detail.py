@@ -108,7 +108,29 @@ def _header(structure: Structure, has_trades: bool) -> html.Div:
         [
             *edit,
             html.Div(
-                [html.Span(structure.name, style={"fontSize": "26px", "fontWeight": "bold", **_TEXT}), _status_badge(structure.status)]
+                [
+                    html.Span(structure.name, style={"fontSize": "26px", "fontWeight": "bold", **_TEXT}),
+                    _status_badge(structure.status),
+                    dbc.Button(
+                        "✏️", id="btn-rename-structure", color="secondary", outline=True, size="sm",
+                        style={"marginLeft": "10px", "verticalAlign": "middle"}, title="Rename structure",
+                    ),
+                ]
+            ),
+            dbc.Collapse(
+                html.Div(
+                    [
+                        dbc.Input(
+                            id="rename-structure-input", value=structure.name, maxLength=100, debounce=False,
+                            style={"display": "inline-block", "width": "320px"},
+                        ),
+                        dbc.Button("Save", id="btn-confirm-rename", color="success", size="sm", className="ms-2"),
+                        dbc.Button("Cancel", id="btn-cancel-rename", color="secondary", outline=True, size="sm", className="ms-2"),
+                    ],
+                    style={"marginTop": "8px"},
+                ),
+                id="rename-collapse",
+                is_open=False,
             ),
             html.Div([*products, html.Span(_days_held(structure), style={**_MUTED, "marginLeft": "8px"})], style={"marginTop": "6px"}),
         ],

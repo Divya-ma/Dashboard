@@ -339,11 +339,31 @@ def test_layout_controls_and_defaults():
                          "corr-watchlist-list", "corr-lookback", "corr-compute-btn", "corr-status",
                          "corr-heatmap", "corr-watchlist", "corr-instrument-group", "corr-structure-group"]:
         assert find(layout, component_id) is not None, component_id
-    assert find(layout, "corr-lookback").value == "30"
+    assert find(layout, "corr-lookback").value == "60"  # from settings.DEFAULT_CORRELATION_WINDOW
     assert [o["value"] for o in find(layout, "corr-lookback").options] == ["10", "20", "30", "60", "90"]
     assert find(layout, "corr-mode").value == "instrument"
     assert find(layout, "corr-structure-group").style == {"display": "none"}
     assert find(layout, "corr-heatmap").figure.layout.annotations[0].text == PLACEHOLDER_TEXT
+
+
+def test_layout_defaults_come_from_settings(tmp_path, monkeypatch):
+    """The Heatmap lookback (point-in-time) and the rolling-window views each read their
+    OWN setting — these are two different calculations (calculate_correlation vs
+    calculate_rolling_correlation) and must not share one default."""
+    from db.repository import Repository
+    from ui.container import Container
+    import ui.layouts.correlation_tab as ct
+
+    repo = Repository(str(tmp_path / "test.db"))
+    repo.set_setting("correlation_window", 45)  # not one of the 10/20/30/60/90 presets
+    repo.set_setting("rolling_correlation_window", 15)
+    monkeypatch.setattr(ct, "container", Container(repository=repo))
+
+    layout = correlation_layout()
+    assert find(layout, "corr-lookback").value == "45"
+    assert [o["value"] for o in find(layout, "corr-lookback").options] == ["10", "20", "30", "45", "60", "90"]
+    assert find(layout, "corr-yr-window").value == 15
+    assert find(layout, "corr-sum-window").value == 15
 
 
 def test_heatmap_figure_scale_annotations_and_title():

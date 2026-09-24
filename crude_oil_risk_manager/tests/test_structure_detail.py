@@ -641,6 +641,55 @@ def test_reuse_structure_default_name_and_refuses_open_structures(repo):
     assert dc.toggle_reuse_panel(1, False) is True
 
 
+# ---------- rename ----------
+
+
+def test_layout_has_rename_ids():
+    layout = structure_detail_layout(outright(), {}, [], None)
+    for component_id in ("btn-rename-structure", "rename-collapse", "rename-structure-input", "btn-confirm-rename", "btn-cancel-rename"):
+        assert find(layout, component_id) is not None
+
+
+def test_toggle_and_cancel_rename_panel():
+    with pytest.raises(PreventUpdate):
+        dc.toggle_rename_panel(None, False)
+    assert dc.toggle_rename_panel(1, False) is True
+    with pytest.raises(PreventUpdate):
+        dc.cancel_rename(None)
+    assert dc.cancel_rename(1) is False
+
+
+def test_save_rename_updates_name_and_refreshes_grid(repo):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    is_open, body, rows, toast_open, message, icon, header = dc.save_rename(1, "New Name", sid, LIVE_STORE, *GRID[:4])
+    assert is_open is False and icon == "success" and "New Name" in message
+    assert repo.get_structure(sid).name == "New Name"
+    assert [r["name"] for r in rows] == ["New Name"]
+    assert "New Name" in str(body)
+
+
+def test_save_rename_rejects_empty_or_too_long_name(repo):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    is_open, body, rows, toast_open, message, icon, header = dc.save_rename(1, "   ", sid, LIVE_STORE, *GRID[:4])
+    assert icon == "danger" and "cannot be empty" in message
+    assert repo.get_structure(sid).name == "Outright"
+
+    is_open, body, rows, toast_open, message, icon, header = dc.save_rename(1, "x" * 101, sid, LIVE_STORE, *GRID[:4])
+    assert icon == "danger" and "100 characters" in message
+
+
+def test_save_rename_noop_when_name_unchanged(repo):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    is_open, body, rows, toast_open, message, icon, header = dc.save_rename(1, "Outright", sid, LIVE_STORE, *GRID[:4])
+    assert is_open is False and icon == "success" and "unchanged" in message.lower()
+    assert body is dc.no_update and rows is dc.no_update
+
+
+def test_save_rename_requires_a_click():
+    with pytest.raises(PreventUpdate):
+        dc.save_rename(None, "New Name", "sid", {}, *GRID[:4])
+
+
 def test_closed_grid_reuse_action_refreshes_active_grid(repo):
     sid = closed_structure(repo)
     rows, toast_open, message, icon, header = sc.handle_closed_structure_action(

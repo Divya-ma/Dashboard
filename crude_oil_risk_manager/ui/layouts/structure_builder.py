@@ -29,6 +29,7 @@ CLASSIFICATION_DISPLAY = {
 
 EXPOSURE_HINT = "Enter leg symbols to see the net outright equivalent (per 1 lot of the structure)."
 CORRELATION_HINT = "Click 'Refresh Correlation' to compare against your active structures."
+VAR_HINT = "Click 'Refresh Correlation' to estimate this structure's 1-day VaR (Monte Carlo, correlation-adjusted)."
 
 
 # ----------------------------------------------------------------------
@@ -107,6 +108,26 @@ def render_correlation_table(rows: list[dict]):
         table_rows.append([row["candidate"], row["existing_structure"], correlation, chip])
         styles.append({"borderLeft": f"3px solid {color}"})
     return data_table(["Candidate", "Existing Structure", "Correlation", "Classification"], table_rows, styles)
+
+
+def render_structure_var(var_result: dict | None) -> html.Div:
+    """VaR 95%/99% (per 1 lot) for the candidate structure, or why it couldn't be computed."""
+    if var_result is None:
+        return html.Div("Enter at least one valid leg symbol first.", style=_MUTED)
+    if var_result.get("error"):
+        return html.Div(var_result["error"], style=_MUTED)
+    parts = [
+        html.Span(f"VaR 95%: ${var_result['var_95']:,.0f}", style={"marginRight": "20px", "fontWeight": "bold", "color": COLORS["ACCENT_YELLOW"]}),
+        html.Span(f"VaR 99%: ${var_result['var_99']:,.0f}", style={"fontWeight": "bold", "color": COLORS["ACCENT_RED"]}),
+        html.Div(
+            f"Monte Carlo, {var_result['distribution'].title()} draws, {var_result['n_simulations']:,} simulations, "
+            f"correlation from the last {var_result['window']}d.",
+            style={**_MUTED, "marginTop": "4px"},
+        ),
+    ]
+    if var_result.get("warnings"):
+        parts.append(html.Div(" ".join(var_result["warnings"]), style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "12px", "marginTop": "4px"}))
+    return html.Div(parts)
 
 
 def render_step_indicator(step: int, template: str | None) -> dbc.Row:
@@ -271,6 +292,9 @@ def _step_2() -> html.Div:
         html.H6("🔗 Correlation vs Portfolio", style=_HEADING),
         dbc.Button("Refresh Correlation", id="btn-refresh-correlation", color="info", outline=True, size="sm", className="mb-2"),
         dcc.Loading(html.Div(html.Div(CORRELATION_HINT, style=_MUTED), id="builder-correlation-panel"), type="dot"),
+        html.Hr(style={"borderColor": COLORS["BORDER_COLOR"]}),
+        html.H6("⚠️ Estimated VaR (1 lot of this structure)", style=_HEADING),
+        html.Div(VAR_HINT, id="builder-var-panel", style=_MUTED),
     ]
     return html.Div(
         [

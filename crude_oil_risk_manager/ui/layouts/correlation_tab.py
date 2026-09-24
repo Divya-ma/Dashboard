@@ -16,17 +16,37 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 
+from config.settings import settings
+from core.user_settings import KEY_CORRELATION_WINDOW, KEY_ROLLING_CORRELATION_WINDOW
+from ui.container import container
 from ui.layouts.shell import COLORS
 
 LOOKBACK_OPTIONS = [{"label": f"{days}d", "value": str(days)} for days in (10, 20, 30, 60, 90)]
-DEFAULT_LOOKBACK = "30"
 PLACEHOLDER_TEXT = "Add instruments or structures and click Compute"
 MIN_ITEMS_TEXT = "Add at least 2 items to compute"
 
 TS_WINDOW_PRESETS = [10, 20, 30, 60, 90]
 DEFAULT_TS_WINDOWS = [20, 60]
-DEFAULT_YEAR_WINDOW = 60
-DEFAULT_SUMMARY_WINDOW = 60
+
+
+def default_correlation_window() -> int:
+    """Point-in-time correlation window (Heatmap lookback), from Settings > Analysis Defaults."""
+    if container.repository is None:
+        return settings.DEFAULT_CORRELATION_WINDOW
+    return int(container.repository.get_setting(KEY_CORRELATION_WINDOW, settings.DEFAULT_CORRELATION_WINDOW))
+
+
+def default_rolling_window() -> int:
+    """Rolling correlation window (Time Series / Year Overlay / Summary Table), from Settings.
+
+    A different calculation from default_correlation_window (core.correlation.
+    calculate_rolling_correlation vs calculate_correlation), so it has its own setting.
+    """
+    if container.repository is None:
+        return settings.DEFAULT_ROLLING_CORRELATION_WINDOW
+    return int(
+        container.repository.get_setting(KEY_ROLLING_CORRELATION_WINDOW, settings.DEFAULT_ROLLING_CORRELATION_WINDOW)
+    )
 
 MONTH_TICKVALS = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
 MONTH_TICKTEXT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -328,9 +348,13 @@ def _base_target_row(base_id: str, target_id: str) -> dbc.Row:
 
 
 def _heatmap_tab() -> html.Div:
+    default_lookback = default_correlation_window()
+    options = LOOKBACK_OPTIONS
+    if not any(int(opt["value"]) == default_lookback for opt in options):
+        options = sorted([*options, {"label": f"{default_lookback}d", "value": str(default_lookback)}], key=lambda o: int(o["value"]))
     controls = dbc.Row(
         [
-            dbc.Col([html.Div("Lookback period", style=_LABEL), dbc.Select(id="corr-lookback", options=LOOKBACK_OPTIONS, value=DEFAULT_LOOKBACK)], md=4),
+            dbc.Col([html.Div("Lookback period", style=_LABEL), dbc.Select(id="corr-lookback", options=options, value=str(default_lookback))], md=4),
             dbc.Col(
                 [
                     html.Div("As-of date (optional)", style=_LABEL),
@@ -382,7 +406,7 @@ def _year_overlay_tab() -> html.Div:
         _base_target_row("corr-yr-base", "corr-yr-target"),
         dbc.Row(
             [
-                dbc.Col([html.Div("Window (days)", style=_LABEL), dbc.Input(id="corr-yr-window", type="number", min=2, step=1, value=DEFAULT_YEAR_WINDOW)], md=4),
+                dbc.Col([html.Div("Window (days)", style=_LABEL), dbc.Input(id="corr-yr-window", type="number", min=2, step=1, value=default_rolling_window())], md=4),
                 dbc.Col(
                     dbc.Checklist(
                         id="corr-yr-options", options=[{"label": "Show average across years", "value": "avg"}],
@@ -406,7 +430,7 @@ def _year_overlay_tab() -> html.Div:
 def _summary_tab() -> html.Div:
     controls = dbc.Row(
         [
-            dbc.Col([html.Div("Window (days)", style=_LABEL), dbc.Input(id="corr-sum-window", type="number", min=2, step=1, value=DEFAULT_SUMMARY_WINDOW)], md=4),
+            dbc.Col([html.Div("Window (days)", style=_LABEL), dbc.Input(id="corr-sum-window", type="number", min=2, step=1, value=default_rolling_window())], md=4),
             dbc.Col(_compute_button("corr-sum-compute-btn"), md=4, className="d-flex align-items-end"),
         ],
         className="mb-2",

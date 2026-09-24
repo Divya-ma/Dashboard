@@ -197,6 +197,22 @@ def test_set_structure_lifecycle_can_clear_closed_at_and_trigger(repo):
     assert fetched.close_trigger is None
 
 
+def test_update_structure_name_renames_without_touching_legs_or_notes(repo):
+    leg = make_leg()
+    structure = Structure(
+        name="Original Name", structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[leg],
+        status=StructureStatus.OPEN, notes="existing note",
+    )
+    repo.save_structure(structure)
+
+    repo.update_structure_name(structure.structure_id, "New Name")
+
+    fetched = repo.get_structure(structure.structure_id)
+    assert fetched.name == "New Name"
+    assert fetched.notes == "existing note"
+    assert fetched.legs[0].lots == leg.lots
+
+
 def test_update_structure_legs_appends_audit_note(repo):
     leg = make_leg()
     structure = Structure(

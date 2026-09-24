@@ -4,6 +4,7 @@ import pytest
 
 from core.user_settings import (
     KEY_CORRELATION_WINDOW,
+    KEY_ROLLING_CORRELATION_WINDOW,
     KEY_MARGIN_LIMIT,
     KEY_PNL_STOP,
     KEY_ROLL_WARNING_DAYS,
@@ -130,19 +131,27 @@ def test_thresholds_zero_stop_allowed():
 
 
 def test_defaults_valid():
-    assert validate_defaults(0.99, 60) == {KEY_VAR_CONFIDENCE: 0.99, KEY_CORRELATION_WINDOW: 60}
+    assert validate_defaults(0.99, 60, 45) == {
+        KEY_VAR_CONFIDENCE: 0.99, KEY_CORRELATION_WINDOW: 60, KEY_ROLLING_CORRELATION_WINDOW: 45,
+    }
 
 
 @pytest.mark.parametrize("confidence", [0.9, 1.0, None, "high"])
 def test_defaults_confidence_must_be_95_or_99(confidence):
     with pytest.raises(ValueError):
-        validate_defaults(confidence, 60)
+        validate_defaults(confidence, 60, 60)
 
 
 @pytest.mark.parametrize("window", [19, 501, 60.5, None, "x"])
 def test_defaults_window_bounds(window):
     with pytest.raises(ValueError):
-        validate_defaults(0.95, window)
+        validate_defaults(0.95, window, 60)
+
+
+@pytest.mark.parametrize("window", [19, 501, 60.5, None, "x"])
+def test_defaults_rolling_window_bounds(window):
+    with pytest.raises(ValueError):
+        validate_defaults(0.95, 60, window)
 
 
 # ---------- validate_webhook_url ----------

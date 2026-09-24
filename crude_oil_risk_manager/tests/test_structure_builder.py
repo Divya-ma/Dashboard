@@ -422,7 +422,7 @@ def trigger(monkeypatch, triggered_id, value=1):
 def test_toggle_builder_modal(monkeypatch):
     trigger(monkeypatch, "btn-new-structure")
     opened = bc.toggle_builder_modal(1, None, False)
-    assert opened[:4] == (True, 1, None, []) and len(opened) == 11
+    assert opened[:4] == (True, 1, None, []) and len(opened) == 12
     trigger(monkeypatch, "btn-builder-cancel")
     assert bc.toggle_builder_modal(1, 1, True)[0] is False
     trigger(monkeypatch, "btn-new-structure")
@@ -492,9 +492,9 @@ def test_exposure_preview_and_validation_messages():
 def test_check_correlation_button_only(env):
     with pytest.raises(PreventUpdate):
         bc.check_correlation(None, ["CLZ26"], [1], "outright")
-    panel, rows = bc.check_correlation(1, [""], [1], "outright")
-    assert "at least one valid" in str(panel) and rows == []
-    panel, rows = bc.check_correlation(1, ["CLZ26"], [1], "outright")
+    panel, rows, var_panel = bc.check_correlation(1, [""], [1], "outright")
+    assert "at least one valid" in str(panel) and rows == [] and "at least one valid" in str(var_panel)
+    panel, rows, var_panel = bc.check_correlation(1, ["CLZ26"], [1], "outright")
     assert "No active structures" in str(panel) and rows == []
 
 

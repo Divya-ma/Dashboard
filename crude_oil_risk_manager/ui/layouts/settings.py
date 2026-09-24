@@ -92,9 +92,16 @@ def _defaults_section() -> dbc.AccordionItem:
                 ),
             ),
             _field(
-                "Default Correlation Window (days)",
+                "Correlation Window (days)",
                 _number_input("settings-correlation-window", settings.DEFAULT_CORRELATION_WINDOW),
-                "Between 20 and 500.",
+                "Between 20 and 500. A single point-in-time correlation: the Structure Builder's "
+                "correlation check and the Correlation tab's Heatmap lookback.",
+            ),
+            _field(
+                "Rolling Correlation Window (days)",
+                _number_input("settings-rolling-correlation-window", settings.DEFAULT_ROLLING_CORRELATION_WINDOW),
+                "Between 20 and 500. A different calculation: the trailing window for the "
+                "Correlation tab's Time Series, Year Overlay and Summary Table views.",
             ),
             dbc.Button("Save Defaults", id="settings-save-defaults", color="primary"),
             html.Div("", id="settings-defaults-feedback", style=_STATUS_STYLE),

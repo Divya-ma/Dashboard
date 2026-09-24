@@ -23,6 +23,7 @@ from core.user_settings import (
     KEY_PNL_REALIZED_BASELINE,
     KEY_PNL_STOP,
     KEY_ROLL_WARNING_DAYS,
+    KEY_ROLLING_CORRELATION_WINDOW,
     KEY_STALENESS,
     KEY_STRUCTURE_MAX_LOSS,
     KEY_TEAMS_ENABLED,
@@ -54,7 +55,7 @@ _THRESHOLD_FIELDS = [
     "settings-margin-limit",
     "settings-roll-warning-days",
 ]
-_DEFAULT_FIELDS = ["settings-var-confidence", "settings-correlation-window"]
+_DEFAULT_FIELDS = ["settings-var-confidence", "settings-correlation-window", "settings-rolling-correlation-window"]
 _TEAMS_FIELDS = ["settings-teams-webhook", "settings-teams-enabled"]
 
 
@@ -90,6 +91,7 @@ def load_settings(pathname):
         repo.get_setting(KEY_ROLL_WARNING_DAYS, settings.ROLL_WARNING_DAYS_BEFORE_EXPIRY),
         repo.get_setting(KEY_VAR_CONFIDENCE, settings.DEFAULT_VAR_CONFIDENCE),
         repo.get_setting(KEY_CORRELATION_WINDOW, settings.DEFAULT_CORRELATION_WINDOW),
+        repo.get_setting(KEY_ROLLING_CORRELATION_WINDOW, settings.DEFAULT_ROLLING_CORRELATION_WINDOW),
         webhook,
         bool(teams_enabled),
         _token_status(token),
@@ -164,10 +166,10 @@ def save_thresholds(n_clicks, pnl_stop, structure_max_loss, staleness, margin_li
     return "✅ Saved", ""
 
 
-def save_defaults(n_clicks, var_confidence, correlation_window):
+def save_defaults(n_clicks, var_confidence, correlation_window, rolling_correlation_window):
     """Validate and store the analysis defaults."""
     try:
-        values = validate_defaults(var_confidence, correlation_window)
+        values = validate_defaults(var_confidence, correlation_window, rolling_correlation_window)
     except ValueError as exc:
         return "❌ Not saved", f"❌ {exc}"
 
@@ -383,6 +385,7 @@ def register_settings_callbacks(app) -> None:
         Output("settings-roll-warning-days", "value"),
         Output("settings-var-confidence", "value"),
         Output("settings-correlation-window", "value"),
+        Output("settings-rolling-correlation-window", "value"),
         Output("settings-teams-webhook", "value"),
         Output("settings-teams-enabled", "value"),
         Output("settings-token-status", "children"),

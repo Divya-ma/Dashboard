@@ -26,14 +26,13 @@ from core.structure_builder import backfill_symbols_async
 from core.structure_view import statuses_for_filter
 from ui.container import container
 from ui.layouts.correlation_tab import (
-    DEFAULT_SUMMARY_WINDOW,
     DEFAULT_TS_WINDOWS,
-    DEFAULT_YEAR_WINDOW,
     MIN_ITEMS_TEXT,
     build_heatmap_figure,
     build_summary_table,
     build_time_series_figure,
     build_year_overlay_figure,
+    default_rolling_window,
     empty_figure,
     render_watchlist,
 )
@@ -258,7 +257,7 @@ def compute_year_overlay(n_clicks, watchlist, base, target, window, options):
     if not base or not target:
         return _no_pair_selected()
 
-    window = int(window or DEFAULT_YEAR_WINDOW)
+    window = int(window or default_rolling_window())
     series, skipped = _series_for_pair(watchlist, base, target)
     if base not in series or target not in series:
         reason = "; ".join(f"{label}: {msg}" for label, msg in skipped.items()) or "no local data"
@@ -283,7 +282,7 @@ def compute_summary(n_clicks, watchlist, window):
     if len(items) < 2:
         return html.Div(), _status(MIN_ITEMS_TEXT, is_error=True)
 
-    window = int(window or DEFAULT_SUMMARY_WINDOW)
+    window = int(window or default_rolling_window())
     structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
     series, skipped = build_watchlist_series(items, structures, container.data_loader)
     if len(series) < 2:

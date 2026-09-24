@@ -247,16 +247,16 @@ def make_result(pnl, requested=60, warnings=None):
 
 def test_var_cards_show_dollars_lookback_and_observation_count():
     result = make_result(np.random.default_rng(1).normal(0, 1000, 60), requested=60)
-    c95, c99, lookback, obs = build_var_cards(result, 60)
+    c95, c99, lookback, obs = build_var_cards(result, "60d")
     assert c95.startswith("$") and c99.startswith("$") and lookback == "60d" and obs == "60"
     short = make_result(np.random.default_rng(1).normal(0, 1000, 20), requested=90)
-    assert build_var_cards(short, 90)[3] == "20 (of 90 requested)"
-    assert build_var_cards(None, 60) == ("—", "—", "60d", "—")
+    assert build_var_cards(short, "90d")[3] == "20 (of 90 requested)"
+    assert build_var_cards(None, "60d") == ("—", "—", "60d", "—")
 
 
 def test_histogram_colors_zero_edge_vlines_and_title():
     pnl = np.random.default_rng(3).normal(0, 1000, 100)
-    figure = build_histogram(make_result(pnl), 60)
+    figure = build_histogram(make_result(pnl), "Portfolio PnL Distribution (60d Historical)")
     bar = figure.data[0]
     assert figure.layout.title.text == "Portfolio PnL Distribution (60d Historical)"
     assert sum(bar.y) == 100
@@ -270,11 +270,11 @@ def test_histogram_colors_zero_edge_vlines_and_title():
 
 
 def test_histogram_handles_constant_and_missing_series():
-    assert len(build_histogram(make_result([500.0] * 12), 30).data[0].x) >= 1
+    assert len(build_histogram(make_result([500.0] * 12), "30d").data[0].x) >= 1
     error = Result()
     error.error = "No price data for any open leg — cannot compute VaR"
-    assert build_histogram(error, 60).layout.annotations[0].text == error.error
-    assert build_histogram(None, 60).layout.annotations[0].text == NOTHING_TO_ANALYZE
+    assert build_histogram(error, "60d").layout.annotations[0].text == error.error
+    assert build_histogram(None, "60d").layout.annotations[0].text == NOTHING_TO_ANALYZE
 
 
 def test_var_warning_banner_lists_each_warning():
@@ -340,15 +340,18 @@ def save(repo, s):
     repo.save_structure(s)
 
 
+_HISTORICAL_ARGS = ("historical", "normal", 0.0, 0.5, -1.0, 1.0, 10_000)
+
+
 def test_callbacks_only_run_on_the_var_tab(env):
     with pytest.raises(PreventUpdate):
-        vc.update_var_section("/structures", "60")
+        vc.update_var_section("/structures", "60", *_HISTORICAL_ARGS)
     with pytest.raises(PreventUpdate):
         vc.update_scenarios("/structures", None)
 
 
 def test_placeholders_without_open_structures(env):
-    c95, c99, lookback, obs, figure, warnings = vc.update_var_section("/var-scenario", "60")
+    c95, c99, lookback, obs, figure, warnings = vc.update_var_section("/var-scenario", "60", *_HISTORICAL_ARGS)
     assert (c95, c99, obs) == ("—", "—", "—") and lookback == "60d"
     assert figure.layout.annotations[0].text == NOTHING_TO_ANALYZE
     assert vc.update_scenarios("/var-scenario", None) == ([], NOTHING_TO_ANALYZE, "")
@@ -359,7 +362,7 @@ def test_var_and_scenarios_from_open_structures(env, repo, write_ohlc):
     write_ohlc("CLZ26", closes, end="2026-09-18")
     save(repo, structure("Long", [("CLZ26", 1, "buy", 2)]))
     save(repo, structure("Missing", [("CLF27", 1, "sell", 1)]))
-    c95, c99, lookback, obs, figure, warnings = vc.update_var_section("/var-scenario", "30")
+    c95, c99, lookback, obs, figure, warnings = vc.update_var_section("/var-scenario", "30", *_HISTORICAL_ARGS)
     expected = -np.percentile(np.diff(closes)[-30:] * 2000, 5)
     assert c95 == f"${expected:,.0f}" and obs == "30" and lookback == "30d"
     assert "30d Historical" in figure.layout.title.text

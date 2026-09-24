@@ -36,6 +36,7 @@ from core.structure_utils import (
     validate_structure_legs,
 )
 from core.user_settings import KEY_CORRELATION_WINDOW
+from core.var import DISTRIBUTION_NORMAL, monte_carlo_var
 from ui.callbacks.structures_callbacks import update_active_structures
 from ui.container import container
 from ui.layouts.shell import COLORS
@@ -44,12 +45,14 @@ from ui.layouts.structure_builder import (
     HIDDEN,
     SHOWN,
     STEP_COUNT,
+    VAR_HINT,
     build_leg_row,
     data_table,
     render_correlation_table,
     render_exposure_table,
     render_messages,
     render_step_indicator,
+    render_structure_var,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,9 +85,10 @@ def toggle_builder_modal(open_clicks, cancel_clicks, is_open):
     """Open (with all state reset) from '+ New Structure'; close from Cancel. Save closes via save_structure."""
     trigger = callback_context.triggered_id
     if trigger == "btn-new-structure" and open_clicks:
-        return True, 1, None, [], None, None, None, None, None, None, html.Div(CORRELATION_HINT, style=_MUTED)
+        hint = html.Div(CORRELATION_HINT, style=_MUTED)
+        return True, 1, None, [], None, None, None, None, None, None, hint, html.Div(VAR_HINT, style=_MUTED)
     if trigger == "btn-builder-cancel" and cancel_clicks:
-        return (False,) + (no_update,) * 10
+        return (False,) + (no_update,) * 11
     raise PreventUpdate
 
 
@@ -183,20 +187,58 @@ def update_exposure_preview(symbols, ratios, legs_store):
     return render_exposure_table(net, ignored)
 
 
+# A new symbol typed in the builder has no saved Contract yet (and so no known multiplier)
+# until the structure itself is saved; WTI/Brent-style contracts are 1,000 bbl per lot, so
+# that's the fallback used for the structure builder's own VaR preview only.
+_FALLBACK_MULTIPLIER = 1000.0
+
+
+def _candidate_var(net_outright_weights: dict[str, float], window: int) -> dict:
+    """Monte Carlo VaR (1 lot of the candidate structure) from its outright decomposition.
+
+    Normal(mean=0, std=1 point) draws, correlated via the same outright symbols' correlation
+    matrix used for the correlation check above — a quick, opinionated default (no
+    distribution picker here; the VaR & Scenarios tab has the full controls for an open
+    structure's actual book).
+    """
+    dollar_weights = {}
+    for symbol, weight in net_outright_weights.items():
+        contract = container.repository.get_contract(symbol)
+        multiplier = contract.multiplier if contract else _FALLBACK_MULTIPLIER
+        dollar_weights[symbol] = weight * multiplier
+
+    result = monte_carlo_var(
+        dollar_weights, container.data_loader, DISTRIBUTION_NORMAL,
+        {"mean": 0.0, "std": 1.0}, correlation_window=window,
+    )
+    if result.error:
+        return {"error": result.error}
+    return {
+        "var_95": result.var[0.95],
+        "var_99": result.var[0.99],
+        "distribution": result.distribution,
+        "n_simulations": result.n_simulations,
+        "window": window,
+        "warnings": result.warnings,
+    }
+
+
 def check_correlation(n_clicks, symbols, ratios, template):
-    """Correlation of the candidate structure vs active structures; runs only on the button."""
+    """Correlation and estimated VaR of the candidate structure; runs only on the button."""
     if not n_clicks:
         raise PreventUpdate
     repository = container.repository
     legs = _legs(symbols, ratios)
     net, _ignored = net_outright_equivalent(legs)
     if not net:
-        return html.Div("Enter at least one valid leg symbol first.", style=_MUTED), []
+        placeholder = html.Div("Enter at least one valid leg symbol first.", style=_MUTED)
+        return placeholder, [], placeholder
 
     window = int(repository.get_setting(KEY_CORRELATION_WINDOW, settings.DEFAULT_CORRELATION_WINDOW))
     portfolio = repository.get_all_structures(status_filter=ACTIVE_STRUCTURE_STATUSES)
     rows = check_portfolio_correlation(legs, portfolio, window, container.data_loader)
-    return render_correlation_table(rows), rows
+    var_result = _candidate_var(net, window)
+    return render_correlation_table(rows), rows, render_structure_var(var_result)
 
 
 # ----------------------------------------------------------------------
@@ -307,6 +349,7 @@ def register_structure_builder_callbacks(app) -> None:
         Output("builder-notes", "value"),
         Output("store-builder-correlation", "data"),
         Output("builder-correlation-panel", "children"),
+        Output("builder-var-panel", "children"),
         Input("btn-new-structure", "n_clicks"),
         Input("btn-builder-cancel", "n_clicks"),
         State("modal-new-structure", "is_open"),
@@ -384,6 +427,7 @@ def register_structure_builder_callbacks(app) -> None:
     app.callback(
         Output("builder-correlation-panel", "children", allow_duplicate=True),
         Output("store-builder-correlation", "data", allow_duplicate=True),
+        Output("builder-var-panel", "children", allow_duplicate=True),
         Input("btn-refresh-correlation", "n_clicks"),
         State(_LEG_SYMBOLS, "value"),
         State(_LEG_RATIOS, "value"),

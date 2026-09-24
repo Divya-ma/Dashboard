@@ -282,6 +282,42 @@ def reuse_structure(n_clicks, structure_id, new_name):
 
 
 # ----------------------------------------------------------------------
+# Rename structure
+# ----------------------------------------------------------------------
+
+
+def toggle_rename_panel(n_clicks, is_open):
+    if not n_clicks:
+        raise PreventUpdate
+    return not is_open
+
+
+def cancel_rename(n_clicks):
+    if not n_clicks:
+        raise PreventUpdate
+    return False
+
+
+def save_rename(n_clicks, new_name, structure_id, live_prices, status_filter, product_filter, sort_by, portfolio_pnl):
+    """Rename a structure; legs, trades and PnL history are untouched."""
+    if not n_clicks:
+        raise PreventUpdate
+    structure = _load(structure_id)
+    name = (new_name or "").strip()
+    if not name:
+        return no_update, no_update, no_update, *_toast("Structure name cannot be empty.", ok=False, header="Not renamed")
+    if len(name) > 100:
+        return no_update, no_update, no_update, *_toast("Structure name is limited to 100 characters.", ok=False, header="Not renamed")
+    if name == structure.name:
+        return False, no_update, no_update, *_toast("Name unchanged.", header="No change")
+
+    container.repository.update_structure_name(structure_id, name)
+    rows = _grid_rows(status_filter, product_filter, sort_by, portfolio_pnl, live_prices)
+    body = _render_body(structure_id, live_prices)
+    return False, body, rows, *_toast(f"Renamed to '{name}'.", header="Structure renamed")
+
+
+# ----------------------------------------------------------------------
 # Edit mode
 # ----------------------------------------------------------------------
 
@@ -569,6 +605,35 @@ def register_structure_detail_callbacks(app) -> None:
         State("reuse-structure-name", "value"),
         prevent_initial_call=True,
     )(reuse_structure)
+
+    app.callback(
+        Output("rename-collapse", "is_open", allow_duplicate=True),
+        Input("btn-rename-structure", "n_clicks"),
+        State("rename-collapse", "is_open"),
+        prevent_initial_call=True,
+    )(toggle_rename_panel)
+
+    app.callback(
+        Output("rename-collapse", "is_open", allow_duplicate=True),
+        Input("btn-cancel-rename", "n_clicks"),
+        prevent_initial_call=True,
+    )(cancel_rename)
+
+    app.callback(
+        Output("rename-collapse", "is_open", allow_duplicate=True),
+        _body_dup(),
+        Output("structures-active-grid", "rowData", allow_duplicate=True),
+        *_TOAST_OUTPUTS,
+        Input("btn-confirm-rename", "n_clicks"),
+        State("rename-structure-input", "value"),
+        State("store-selected-structure-id", "data"),
+        State("store-live-prices", "data"),
+        State("filter-structure-status", "value"),
+        State("filter-structure-product", "value"),
+        State("filter-structure-sort", "value"),
+        State("store-portfolio-pnl", "data"),
+        prevent_initial_call=True,
+    )(save_rename)
 
     app.callback(
         Output("modal-confirm-edit", "is_open"),

@@ -12,6 +12,7 @@ from dash import dash_table, dcc, html
 from dash.dash_table.Format import Format, Group, Scheme, Sign, Symbol
 
 from core.scenarios import KIND_PORTFOLIO
+from core.var import DEFAULT_MC_SIMULATIONS, DISTRIBUTION_NORMAL, DISTRIBUTION_UNIFORM
 from ui.layouts.correlation_tab import empty_figure
 from ui.layouts.shell import COLORS
 
@@ -38,14 +39,14 @@ def _money(value: float) -> str:
 # ----------------------------------------------------------------------
 
 
-def build_var_cards(result, lookback_days: int) -> tuple[str, str, str, str]:
-    """Texts for the four cards: VaR 95%, VaR 99%, lookback, observations."""
+def build_var_cards(result, period_label: str) -> tuple[str, str, str, str]:
+    """Texts for the four cards: VaR 95%, VaR 99%, lookback/sims label, observations."""
     if result is None or result.error:
-        return _PLACEHOLDER, _PLACEHOLDER, f"{lookback_days}d", _PLACEHOLDER
+        return _PLACEHOLDER, _PLACEHOLDER, period_label, _PLACEHOLDER
     observations = str(result.observations)
     if result.observations < result.requested:
         observations += f" (of {result.requested} requested)"
-    return _money(result.var[0.95]), _money(result.var[0.99]), f"{lookback_days}d", observations
+    return _money(result.var[0.95]), _money(result.var[0.99]), period_label, observations
 
 
 def build_var_warnings(result) -> list:
@@ -55,7 +56,7 @@ def build_var_warnings(result) -> list:
     return [dbc.Alert(f"⚠️ {message}", color="warning", className="mb-2") for message in result.warnings]
 
 
-def build_histogram(result, lookback_days: int) -> go.Figure:
+def build_histogram(result, title: str) -> go.Figure:
     """Portfolio daily PnL distribution: red loss bins, green profit bins, dashed VaR lines."""
     if result is None or result.error:
         return empty_figure(result.error if result else NOTHING_TO_ANALYZE, is_error=bool(result and result.error != NOTHING_TO_ANALYZE))
@@ -87,7 +88,7 @@ def build_histogram(result, lookback_days: int) -> go.Figure:
             annotation_font_color=color,
         )
     figure.update_layout(
-        title={"text": f"Portfolio PnL Distribution ({lookback_days}d Historical)", "font": {"size": 18}},
+        title={"text": title, "font": {"size": 18}},
         paper_bgcolor=COLORS["CARD_BG"],
         plot_bgcolor=COLORS["CARD_BG"],
         font={"color": COLORS["TEXT_PRIMARY"]},
@@ -184,6 +185,34 @@ def _scenario_table() -> dash_table.DataTable:
     )
 
 
+METHOD_HISTORICAL = "historical"
+METHOD_MONTE_CARLO = "monte_carlo"
+METHOD_OPTIONS = [
+    {"label": "Historical Simulation", "value": METHOD_HISTORICAL},
+    {"label": "Monte Carlo (Correlated)", "value": METHOD_MONTE_CARLO},
+]
+
+DISTRIBUTION_OPTIONS = [
+    {"label": "Normal", "value": DISTRIBUTION_NORMAL},
+    {"label": "Uniform", "value": DISTRIBUTION_UNIFORM},
+]
+DEFAULT_DISTRIBUTION = DISTRIBUTION_NORMAL
+DEFAULT_MEAN = 0.0
+DEFAULT_STD = 0.5
+DEFAULT_LOW = -1.0
+DEFAULT_HIGH = 1.0
+
+
+def _number_input(id_: str, value: float, label: str, step: float = 0.1) -> html.Div:
+    return html.Div(
+        [
+            html.Span(label, style={**_MUTED, "marginRight": "6px"}),
+            dbc.Input(id=id_, type="number", value=value, step=step, style={"width": "90px", "display": "inline-block"}),
+        ],
+        style={"display": "inline-block", "marginRight": "16px"},
+    )
+
+
 def var_scenario_layout() -> html.Div:
     """VaR section on top, scenario analysis below."""
     var_section = dbc.Card(
@@ -191,18 +220,39 @@ def var_scenario_layout() -> html.Div:
             [
                 html.Div(
                     [
-                        html.H5("Historical Simulation VaR (1-day)", style={**_HEADING, "display": "inline-block", "marginRight": "24px"}),
+                        html.H5("Value at Risk (1-day)", style={**_HEADING, "display": "inline-block", "marginRight": "24px"}),
+                        html.Span("Method", style={**_MUTED, "marginRight": "8px"}),
+                        dbc.Select(id="var-method", options=METHOD_OPTIONS, value=METHOD_HISTORICAL, style={"width": "220px", "display": "inline-block", "marginRight": "16px"}),
                         html.Span("Lookback", style={**_MUTED, "marginRight": "8px"}),
                         dbc.Select(id="var-lookback", options=LOOKBACK_OPTIONS, value=DEFAULT_LOOKBACK, style={"width": "110px", "display": "inline-block"}),
                     ],
                     className="mb-3",
+                ),
+                html.Div(
+                    [
+                        html.Span("Distribution", style={**_MUTED, "marginRight": "8px"}),
+                        dbc.Select(id="var-mc-distribution", options=DISTRIBUTION_OPTIONS, value=DEFAULT_DISTRIBUTION, style={"width": "140px", "display": "inline-block", "marginRight": "16px"}),
+                        html.Div(
+                            [_number_input("var-mc-mean", DEFAULT_MEAN, "Mean"), _number_input("var-mc-std", DEFAULT_STD, "Std Dev", step=0.05)],
+                            id="var-mc-normal-params",
+                            style={"display": "inline-block"},
+                        ),
+                        html.Div(
+                            [_number_input("var-mc-low", DEFAULT_LOW, "Low"), _number_input("var-mc-high", DEFAULT_HIGH, "High")],
+                            id="var-mc-uniform-params",
+                            style={"display": "none"},
+                        ),
+                        _number_input("var-mc-simulations", DEFAULT_MC_SIMULATIONS, "Simulations", step=1000),
+                    ],
+                    id="var-mc-controls",
+                    style={"display": "none", "marginBottom": "12px"},
                 ),
                 html.Div(id="var-warnings"),
                 dbc.Row(
                     [
                         _metric_card("VaR 95% (1-day)", "var-card-95", COLORS["ACCENT_YELLOW"]),
                         _metric_card("VaR 99% (1-day)", "var-card-99", COLORS["ACCENT_RED"]),
-                        _metric_card("Lookback", "var-card-lookback", COLORS["ACCENT_BLUE"]),
+                        _metric_card("Lookback / Sims", "var-card-lookback", COLORS["ACCENT_BLUE"]),
                         _metric_card("Observations", "var-card-observations", COLORS["ACCENT_BLUE"]),
                     ]
                 ),

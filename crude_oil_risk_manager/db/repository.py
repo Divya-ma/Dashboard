@@ -351,6 +351,21 @@ class Repository:
                 structures.append(self._row_to_structure(structure_row, legs))
         return structures
 
+    def update_structure_name(self, structure_id: str, name: str) -> None:
+        """Rename a structure. Does not touch legs, trades, or the audit-note history."""
+        now = _utcnow_iso()
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE structures
+                    SET name = :name, last_modified_at = :last_modified_at
+                    WHERE structure_id = :structure_id
+                    """
+                ),
+                {"name": name, "last_modified_at": now, "structure_id": structure_id},
+            )
+
     def update_structure_status(
         self,
         structure_id: str,
