@@ -1,5 +1,7 @@
 """Tests for core.correlation and core.data_loader."""
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,16 +9,15 @@ import pytest
 from adapters.mock.mock_historical import MockHistoricalAdapter
 from core.correlation import (
     build_correlation_matrix,
-    build_portfolio_difference_series,
     calculate_correlation,
     calculate_rolling_correlation,
     classify_correlation,
-    correlate_against_portfolio_series,
-    get_correlation_with_portfolio,
+    correlate_structures,
+    outright_weights,
+    structure_return_series,
 )
 from core.data_loader import DataLoader
 from core.exceptions import DataNotAvailableError, InsufficientDataError
-from core.models import Contract, Leg, Structure, StructureStatus, StructureType
 
 
 def random_closes(n: int, seed: int, start: float = 75.0) -> np.ndarray:
@@ -136,121 +137,119 @@ def test_classify_correlation_boundaries():
     assert classify_correlation(float("nan")) == "insufficient_data"
 
 
-# ---------- get_correlation_with_portfolio ----------
+# ---------- outright_weights ----------
 
 
-def test_portfolio_correlation_contains_all_portfolio_symbols(tmp_path, loader, create_synthetic_parquet):
-    base = random_closes(100, seed=1)
-    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
-    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
-    portfolio = ["CLF27", "BRNZ26"]  # BRNZ26 has no data
-
-    result = get_correlation_with_portfolio("CLZ26", portfolio, 30, loader)
-
-    assert set(result.keys()) == set(portfolio)
-    assert result["CLF27"]["correlation"] == pytest.approx(1.0)
-    assert result["CLF27"]["classification"] == "highly_correlated"
-    assert result["CLF27"]["window_used"] == 30
-    assert result["CLF27"]["common_dates"] == 99
-    assert result["BRNZ26"]["correlation"] is None
-    assert result["BRNZ26"]["classification"] == "insufficient_data"
+def test_outright_weights_decomposes_legs():
+    assert outright_weights([{"symbol": "CLZ26", "ratio": 1}, {"symbol": "CLF27", "ratio": -1}]) == {
+        "CLZ26": 1.0, "CLF27": -1.0,
+    }
 
 
-def test_portfolio_correlation_missing_candidate_returns_none_for_all(tmp_path, loader, create_synthetic_parquet):
-    create_synthetic_parquet(tmp_path, "CLF27", closes=random_closes(100, seed=1))
-    result = get_correlation_with_portfolio("CLZ26", ["CLF27"], 30, loader)
-    assert result["CLF27"]["correlation"] is None
+def test_outright_weights_decomposes_a_nested_leg():
+    """A leg whose own symbol is itself a spread/fly (a structure nested inside another
+    structure's leg) still decomposes to plain outrights."""
+    weights = outright_weights([{"symbol": "CLZ26-F27", "ratio": 1}])
+    assert weights == {"CLZ26": 1.0, "CLF27": -1.0}
 
 
-def test_portfolio_correlation_reports_the_real_failure_reason(tmp_path, loader, create_synthetic_parquet):
-    """A missing candidate/existing symbol carries WHY it failed, not just a blanket None."""
-    create_synthetic_parquet(tmp_path, "CLF27", closes=random_closes(100, seed=1))
-    result = get_correlation_with_portfolio("CLZ26", ["CLF27"], 30, loader)
-    assert result["CLF27"]["error"]  # candidate failure reason, applied to every entry
-
-    result = get_correlation_with_portfolio("CLF27", ["CLZ26"], 30, loader)
-    assert result["CLZ26"]["error"]  # existing-symbol failure reason
-
-    create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(100, seed=2))
-    ok = get_correlation_with_portfolio("CLZ26", ["CLF27"], 30, loader)
-    assert ok["CLF27"]["error"] is None
+def test_outright_weights_empty_for_no_valid_legs():
+    assert outright_weights([{"symbol": "", "ratio": 1}]) == {}
 
 
-# ---------- get_correlation_with_portfolio: window fallback ----------
+# ---------- structure_return_series ----------
 
 
-def test_portfolio_correlation_falls_back_to_available_window(tmp_path, loader, create_synthetic_parquet):
-    """Fewer than `window` observations still yields a correlation, not a blank result."""
-    base = random_closes(30, seed=1)
-    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
-    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
-
-    result = get_correlation_with_portfolio("CLZ26", ["CLF27"], 60, loader)
-
-    assert result["CLF27"]["correlation"] == pytest.approx(1.0)
-    assert result["CLF27"]["window_used"] == 29  # 30 closes -> 29 diffs, fewer than the 60-day window
-    assert "Only 29" in result["CLF27"]["error"]
-
-
-def test_portfolio_correlation_below_floor_is_still_none(tmp_path, loader, create_synthetic_parquet):
-    create_synthetic_parquet(tmp_path, "CLZ26", n_days=10, seed=1)
-    create_synthetic_parquet(tmp_path, "CLF27", n_days=10, seed=2)
-    result = get_correlation_with_portfolio("CLZ26", ["CLF27"], 60, loader)
-    assert result["CLF27"]["correlation"] is None
-
-
-# ---------- build_portfolio_difference_series / correlate_against_portfolio_series ----------
-
-
-def _open_structure(name: str, symbol: str, lots: float = 1.0) -> Structure:
-    leg = Leg(
-        contract=Contract(product="CL", contract_month=12, contract_year=2026, symbol=symbol,
-                          multiplier=1000, tick_size=0.01, tick_value=10),
-        ratio=1, lots=lots, entry_price=1.0, direction="buy",
-    )
-    return Structure(name=name, structure_type=StructureType.OUTRIGHT, products=["CL"], legs=[leg], status=StructureStatus.OPEN)
-
-
-def test_build_portfolio_difference_series_combines_weighted_legs(tmp_path, loader, create_synthetic_parquet):
+def test_structure_return_series_combines_weighted_legs(tmp_path, loader, create_synthetic_parquet):
     base = random_closes(60, seed=1)
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
-    structure = _open_structure("A", "CLZ26", lots=2.0)
-
-    series = build_portfolio_difference_series([structure], loader)
-
+    series = structure_return_series({"CLZ26": 2.0}, loader)
     assert series is not None
-    assert series.name == "Portfolio"
-    expected = pd.Series(base).diff().dropna().to_numpy() * (2.0 * 1000.0)
+    expected = pd.Series(base).diff().dropna().to_numpy() * 2.0
     assert series.to_numpy() == pytest.approx(expected)
 
 
-def test_build_portfolio_difference_series_none_when_no_exposure(loader):
-    assert build_portfolio_difference_series([], loader) is None
+def test_structure_return_series_inner_joins_only_its_own_legs(tmp_path, loader, create_synthetic_parquet):
+    """A leg with a much shorter history than another one's ONLY shrinks THIS structure's
+    own series — it must never affect a comparison that doesn't involve that leg at all."""
+    create_synthetic_parquet(tmp_path, "CLZ26", n_days=200, seed=1)
+    create_synthetic_parquet(tmp_path, "CLF27", n_days=25, seed=2, end_date=date(2026, 6, 30))
+    series = structure_return_series({"CLZ26": 1.0, "CLF27": -1.0}, loader)
+    assert series is not None and len(series) <= 24
 
 
-def test_build_portfolio_difference_series_skips_symbols_without_local_data(tmp_path, loader, create_synthetic_parquet):
+def test_structure_return_series_none_when_no_leg_has_data(loader):
+    assert structure_return_series({"BRNZ26": 1.0}, loader) is None
+
+
+def test_structure_return_series_none_below_the_observation_floor(tmp_path, loader, create_synthetic_parquet):
+    create_synthetic_parquet(tmp_path, "CLZ26", n_days=10, seed=1)
+    assert structure_return_series({"CLZ26": 1.0}, loader) is None
+
+
+def test_structure_return_series_drops_legs_without_local_data(tmp_path, loader, create_synthetic_parquet):
     create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(60, seed=1))
-    structures = [_open_structure("A", "CLZ26"), _open_structure("B", "CLF27")]
-    series = build_portfolio_difference_series(structures, loader)
-    assert series is not None and len(series) == 59  # only CLZ26 contributes; CLF27 has no local data
+    series = structure_return_series({"CLZ26": 1.0, "BRNZ26": -1.0}, loader)  # BRNZ26 has no data
+    assert series is not None and len(series) == 59
 
 
-def test_correlate_against_portfolio_series(tmp_path, loader, create_synthetic_parquet):
-    base = random_closes(60, seed=1)
+# ---------- correlate_structures ----------
+
+
+def test_correlate_structures_perfectly_correlated_outrights(tmp_path, loader, create_synthetic_parquet):
+    base = random_closes(100, seed=1)
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
-    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
-    portfolio_series = build_portfolio_difference_series([_open_structure("A", "CLZ26")], loader)
-
-    result = correlate_against_portfolio_series("CLF27", portfolio_series, 30, loader)
-
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
+    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 60, loader)
     assert result["correlation"] == pytest.approx(1.0)
     assert result["classification"] == "highly_correlated"
+    assert result["window_used"] == 60
 
 
-def test_correlate_against_portfolio_series_missing_candidate(loader):
-    portfolio_series = pd.Series([1.0, 2.0, 3.0])
-    result = correlate_against_portfolio_series("CLZ26", portfolio_series, 30, loader)
+def test_correlate_structures_agrees_with_pairwise_pearson_for_spreads(tmp_path, loader, create_synthetic_parquet):
+    """A spread-vs-spread correlation via each structure's own derived series must match
+    plain Pearson correlation computed directly on those same two derived series."""
+    a, b, c = (random_closes(200, seed=i) for i in (1, 2, 3))
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=a)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=b)
+    create_synthetic_parquet(tmp_path, "CLG27", closes=c)
+
+    weights_a = outright_weights([{"symbol": "CLZ26", "ratio": 1}, {"symbol": "CLF27", "ratio": -1}])
+    weights_b = outright_weights([{"symbol": "CLF27", "ratio": 1}, {"symbol": "CLG27", "ratio": -1}])
+    result = correlate_structures(weights_a, weights_b, 150, loader)
+
+    da, db, dc = (pd.Series(x).diff().dropna() for x in (a, b, c))
+    spread_a, spread_b = (da - db).iloc[-result["window_used"]:], (db - dc).iloc[-result["window_used"]:]
+    assert result["correlation"] == pytest.approx(spread_a.corr(spread_b))
+
+
+def test_correlate_structures_missing_data_never_raises(loader):
+    result = correlate_structures({"BRNZ26": 1.0}, {"CLZ26": 1.0}, 30, loader)
     assert result["correlation"] is None and result["error"]
+
+
+def test_correlate_structures_falls_back_to_available_window(tmp_path, loader, create_synthetic_parquet):
+    base = random_closes(30, seed=1)  # 29 diffs, fewer than the 60-day window requested
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
+    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 60, loader)
+    assert result["correlation"] == pytest.approx(1.0)
+    assert result["window_used"] == 29
+    assert "Only 29" in result["error"]
+
+
+def test_correlate_structures_illiquid_unrelated_leg_does_not_starve_this_pair(tmp_path, loader, create_synthetic_parquet):
+    """Regression: comparing two liquid structures must not be dragged down to a handful
+    of observations just because SOME OTHER structure in the portfolio has an illiquid leg
+    with sparse, barely-overlapping dates — that leg never enters this pair's own series."""
+    base = random_closes(200, seed=1)
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
+    # An illiquid, unrelated leg with almost no date overlap with the above two.
+    create_synthetic_parquet(tmp_path, "BRNZ26", n_days=5, seed=9, end_date=date(2020, 1, 5))
+
+    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 60, loader)
+    assert result["window_used"] == 60  # unaffected by BRNZ26 existing elsewhere in the portfolio
 
 
 # ---------- DataLoader ----------

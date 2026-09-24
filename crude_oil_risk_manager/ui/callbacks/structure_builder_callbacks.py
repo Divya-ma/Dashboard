@@ -25,7 +25,6 @@ from core.structure_builder import (
     backfill_symbols_async,
     build_shell_structure,
     check_portfolio_correlation,
-    correlation_candidates,
     next_leg_rows,
     save_shell_structure,
 )
@@ -189,13 +188,14 @@ def check_correlation(n_clicks, symbols, ratios, template):
     if not n_clicks:
         raise PreventUpdate
     repository = container.repository
-    candidates = correlation_candidates(template, [normalize_symbol(s) for s in symbols or []], ratios or [])
-    if not candidates:
+    legs = _legs(symbols, ratios)
+    net, _ignored = net_outright_equivalent(legs)
+    if not net:
         return html.Div("Enter at least one valid leg symbol first.", style=_MUTED), []
 
     window = int(repository.get_setting(KEY_CORRELATION_WINDOW, settings.DEFAULT_CORRELATION_WINDOW))
     portfolio = repository.get_all_structures(status_filter=ACTIVE_STRUCTURE_STATUSES)
-    rows = check_portfolio_correlation(candidates, portfolio, window, container.data_loader)
+    rows = check_portfolio_correlation(legs, portfolio, window, container.data_loader)
     return render_correlation_table(rows), rows
 
 

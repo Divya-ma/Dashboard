@@ -13,12 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pydantic import ValidationError
 
 from adapters.base import LETTER_TO_MONTH
-from core.correlation import (
-    build_portfolio_difference_series,
-    classify_correlation,
-    correlate_against_portfolio_series,
-    get_correlation_with_portfolio,
-)
+from core.correlation import classify_correlation, correlate_structures, outright_weights
 from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError
 from core.models import Contract, Leg, Structure, StructureStatus, StructureType
@@ -260,99 +255,87 @@ def structure_symbol(structure: Structure) -> str | None:
     )
 
 
-def correlation_candidates(template: str | None, symbols: list[str], ratios: list[int]) -> list[str]:
-    """Symbols to test: the structure's own exchange-quoted symbol when it has one, else each valid leg."""
-    if template in ("outright", "spread", "fly"):
-        composite = compose_structure_symbol(symbols, ratios)
-        if composite:
-            return [composite]
-    valid = []
-    for symbol in symbols:
-        try:
-            parse_symbol(symbol)
-        except ValueError:
-            continue
-        if normalize_symbol(symbol) not in valid:
-            valid.append(normalize_symbol(symbol))
-    return valid
+def _leg_dicts(structure: Structure) -> list[dict]:
+    return [{"symbol": leg.contract.symbol, "ratio": leg.ratio} for leg in structure.legs]
 
 
 def check_portfolio_correlation(
-    candidates: list[str],
+    candidate_legs: list[dict],
     portfolio: list[Structure],
     window: int,
     data_loader: DataLoader,
 ) -> list[dict]:
-    """One row per (candidate, existing structure), plus one 'vs whole portfolio' row per
-    candidate: correlation, classification, message.
+    """One row per existing active structure, plus a 'vs Whole Portfolio' summary row,
+    comparing the prospective structure (`candidate_legs`, i.e. what's typed in the Legs
+    step: [{"symbol", "ratio"}, ...]) against everything already active in the portfolio.
 
-    Structures without an exchange-quoted symbol (custom, cross-product) are left out of
-    the pairwise rows, but still contribute to the portfolio-level row via their own legs
-    (see build_portfolio_difference_series). Missing data never raises; a row carries
-    correlation=None instead.
+    Correlation is computed from each structure's OUTRIGHT decomposition (see
+    core.correlation.outright_weights / structure_return_series / correlate_structures),
+    never from a "composed" exchange-quoted symbol's own price history — that composed
+    symbol frequently doesn't exist at all (custom ratios, cross-product legs, a structure
+    nested inside another one's leg all make compose_structure_symbol return None), which
+    used to mean most real portfolios showed "No active structures ... to compare against"
+    on every check. Only the underlying outright contracts (almost always already cached)
+    need price data, and each pair is aligned on its OWN legs' common dates only — an
+    illiquid leg on some other structure never starves a comparison that doesn't involve it.
 
-    Before computing anything, every candidate and existing structure symbol missing from
-    the local cache is bulk-backfilled in as few batched API calls as possible
-    (DataLoader.ensure_cached), instead of the one-API-call-per-missing-symbol path this
-    used to fall into — which, at 7 calls/minute, made the first correlation check against
-    several never-seen symbols painfully slow.
+    Missing data never raises; a row carries correlation=None with an "error" reason
+    instead. The 'vs Whole Portfolio' row is the signed average of the pairwise rows that
+    did compute (a candidate that moves with the book on average reads positive here, one
+    that hedges it reads negative) — it is left out entirely if nothing else computed.
     """
-    names_by_symbol: dict[str, list[str]] = {}
-    for structure in portfolio:
-        symbol = structure_symbol(structure)
-        if symbol:
-            names_by_symbol.setdefault(symbol, []).append(structure.name)
+    candidate_weights = outright_weights(candidate_legs)
+    if not candidate_weights:
+        return []
+
+    entries = [(structure, outright_weights(_leg_dicts(structure))) for structure in portfolio]
+    entries = [(structure, weights) for structure, weights in entries if weights]
+    if not entries:
+        return []
+
+    all_symbols = set(candidate_weights)
+    for _, weights in entries:
+        all_symbols.update(weights)
 
     ensure_cached = getattr(data_loader, "ensure_cached", None)
     if ensure_cached is not None:
         try:
-            ensure_cached([*candidates, *names_by_symbol])
+            ensure_cached(list(all_symbols))
         except Exception:  # noqa: BLE001 - a failed pre-warm must never block the correlation check
             logger.exception("Bulk pre-warm before correlation check failed")
 
     rows = []
-    for candidate in candidates:
-        if not names_by_symbol:
-            break
+    for structure, weights in entries:
         try:
-            results = get_correlation_with_portfolio(candidate, list(names_by_symbol), window, data_loader)
-        except (CrudeOilRiskError, ValueError) as exc:
-            logger.warning("Correlation check failed for %s: %s", candidate, exc)
-            results = {s: {"correlation": None, "error": str(exc)} for s in names_by_symbol}
-        for existing, entry in results.items():
-            correlation = entry["correlation"]
-            rows.append(
-                {
-                    "candidate": candidate,
-                    "existing_symbol": existing,
-                    "existing_structure": ", ".join(names_by_symbol[existing]),
-                    "correlation": correlation,
-                    "classification": classify_correlation(correlation),
-                    "window_used": entry.get("window_used", 0),
-                    "error": entry.get("error"),
-                }
-            )
+            result = correlate_structures(candidate_weights, weights, window, data_loader)
+        except Exception:  # noqa: BLE001 - a data/adapter failure on one structure must never crash the whole check
+            logger.exception("Correlation check failed for %s", structure.name)
+            result = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "error": "Could not compute this correlation; see the server log."}
+        rows.append(
+            {
+                "candidate": "New structure",
+                "existing_symbol": structure_symbol(structure) or ", ".join(sorted(weights)),
+                "existing_structure": structure.name,
+                "correlation": result["correlation"],
+                "classification": result["classification"],
+                "window_used": result["window_used"],
+                "error": result["error"],
+            }
+        )
 
-    try:
-        portfolio_series = build_portfolio_difference_series(portfolio, data_loader) if portfolio else None
-    except Exception:  # noqa: BLE001 - the portfolio-level check must never break the whole correlation check
-        logger.exception("Could not build the portfolio-level correlation series")
-        portfolio_series = None
-
-    if portfolio_series is not None:
-        for candidate in candidates:
-            entry = correlate_against_portfolio_series(candidate, portfolio_series, window, data_loader)
-            correlation = entry["correlation"]
-            rows.append(
-                {
-                    "candidate": candidate,
-                    "existing_symbol": "PORTFOLIO",
-                    "existing_structure": "Whole Portfolio (dollar-weighted, all open structures)",
-                    "correlation": correlation,
-                    "classification": classify_correlation(correlation),
-                    "window_used": entry.get("window_used", 0),
-                    "error": entry.get("error"),
-                }
-            )
+    valid = [r["correlation"] for r in rows if r["correlation"] is not None]
+    if valid:
+        average = sum(valid) / len(valid)
+        rows.append(
+            {
+                "candidate": "New structure",
+                "existing_symbol": "PORTFOLIO",
+                "existing_structure": f"Whole Portfolio (avg. of {len(valid)} structure(s))",
+                "correlation": average,
+                "classification": classify_correlation(average),
+                "window_used": min(r["window_used"] for r in rows if r["correlation"] is not None),
+                "error": None,
+            }
+        )
 
     return rows

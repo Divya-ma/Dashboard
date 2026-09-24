@@ -23,8 +23,7 @@ from adapters.base import PRODUCT_TO_API_CODE, SymbolTranslator
 from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError, InsufficientDataError
 from core.models import Structure
-from core.structure_utils import normalize_symbol
-from core.var import leg_dollar_weights
+from core.structure_utils import net_outright_equivalent, normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -168,24 +167,92 @@ def classify_correlation(correlation: float | None) -> str:
     return "uncorrelated"
 
 
-def _correlate_aligned(
-    series_a: pd.Series, series_b: pd.Series, window: int, data_loader: DataLoader, label_a: str, label_b: str
-) -> dict:
-    """Best-effort core shared by get_correlation_with_portfolio and correlate_against_portfolio_series.
+# ----------------------------------------------------------------------
+# Structure correlation via outright decomposition (Structure Builder correlation check)
+# ----------------------------------------------------------------------
+#
+# A structure's correlation is derived from the OUTRIGHT contracts it decomposes to, never
+# from a "composed" exchange-quoted symbol's own price history. That composed symbol often
+# doesn't exist at all (custom ratios, cross-product legs, a structure nested inside another
+# one's leg — compose_structure_symbol returns None for all of these), and even when it does,
+# the vendor may have no direct history for that exact spread/fly. Decomposing to outrights
+# means only the underlying, almost-always-already-cached contracts need price data.
+#
+# Each structure's own derived price-DIFFERENCE series is S = sum(w_i * P_i) — a structure
+# is a linear combination of its outright legs' prices, and differencing commutes with that
+# combination, so building the derived series from differenced legs is equivalent to
+# differencing the structure's own (unobserved) price series. This is the "Direct" method:
+# build each of the two structures' own derived series (inner-joined on ITS OWN legs' common
+# dates only) and correlate them directly with Pearson. A covariance matrix shared across
+# every active structure at once (Cov(A,B) = a^T Sigma b, computed once for all pairs) is
+# mathematically equivalent and cheaper for many structures, but requires ALL structures'
+# legs to be simultaneously date-aligned — one illiquid leg on an unrelated structure then
+# starves every other comparison's common-date window too. For the handful of structures a
+# correlation check compares against, Direct avoids that cross-contamination.
 
-    Aligns two price-difference series and correlates on min(window, observations available)
-    instead of requiring the full window up front — a candidate/existing pair with, say, 25
-    common days and a 60-day requested window used to raise InsufficientDataError and show
-    nothing at all; it now shows a correlation computed on those 25 days, with "error" set to
-    a caveat (not a failure) noting the window was reduced. align_series' own floor of 20
-    common dates still applies below that a correlation is not attempted.
+
+def outright_weights(legs: list[dict]) -> dict[str, float]:
+    """A structure's weight vector over outright contracts, per 1 unit of the structure.
+
+    Thin wrapper over core.structure_utils.net_outright_equivalent — the same decomposition
+    already used for the "Net Outright Equivalent" preview — so a custom ratio, a
+    cross-product leg, or a leg whose own symbol is itself a spread/fly is handled exactly
+    the same way here as everywhere else in the app. Legs that don't parse are silently
+    dropped (see net_outright_equivalent); an empty result means nothing usable was entered.
     """
-    entry = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "common_dates": 0, "error": None}
+    weights, _ignored = net_outright_equivalent(legs)
+    return weights
+
+
+def structure_return_series(weights: dict[str, float], data_loader: DataLoader) -> pd.Series | None:
+    """A structure's own derived price-difference series: sum(weight_i * diff_i) over its
+    outright legs (see outright_weights), inner-joined on the dates where ALL of ITS OWN
+    legs have data.
+
+    None if no leg has usable local data, or fewer than _MIN_CORRELATION_OBSERVATIONS common
+    dates remain across just its own legs. A leg with no usable data (never backfilled here
+    — see DataLoader.ensure_cached) or whose read fails unexpectedly (an adapter/network
+    fluke) is silently dropped rather than failing the whole series.
+    """
+    terms = []
+    for symbol, weight in weights.items():
+        try:
+            terms.append(data_loader.load_price_differences(symbol, min_rows=_MIN_CORRELATION_OBSERVATIONS) * weight)
+        except CrudeOilRiskError as exc:
+            logger.info("Correlation: no usable price history for %s: %s", symbol, exc)
+        except Exception as exc:  # noqa: BLE001 - one bad leg must not fail the whole derived series
+            logger.warning("Correlation: unexpected error loading price history for %s: %s", symbol, exc)
+    if not terms:
+        return None
+
+    combined = pd.concat(terms, axis=1, join="inner").dropna().sum(axis=1).sort_index()
+    if len(combined) < _MIN_CORRELATION_OBSERVATIONS:
+        return None
+    return combined
+
+
+def correlate_structures(
+    weights_a: dict[str, float], weights_b: dict[str, float], window: int, data_loader: DataLoader
+) -> dict:
+    """Best-effort Pearson correlation between two structures via their own derived
+    difference series (see structure_return_series). Never raises.
+
+    Returns {"correlation": float | None, "classification": str, "window_used": int,
+    "error": str | None}. Falls back to min(window, observations available) instead of
+    requiring the full window up front (align_series' own floor of 20 common dates still
+    applies below that); "error" then carries a caveat, not a failure.
+    """
+    entry = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "error": None}
+    series_a = structure_return_series(weights_a, data_loader)
+    series_b = structure_return_series(weights_b, data_loader)
+    if series_a is None or series_b is None:
+        entry["error"] = "Not enough local price history for one of the structures' underlying contracts."
+        return entry
+
     try:
-        entry["common_dates"] = len(series_a.index.intersection(series_b.index))
         aligned_a, aligned_b = data_loader.align_series(series_a, series_b)
         effective_window = min(window, len(aligned_a))
-        corr = _pearson_last_window(aligned_a, aligned_b, effective_window, label_a, label_b)
+        corr = _pearson_last_window(aligned_a, aligned_b, effective_window, "candidate", "structure")
     except (CrudeOilRiskError, ValueError) as exc:
         entry["error"] = str(exc)
         return entry
@@ -196,116 +263,6 @@ def _correlate_aligned(
     if effective_window < window:
         entry["error"] = f"Only {effective_window} of the requested {window}-day window available."
     return entry
-
-
-def get_correlation_with_portfolio(
-    candidate_symbol: str,
-    portfolio_symbols: list[str],
-    window: int,
-    data_loader: DataLoader,
-) -> dict[str, dict]:
-    """Correlation of a candidate symbol against every portfolio symbol.
-
-    Returns {existing_symbol: {"correlation": float | None, "classification": str,
-    "window_used": int, "common_dates": int, "error": str | None}}. Every portfolio
-    symbol is always present as a key; correlation is None when the calculation
-    failed (window_used is then 0), and "error" carries the reason (e.g. "no API
-    token configured", "InsufficientDataError: ...") so the caller can show *why*
-    instead of a blanket "insufficient data" — this is what feeds the Structure
-    Builder's live correlation check. window_used is the number of observations
-    actually used in the correlation, which may be less than `window` (see
-    _correlate_aligned) when full history is not yet available.
-
-    load_price_differences backfills a symbol with no local data on demand, so a
-    brand-new leg is fetched here rather than failing outright; that backfill runs
-    synchronously (this is a user-triggered "Refresh Correlation" click, not a poll),
-    so it can take a while the first time a symbol is used. Callers should bulk
-    pre-warm with DataLoader.ensure_cached first (see core.structure_builder.
-    check_portfolio_correlation) to avoid backfilling one symbol at a time here.
-    """
-    _validate_window(window)
-    results: dict[str, dict] = {}
-
-    candidate_diffs = None
-    candidate_error: str | None = None
-    try:
-        candidate_diffs = data_loader.load_price_differences(
-            candidate_symbol, min_rows=min(window, _MIN_CORRELATION_OBSERVATIONS)
-        )
-    except CrudeOilRiskError as exc:
-        candidate_error = str(exc)
-        logger.warning("Cannot load candidate %s: %s", candidate_symbol, exc)
-
-    for existing in portfolio_symbols:
-        if candidate_diffs is None:
-            results[existing] = {
-                "correlation": None, "classification": "insufficient_data",
-                "window_used": 0, "common_dates": 0, "error": candidate_error,
-            }
-            continue
-        try:
-            existing_diffs = data_loader.load_price_differences(
-                existing, min_rows=min(window, _MIN_CORRELATION_OBSERVATIONS)
-            )
-        except CrudeOilRiskError as exc:
-            logger.warning("Correlation failed for %s / %s: %s", candidate_symbol, existing, exc)
-            results[existing] = {
-                "correlation": None, "classification": "insufficient_data",
-                "window_used": 0, "common_dates": 0, "error": str(exc),
-            }
-            continue
-        results[existing] = _correlate_aligned(candidate_diffs, existing_diffs, window, data_loader, candidate_symbol, existing)
-
-    return results
-
-
-def build_portfolio_difference_series(structures: list[Structure], data_loader: DataLoader) -> pd.Series | None:
-    """One dollar-weighted daily P&L-difference series for the whole portfolio.
-
-    Reuses core.var.leg_dollar_weights, so this is exactly the same "portfolio" the VaR &
-    Scenarios tab's portfolio_pnl_var already correlates its own way — a single number a
-    candidate structure can be checked against, instead of only pairwise-vs-each-structure.
-    Local Parquet only (never backfills), so callers control when a backfill happens; a
-    symbol with no local history is simply left out of the weighted sum, which understates
-    the portfolio's true composition until that symbol is backfilled. None if there is no
-    open exposure or no symbol has usable local history.
-    """
-    weights = leg_dollar_weights(structures)
-    if not weights:
-        return None
-
-    terms = []
-    for symbol, weight in weights.items():
-        try:
-            terms.append(_load_local_differences(symbol, data_loader) * weight)
-        except CrudeOilRiskError:
-            continue
-    if not terms:
-        return None
-
-    combined = pd.concat(terms, axis=1, join="inner").sum(axis=1)
-    combined.name = "Portfolio"
-    return combined
-
-
-def correlate_against_portfolio_series(
-    candidate_symbol: str,
-    portfolio_series: pd.Series,
-    window: int,
-    data_loader: DataLoader,
-) -> dict:
-    """Best-effort correlation of a candidate's own price differences against one combined
-    portfolio series (see build_portfolio_difference_series). Never raises; same result
-    shape and window-fallback behaviour as get_correlation_with_portfolio's per-pair entries.
-    """
-    _validate_window(window)
-    try:
-        candidate_diffs = data_loader.load_price_differences(
-            candidate_symbol, min_rows=min(window, _MIN_CORRELATION_OBSERVATIONS)
-        )
-    except CrudeOilRiskError as exc:
-        return {"correlation": None, "classification": "insufficient_data", "window_used": 0, "common_dates": 0, "error": str(exc)}
-    return _correlate_aligned(candidate_diffs, portfolio_series, window, data_loader, candidate_symbol, "Portfolio")
 
 
 # ----------------------------------------------------------------------

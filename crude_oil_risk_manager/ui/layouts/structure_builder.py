@@ -84,7 +84,7 @@ def render_exposure_table(net: dict[str, float], ignored: list[str]):
 def render_correlation_table(rows: list[dict]):
     """Candidate | Existing Structure | Correlation | Classification with colour coding."""
     if not rows:
-        return html.Div("No active structures with an exchange-quoted symbol to compare against.", style=_MUTED)
+        return html.Div("No active structures to compare against yet.", style=_MUTED)
     table_rows, styles = [], []
     for row in rows:
         label, color = CLASSIFICATION_DISPLAY[row["classification"]]

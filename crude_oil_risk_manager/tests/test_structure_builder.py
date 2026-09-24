@@ -213,35 +213,51 @@ def structure(name, symbols, ratios, status=StructureStatus.OPEN):
     return Structure(name=name, structure_type=StructureType.CUSTOM, products=["CL"], legs=legs, status=status)
 
 
-def test_correlation_candidates():
-    assert sb.correlation_candidates("spread", ["CLZ26", "CLF27"], [1, -1]) == ["CLZ26-F27"]
-    assert sb.correlation_candidates("custom", ["CLZ26", "CLF27", "bad", "CLZ26"], [1, 1, 1, 1]) == ["CLZ26", "CLF27"]
-    assert sb.correlation_candidates("spread", ["CLZ26", "CLF27"], [1, -2]) == ["CLZ26", "CLF27"]
+def candidate_legs(*pairs) -> list[dict]:
+    """[{"symbol", "ratio"}, ...] from ("CLZ26", 1), ("CLF27", -1), ... pairs."""
+    return [{"symbol": symbol, "ratio": ratio} for symbol, ratio in pairs]
 
 
-def test_check_portfolio_correlation(monkeypatch):
-    calls = []
+def test_check_portfolio_correlation_empty_candidate_or_portfolio():
+    assert sb.check_portfolio_correlation([], [structure("a", ["CLZ26"], [1])], 60, object()) == []
+    assert sb.check_portfolio_correlation(candidate_legs(("CLG27", 1)), [], 60, object()) == []
 
-    def fake(candidate, portfolio_symbols, window, loader):
-        calls.append((candidate, portfolio_symbols, window))
-        return {s: {"correlation": 0.9 if s == "CLZ26" else None} for s in portfolio_symbols}
 
-    monkeypatch.setattr(sb, "get_correlation_with_portfolio", fake)
+def test_check_portfolio_correlation_computes_via_outright_decomposition(tmp_path, create_synthetic_parquet):
+    """Regression: a structure with a non-standard ratio (no composable exchange symbol,
+    e.g. a 1:-3 'odd' spread) used to be silently excluded from every correlation check —
+    this is now included, since correlation is computed from its outright decomposition,
+    never from a composed symbol's own price history."""
+    from adapters.mock.mock_historical import MockHistoricalAdapter
+    from core.data_loader import DataLoader
+
+    base = 75.0 + np.cumsum(np.random.default_rng(1).normal(0.0, 1.0, 100))
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
+    loader = DataLoader(str(tmp_path), MockHistoricalAdapter())
+
     portfolio = [structure("outright", ["CLZ26"], [1]), structure("odd", ["CLZ26", "CLF27"], [1, -3])]
-    rows = sb.check_portfolio_correlation(["CLG27"], portfolio, 60, loader := object())
-    assert calls == [("CLG27", ["CLZ26"], 60)]  # the 1:-3 structure has no exchange symbol
-    assert rows[0]["classification"] == "highly_correlated" and rows[0]["existing_structure"] == "outright"
-    assert sb.check_portfolio_correlation(["CLG27"], [], 60, loader) == []
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLZ26", 1)), portfolio, 60, loader)
+
+    names = {r["existing_structure"] for r in rows}
+    assert names == {"outright", "odd", "Whole Portfolio (avg. of 2 structure(s))"}
+    outright_row = next(r for r in rows if r["existing_structure"] == "outright")
+    assert outright_row["correlation"] == pytest.approx(1.0)
+    assert outright_row["classification"] == "highly_correlated"
 
 
-def test_check_portfolio_correlation_survives_data_errors(monkeypatch):
-    def boom(*args):
-        raise DataNotAvailableError("no data")
+def test_check_portfolio_correlation_reports_a_reason_when_data_is_missing(tmp_path, create_synthetic_parquet):
+    from adapters.mock.mock_historical import MockHistoricalAdapter
+    from core.data_loader import DataLoader
 
-    monkeypatch.setattr(sb, "get_correlation_with_portfolio", boom)
-    rows = sb.check_portfolio_correlation(["CLG27"], [structure("a", ["CLZ26"], [1])], 60, None)
+    base = 75.0 + np.cumsum(np.random.default_rng(1).normal(0, 1, 60))
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    loader = DataLoader(str(tmp_path), MockHistoricalAdapter())  # CLF27 has no local data and no adapter backfill
+
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLZ26", 1)), [structure("a", ["CLF27"], [1])], 60, loader)
+
     assert rows[0]["correlation"] is None and rows[0]["classification"] == "insufficient_data"
-    assert rows[0]["error"] == "no data"
+    assert rows[0]["error"]
 
 
 def test_render_correlation_table_shows_the_real_error_reason():
@@ -267,54 +283,50 @@ def test_render_correlation_table_falls_back_to_generic_message_without_an_error
     assert "Insufficient data for CLZ26 / CLF27" in str(render_correlation_table(rows))
 
 
-def test_check_portfolio_correlation_carries_the_real_error_reason(monkeypatch):
-    def fake(candidate, portfolio_symbols, window, loader):
-        return {s: {"correlation": None, "error": "no local data for CLG27"} for s in portfolio_symbols}
+def test_check_portfolio_correlation_prewarms_missing_symbols_before_computing(tmp_path):
+    """A DataLoader.ensure_cached is called once, up front, with every symbol involved
+    (union of the candidate's and every active structure's outright decomposition)."""
+    from adapters.mock.mock_historical import MockHistoricalAdapter
+    from core.data_loader import DataLoader
 
-    monkeypatch.setattr(sb, "get_correlation_with_portfolio", fake)
-    rows = sb.check_portfolio_correlation(["CLG27"], [structure("a", ["CLZ26"], [1])], 60, object())
-    assert rows[0]["error"] == "no local data for CLG27"
+    class RecordingLoader(DataLoader):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.ensure_cached_calls = []
 
+        def ensure_cached(self, symbols, start=None, end=None):
+            self.ensure_cached_calls.append(sorted(symbols))
+            return super().ensure_cached(symbols, start, end)
 
-def test_check_portfolio_correlation_prewarms_missing_symbols_before_computing(monkeypatch):
-    """A DataLoader.ensure_cached is called once, up front, with every symbol involved."""
-    calls = []
-
-    class FakeLoader:
-        def ensure_cached(self, symbols):
-            calls.append(list(symbols))
-
-    monkeypatch.setattr(
-        sb, "get_correlation_with_portfolio",
-        lambda candidate, portfolio_symbols, window, loader: {s: {"correlation": None} for s in portfolio_symbols},
-    )
+    loader = RecordingLoader(str(tmp_path), MockHistoricalAdapter())
     portfolio = [structure("A", ["CLZ26"], [1])]
-    sb.check_portfolio_correlation(["CLF27"], portfolio, 60, FakeLoader())
+    sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), portfolio, 60, loader)
 
-    assert calls == [["CLF27", "CLZ26"]]
+    assert loader.ensure_cached_calls == [["CLF27", "CLZ26"]]
 
 
-def test_check_portfolio_correlation_prewarm_failure_does_not_block_the_check(monkeypatch):
-    class BrokenLoader:
-        def ensure_cached(self, symbols):
+def test_check_portfolio_correlation_prewarm_failure_does_not_block_the_check(tmp_path, create_synthetic_parquet):
+    from adapters.mock.mock_historical import MockHistoricalAdapter
+    from core.data_loader import DataLoader
+
+    class BrokenEnsureCacheLoader(DataLoader):
+        def ensure_cached(self, symbols, start=None, end=None):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(
-        sb, "get_correlation_with_portfolio",
-        lambda candidate, portfolio_symbols, window, loader: {s: {"correlation": 0.5} for s in portfolio_symbols},
-    )
-    rows = sb.check_portfolio_correlation(["CLF27"], [structure("A", ["CLZ26"], [1])], 60, BrokenLoader())
-    assert rows[0]["correlation"] == 0.5
+    base = 75.0 + np.cumsum(np.random.default_rng(1).normal(0.0, 1.0, 60))
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
+    loader = BrokenEnsureCacheLoader(str(tmp_path), MockHistoricalAdapter())
+
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 30, loader)
+    assert rows[0]["correlation"] == pytest.approx(1.0)
 
 
-def test_check_portfolio_correlation_missing_data_loader_ensure_cached_is_skipped(monkeypatch):
-    """A data_loader without ensure_cached (e.g. a bare test stub) is tolerated, not required."""
-    monkeypatch.setattr(
-        sb, "get_correlation_with_portfolio",
-        lambda candidate, portfolio_symbols, window, loader: {s: {"correlation": 0.5} for s in portfolio_symbols},
-    )
-    rows = sb.check_portfolio_correlation(["CLF27"], [structure("A", ["CLZ26"], [1])], 60, object())
-    assert rows[0]["correlation"] == 0.5
+def test_check_portfolio_correlation_bare_data_loader_never_crashes():
+    """A data_loader with no ensure_cached/load_price_differences at all (e.g. a bare test
+    stub) is tolerated: the check degrades to 'insufficient data' rather than raising."""
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 60, object())
+    assert rows[0]["correlation"] is None and rows[0]["classification"] == "insufficient_data"
 
 
 def test_check_portfolio_correlation_adds_a_whole_portfolio_row(tmp_path, create_synthetic_parquet):
@@ -326,7 +338,7 @@ def test_check_portfolio_correlation_adds_a_whole_portfolio_row(tmp_path, create
     create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
     loader = DataLoader(str(tmp_path), MockHistoricalAdapter())
 
-    rows = sb.check_portfolio_correlation(["CLF27"], [structure("A", ["CLZ26"], [1])], 30, loader)
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 30, loader)
 
     portfolio_rows = [r for r in rows if r["existing_symbol"] == "PORTFOLIO"]
     assert len(portfolio_rows) == 1
@@ -334,8 +346,8 @@ def test_check_portfolio_correlation_adds_a_whole_portfolio_row(tmp_path, create
     assert portfolio_rows[0]["existing_structure"].startswith("Whole Portfolio")
 
 
-def test_check_portfolio_correlation_no_portfolio_row_when_no_open_exposure():
-    rows = sb.check_portfolio_correlation(["CLF27"], [], 30, object())
+def test_check_portfolio_correlation_no_portfolio_row_when_nothing_computed():
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [], 30, object())
     assert rows == []
 
 
