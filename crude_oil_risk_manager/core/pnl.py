@@ -258,6 +258,10 @@ def calculate_portfolio_pnl(
 
     Every per-structure "total" (and total_pnl / total_realized_all_time) is NET of
     transaction costs already incurred — see calculate_structure_transaction_costs.
+    `total_unrealized` itself stays GROSS (no transaction costs) so it always equals the
+    sum of open positions' mark-to-market; `total_unrealized_net_of_tc` is that figure
+    minus total_transaction_costs, for callers that want unrealized P&L net of costs
+    already booked against the open legs (entry/add costs — not a future exit cost).
     """
     open_structures = [s for s in structures if s.status in _OPEN_STATUSES]
 
@@ -317,6 +321,7 @@ def calculate_portfolio_pnl(
 
     return {
         "total_unrealized": total_unrealized,
+        "total_unrealized_net_of_tc": total_unrealized - total_transaction_costs,
         "total_realized": total_realized,
         "total_realized_all_time": total_realized + closed_realized - total_transaction_costs,
         "total_transaction_costs": total_transaction_costs,

@@ -8,20 +8,26 @@ core.scenarios; these functions load the open structures, call it and render.
 from dash import Input, Output
 from dash.exceptions import PreventUpdate
 
+from core.correlation import structure_difference_series
+from core.exceptions import CrudeOilRiskError
+from core.exposure import filter_open_structures
 from core.scenarios import build_scenarios, load_previous_day_atr
 from core.structure_view import statuses_for_filter
 from core.user_settings import KEY_CORRELATION_WINDOW
 from core.var import (
     DISTRIBUTION_NORMAL,
     MonteCarloVarResult,
+    beta_vs_portfolio,
     leg_dollar_weights,
     monte_carlo_var,
     portfolio_pnl_var,
 )
 from ui.container import container
 from ui.layouts.var_tab import (
+    BETA_HINT,
     METHOD_MONTE_CARLO,
     NOTHING_TO_ANALYZE,
+    build_beta_table_rows,
     build_histogram,
     build_scenario_note,
     build_scenario_table_rows,
@@ -101,6 +107,28 @@ def update_scenarios(pathname, n_clicks):
     return build_scenario_table_rows(rows), "", build_scenario_note(rows)
 
 
+def update_beta_panel(pathname):
+    """Beta-vs-rest-of-portfolio and position sizing, one row per open structure."""
+    if pathname != _PATH:
+        raise PreventUpdate
+    structures = filter_open_structures(_open_structures())
+    if not structures:
+        return [], BETA_HINT
+
+    window = int(container.repository.get_setting(KEY_CORRELATION_WINDOW, 60))
+    rows = []
+    for structure in structures:
+        try:
+            candidate_series = structure_difference_series(structure, container.data_loader)
+        except CrudeOilRiskError as exc:
+            rows.append({"structure": structure.name, "error": str(exc)})
+            continue
+        others = [s for s in structures if s.structure_id != structure.structure_id]
+        sized = beta_vs_portfolio(candidate_series, 1.0, others, container.data_loader, window)
+        rows.append({"structure": structure.name, **sized})
+    return build_beta_table_rows(rows), ""
+
+
 def register_var_callbacks(app) -> None:
     """Attach the VaR & Scenarios callbacks to the Dash app."""
     app.callback(
@@ -139,3 +167,9 @@ def register_var_callbacks(app) -> None:
         Input("url", "pathname"),
         Input("scenario-refresh-btn", "n_clicks"),
     )(update_scenarios)
+
+    app.callback(
+        Output("beta-table", "data"),
+        Output("beta-message", "children"),
+        Input("url", "pathname"),
+    )(update_beta_panel)

@@ -510,12 +510,18 @@ def year_overlay_frame(rolling: pd.Series) -> pd.DataFrame:
 
 
 def watchlist_pair_summary(series_by_label: dict[str, pd.Series], window: int) -> list[dict]:
-    """Mean/std/min/max/last rolling correlation, at `window`, for every pair in the watchlist.
+    """Mean/std/min/max/last rolling correlation, at `window`, plus target-on-base beta, for
+    every pair in the watchlist.
 
     Base/target pairing mirrors the heatmap: every label paired with every label after it
     (so each pair appears once). A pair with no usable rolling correlation (e.g. no shared
-    history) is left out rather than raising.
+    history) is left out rather than raising. Beta (target = alpha + beta * base) is best
+    effort: if the regression is underdetermined (see core.regression.beta_from_series), beta
+    and r_squared are None but the row is still included — a pair can have a usable
+    correlation without a reliable beta (or vice versa via a different, non-rolling window).
     """
+    from core.regression import beta_from_series  # local import: avoids a cycle at module load
+
     _validate_window(window)
     labels = list(series_by_label)
     rows = []
@@ -525,6 +531,12 @@ def watchlist_pair_summary(series_by_label: dict[str, pd.Series], window: int) -
                 s = rolling_correlation_from_series(series_by_label[base], series_by_label[target], window)
             except InsufficientDataError:
                 continue
+            beta = r_squared = None
+            try:
+                beta_result = beta_from_series(series_by_label[target], series_by_label[base], window)
+                beta, r_squared = beta_result["beta"], beta_result["r_squared"]
+            except InsufficientDataError:
+                pass
             rows.append(
                 {
                     "base": base,
@@ -535,6 +547,8 @@ def watchlist_pair_summary(series_by_label: dict[str, pd.Series], window: int) -
                     "max": float(s.max()),
                     "last": float(s.iloc[-1]),
                     "n_obs": int(len(s)),
+                    "beta": beta,
+                    "r_squared": r_squared,
                 }
             )
     return rows

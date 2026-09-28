@@ -110,8 +110,17 @@ def test_reset_note_shown_only_when_baseline_active():
 
 def test_unrealized_card_shows_only_unrealized_with_color():
     result = hc.update_home_metrics(payload(total_unrealized=-1800.0, total_pnl=99999.0))
-    assert result[5].children == "-$1,800"
-    assert result[5].style["color"] == COLORS["ACCENT_RED"]
+    assert len(result[5]) == 1
+    assert result[5][0].children == "-$1,800"
+    assert result[5][0].style["color"] == COLORS["ACCENT_RED"]
+
+
+def test_unrealized_card_shows_net_of_tc_when_costs_incurred():
+    result = hc.update_home_metrics(payload(total_unrealized=1000.0, total_transaction_costs=150.0))
+    assert result[5][0].children == "+$1,000"
+    net_line = result[5][1]
+    assert net_line.children[0] == "Net of TC: "
+    assert net_line.children[1].children == "+$850"
 
 
 def test_metrics_counts():

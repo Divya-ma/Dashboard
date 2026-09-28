@@ -18,7 +18,9 @@ SHOWN: dict = {}
 
 _MUTED = {"color": COLORS["TEXT_SECONDARY"], "fontSize": "13px"}
 _HEADING = {"color": COLORS["TEXT_PRIMARY"], "marginBottom": "12px"}
-_CELL = {"padding": "6px 10px", "borderBottom": f"1px solid {COLORS['BORDER_COLOR']}"}
+_CELL = {"padding": "8px 12px", "borderBottom": f"1px solid {COLORS['BORDER_COLOR']}", "fontSize": "14px"}
+_ANALYSIS_CARD_STYLE = {"backgroundColor": COLORS["CARD_BG"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "height": "100%"}
+_ANALYSIS_CARD_HEADER = {"backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_PRIMARY"], "fontWeight": "bold", "fontSize": "15px"}
 
 CLASSIFICATION_DISPLAY = {
     "highly_correlated": ("⚠️ Highly Correlated", COLORS["ACCENT_YELLOW"]),
@@ -30,6 +32,7 @@ CLASSIFICATION_DISPLAY = {
 EXPOSURE_HINT = "Enter leg symbols to see the net outright equivalent (per 1 lot of the structure)."
 CORRELATION_HINT = "Click 'Refresh Correlation' to compare against your active structures."
 VAR_HINT = "Click 'Refresh Correlation' to estimate this structure's 1-day VaR (Monte Carlo, correlation-adjusted)."
+BETA_HINT = "Click 'Refresh Correlation' to see the lot size that would match or hedge the current portfolio."
 
 
 # ----------------------------------------------------------------------
@@ -85,7 +88,7 @@ def render_exposure_table(net: dict[str, float], ignored: list[str]):
 def render_correlation_table(rows: list[dict]):
     """Candidate | Existing Structure | Correlation | Classification with colour coding."""
     if not rows:
-        return html.Div("No active structures to compare against yet.", style=_MUTED)
+        return html.Div("No active structures to compare against yet.", style={**_MUTED, "fontSize": "14px"})
     table_rows, styles = [], []
     for row in rows:
         label, color = CLASSIFICATION_DISPLAY[row["classification"]]
@@ -96,37 +99,88 @@ def render_correlation_table(rows: list[dict]):
         else:
             window_used = row.get("window_used")
             suffix = f" ({window_used}d)" if window_used else ""
-            correlation = f"{row['correlation']:+.2f}{suffix}"
+            correlation = html.Span(f"{row['correlation']:+.2f}{suffix}", style={"fontWeight": "bold", "fontSize": "15px"})
             hedge = row["classification"] == "negatively_correlated"
             chip = html.Span(
                 label,
                 style={
                     "color": color,
-                    **({"backgroundColor": COLORS["ACCENT_BLUE"], "padding": "2px 8px", "borderRadius": "10px"} if hedge else {}),
+                    "fontSize": "14px",
+                    **({"backgroundColor": COLORS["ACCENT_BLUE"], "padding": "3px 10px", "borderRadius": "10px"} if hedge else {}),
                 },
             )
         table_rows.append([row["candidate"], row["existing_structure"], correlation, chip])
-        styles.append({"borderLeft": f"3px solid {color}"})
+        styles.append({"borderLeft": f"4px solid {color}"})
     return data_table(["Candidate", "Existing Structure", "Correlation", "Classification"], table_rows, styles)
+
+
+def _stat_box(label: str, value: str, color: str) -> html.Div:
+    """A single big-number stat, used inside the Correlation/VaR/Beta analysis cards."""
+    return html.Div(
+        [
+            html.Div(label, style={**_MUTED, "textTransform": "uppercase", "letterSpacing": "0.04em", "fontSize": "11px", "marginBottom": "4px"}),
+            html.Div(value, style={"fontSize": "24px", "fontWeight": "bold", "color": color, "lineHeight": "1.15"}),
+        ],
+        style={
+            "backgroundColor": COLORS["SIDEBAR_BG"], "border": f"1px solid {COLORS['BORDER_COLOR']}",
+            "borderRadius": "8px", "padding": "10px 16px", "flex": "1", "minWidth": "150px",
+        },
+    )
 
 
 def render_structure_var(var_result: dict | None) -> html.Div:
     """VaR 95%/99% (per 1 lot) for the candidate structure, or why it couldn't be computed."""
     if var_result is None:
-        return html.Div("Enter at least one valid leg symbol first.", style=_MUTED)
+        return html.Div("Enter at least one valid leg symbol first.", style={**_MUTED, "fontSize": "14px"})
     if var_result.get("error"):
-        return html.Div(var_result["error"], style=_MUTED)
+        return html.Div(var_result["error"], style={**_MUTED, "fontSize": "14px"})
     parts = [
-        html.Span(f"VaR 95%: ${var_result['var_95']:,.0f}", style={"marginRight": "20px", "fontWeight": "bold", "color": COLORS["ACCENT_YELLOW"]}),
-        html.Span(f"VaR 99%: ${var_result['var_99']:,.0f}", style={"fontWeight": "bold", "color": COLORS["ACCENT_RED"]}),
+        html.Div(
+            [
+                _stat_box("VaR 95% (1 lot)", f"${var_result['var_95']:,.0f}", COLORS["ACCENT_YELLOW"]),
+                _stat_box("VaR 99% (1 lot)", f"${var_result['var_99']:,.0f}", COLORS["ACCENT_RED"]),
+            ],
+            style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "10px"},
+        ),
         html.Div(
             f"Monte Carlo, {var_result['distribution'].title()} draws, {var_result['n_simulations']:,} simulations, "
             f"correlation from the last {var_result['window']}d.",
-            style={**_MUTED, "marginTop": "4px"},
+            style={**_MUTED, "fontSize": "13px"},
         ),
     ]
     if var_result.get("warnings"):
-        parts.append(html.Div(" ".join(var_result["warnings"]), style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "12px", "marginTop": "4px"}))
+        parts.append(html.Div(" ".join(var_result["warnings"]), style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "13px", "marginTop": "6px"}))
+    return html.Div(parts)
+
+
+def render_structure_beta(beta_result: dict | None) -> html.Div:
+    """Beta of the candidate (per 1 lot) vs the current portfolio, and the lots to
+    match/hedge it — regression-based position sizing."""
+    if beta_result is None:
+        return html.Div("Enter at least one valid leg symbol first.", style={**_MUTED, "fontSize": "14px"})
+    if beta_result.get("error"):
+        return html.Div(beta_result["error"], style={**_MUTED, "fontSize": "14px"})
+    parts = [
+        html.Div(
+            [
+                _stat_box("Beta vs Portfolio", f"{beta_result['beta']:+.3f}", COLORS["TEXT_PRIMARY"]),
+                _stat_box("R²", f"{beta_result['r_squared']:.3f}", COLORS["TEXT_SECONDARY"]),
+            ],
+            style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "10px"},
+        ),
+        html.Div(
+            [
+                _stat_box("Lots to Match", f"{beta_result['lots_to_match']:+.2f}", COLORS["ACCENT_BLUE"]),
+                _stat_box("Lots to Hedge", f"{beta_result['lots_to_hedge']:+.2f}", COLORS["ACCENT_YELLOW"]),
+            ],
+            style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "10px"},
+        ),
+        html.Div(
+            f"Based on {beta_result['observations']} shared observations "
+            f"(window {beta_result['window_used']}d). Positive lots = same side as this structure's legs.",
+            style={**_MUTED, "fontSize": "13px"},
+        ),
+    ]
     return html.Div(parts)
 
 
@@ -273,8 +327,30 @@ def _step_1() -> html.Div:
     )
 
 
+def _analysis_card(title: str, panel_id: str, hint: str, button_id: str | None = None) -> dbc.Col:
+    """One of the three Portfolio Impact Analysis cards (Correlation / VaR / Beta): a wide,
+    self-contained dbc.Card so its stat boxes and tables have room to breathe, instead of a
+    cramped sidebar column."""
+    header_children = [title]
+    body_children = []
+    if button_id:
+        body_children.append(dbc.Button("Refresh Correlation", id=button_id, color="info", outline=True, size="sm", className="mb-3"))
+    body_children.append(dcc.Loading(html.Div(html.Div(hint, style={**_MUTED, "fontSize": "14px"}), id=panel_id), type="dot"))
+    return dbc.Col(
+        dbc.Card(
+            [
+                dbc.CardHeader(header_children, style=_ANALYSIS_CARD_HEADER),
+                dbc.CardBody(body_children),
+            ],
+            style=_ANALYSIS_CARD_STYLE,
+        ),
+        md=4,
+        className="mb-3",
+    )
+
+
 def _step_2() -> html.Div:
-    left = [
+    legs = [
         leg_rows_header(),
         html.Div(id="builder-leg-rows"),
         dbc.Button("+ Add Leg", id="btn-add-leg", color="secondary", outline=True, style=HIDDEN),
@@ -285,21 +361,29 @@ def _step_2() -> html.Div:
             style={**_MUTED, "marginTop": "8px"},
         ),
     ]
-    right = [
-        html.H6("📊 Net Outright Equivalent", style=_HEADING),
-        html.Div(html.Div(EXPOSURE_HINT, style=_MUTED), id="builder-exposure-preview"),
-        html.Hr(style={"borderColor": COLORS["BORDER_COLOR"]}),
-        html.H6("🔗 Correlation vs Portfolio", style=_HEADING),
-        dbc.Button("Refresh Correlation", id="btn-refresh-correlation", color="info", outline=True, size="sm", className="mb-2"),
-        dcc.Loading(html.Div(html.Div(CORRELATION_HINT, style=_MUTED), id="builder-correlation-panel"), type="dot"),
-        html.Hr(style={"borderColor": COLORS["BORDER_COLOR"]}),
-        html.H6("⚠️ Estimated VaR (1 lot of this structure)", style=_HEADING),
-        html.Div(VAR_HINT, id="builder-var-panel", style=_MUTED),
-    ]
+    exposure = dbc.Card(
+        [
+            dbc.CardHeader("📊 Net Outright Equivalent", style=_ANALYSIS_CARD_HEADER),
+            dbc.CardBody(html.Div(html.Div(EXPOSURE_HINT, style={**_MUTED, "fontSize": "14px"}), id="builder-exposure-preview")),
+        ],
+        style=_ANALYSIS_CARD_STYLE,
+        className="mb-3",
+    )
+    analysis_cards = dbc.Row(
+        [
+            _analysis_card("🔗 Correlation vs Portfolio", "builder-correlation-panel", CORRELATION_HINT, button_id="btn-refresh-correlation"),
+            _analysis_card("⚠️ Estimated VaR (1 lot)", "builder-var-panel", VAR_HINT),
+            _analysis_card("📐 Beta & Position Sizing", "builder-beta-panel", BETA_HINT),
+        ],
+        className="g-3",
+    )
     return html.Div(
         [
             html.H5("Define Structure Legs", style=_HEADING),
-            dbc.Row([dbc.Col(left, md=7), dbc.Col(right, md=5)]),
+            dbc.Row(dbc.Col(legs, width=12), className="mb-3"),
+            dbc.Row(dbc.Col(exposure, width=12)),
+            html.H5("Portfolio Impact Analysis", style={**_HEADING, "marginTop": "8px"}),
+            analysis_cards,
         ],
         id="builder-step-2",
         style=HIDDEN,
@@ -358,6 +442,7 @@ def new_structure_modal() -> dbc.Modal:
         [dbc.ModalHeader(dbc.ModalTitle("New Structure"), close_button=False), body, footer],
         id="modal-new-structure",
         size="xl",
+        dialog_style={"maxWidth": "1400px"},
         centered=True,
         scrollable=True,
         backdrop="static",

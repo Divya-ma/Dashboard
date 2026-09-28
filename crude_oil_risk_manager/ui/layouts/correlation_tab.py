@@ -62,6 +62,8 @@ _SUMMARY_COLUMNS = [
     {"id": "min", "name": "Min", "type": "numeric"},
     {"id": "max", "name": "Max", "type": "numeric"},
     {"id": "last", "name": "Last", "type": "numeric"},
+    {"id": "beta", "name": "Beta (target/base)", "type": "numeric"},
+    {"id": "r_squared", "name": "R²", "type": "numeric"},
     {"id": "n_obs", "name": "N Obs", "type": "numeric"},
 ]
 
@@ -209,9 +211,14 @@ def build_year_overlay_figure(
 
 
 def build_summary_table(rows: list[dict]) -> dash_table.DataTable:
-    """Mean/std/min/max/last rolling correlation for every watchlist pair at one window."""
+    """Mean/std/min/max/last rolling correlation and beta for every watchlist pair at one window."""
     data = [
-        {**row, **{k: round(row[k], 3) for k in ("mean", "std", "min", "max", "last")}}
+        {
+            **row,
+            **{k: round(row[k], 3) for k in ("mean", "std", "min", "max", "last")},
+            "beta": round(row["beta"], 3) if row.get("beta") is not None else "—",
+            "r_squared": round(row["r_squared"], 3) if row.get("r_squared") is not None else "—",
+        }
         for row in rows
     ]
     return dash_table.DataTable(

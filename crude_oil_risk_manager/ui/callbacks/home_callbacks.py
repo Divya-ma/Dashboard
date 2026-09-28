@@ -35,6 +35,21 @@ def _pnl_span(value: float) -> html.Span:
     return html.Span(format_pnl(value), style={"color": pnl_color(value)})
 
 
+def _unrealized_card(gross: float, transaction_costs: float) -> list:
+    """Gross unrealized P&L (headline), plus a 'net of TC' line for costs already booked
+    against the open legs (entry/add costs — a future exit cost isn't in either figure)."""
+    net = gross - transaction_costs
+    children = [_pnl_span(gross)]
+    if transaction_costs:
+        children.append(
+            html.Div(
+                ["Net of TC: ", html.Span(format_pnl(net), style={"color": pnl_color(net)})],
+                style=_SMALL_TEXT,
+            )
+        )
+    return children
+
+
 def _structure_summary(entry: dict | None, per_structure: dict):
     """Name and PnL of a largest winner/loser, or a dash if there is none."""
     if not entry:
@@ -118,7 +133,7 @@ def update_home_metrics(portfolio_pnl):
         reset_note,
         today_text,
         today_style,
-        _pnl_span(portfolio_pnl["total_unrealized"]),
+        _unrealized_card(portfolio_pnl["total_unrealized"], portfolio_pnl.get("total_transaction_costs", 0.0)),
         str(portfolio_pnl["open_structure_count"]),
         str(portfolio_pnl["open_leg_count"]),
         _net_lots(portfolio_pnl.get("net_lots_by_product", {})),

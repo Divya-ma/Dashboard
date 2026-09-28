@@ -185,6 +185,58 @@ def _scenario_table() -> dash_table.DataTable:
     )
 
 
+# ----------------------------------------------------------------------
+# Beta vs Portfolio / position sizing
+# ----------------------------------------------------------------------
+
+BETA_HINT = "No open structures — nothing to regress against."
+BETA_COLUMNS = [
+    {"id": "structure", "name": "Structure"},
+    {"id": "beta", "name": "Beta (vs rest of portfolio)", "type": "numeric"},
+    {"id": "r_squared", "name": "R²", "type": "numeric"},
+    {"id": "lots_to_match", "name": "Size × to Match", "type": "numeric"},
+    {"id": "lots_to_hedge", "name": "Size × to Hedge", "type": "numeric"},
+]
+
+
+def build_beta_table_rows(rows: list[dict]) -> list[dict]:
+    """DataTable rows for the beta-vs-portfolio panel; a structure whose beta couldn't be
+    computed shows its error message in the Beta column and blanks elsewhere."""
+    table = []
+    for row in rows:
+        if row.get("error"):
+            table.append({"structure": row["structure"], "beta": row["error"], "r_squared": "", "lots_to_match": "", "lots_to_hedge": ""})
+        else:
+            table.append(
+                {
+                    "structure": row["structure"],
+                    "beta": round(row["beta"], 3),
+                    "r_squared": round(row["r_squared"], 3),
+                    "lots_to_match": round(row["lots_to_match"], 2),
+                    "lots_to_hedge": round(row["lots_to_hedge"], 2),
+                }
+            )
+    return table
+
+
+def _beta_table() -> dash_table.DataTable:
+    return dash_table.DataTable(
+        id="beta-table",
+        columns=BETA_COLUMNS,
+        data=[],
+        style_table={"overflowX": "auto"},
+        style_header={
+            "backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_SECONDARY"],
+            "border": f"1px solid {COLORS['BORDER_COLOR']}", "fontWeight": "bold",
+        },
+        style_cell={
+            "backgroundColor": COLORS["CARD_BG"], "color": COLORS["TEXT_PRIMARY"],
+            "border": f"1px solid {COLORS['BORDER_COLOR']}", "padding": "8px 12px", "textAlign": "right",
+        },
+        style_cell_conditional=[{"if": {"column_id": "structure"}, "textAlign": "left"}],
+    )
+
+
 METHOD_HISTORICAL = "historical"
 METHOD_MONTE_CARLO = "monte_carlo"
 METHOD_OPTIONS = [
@@ -280,4 +332,22 @@ def var_scenario_layout() -> html.Div:
         style=_CARD_STYLE,
         className="mb-3",
     )
-    return html.Div([html.H3("⚠️ VaR & Scenarios", style={**_HEADING, "marginBottom": "16px"}), var_section, scenario_section])
+    beta_section = dbc.Card(
+        dbc.CardBody(
+            [
+                html.H5("Beta vs Portfolio — Position Sizing", style=_HEADING),
+                html.Div(
+                    "Beta of each open structure's own daily P&L against the rest of the portfolio "
+                    "(OLS regression). \"Size × to Match\" is the multiple of the structure's CURRENT "
+                    "size that would move it dollar-for-dollar with the rest of the book; "
+                    "\"Size × to Hedge\" is its negative — the size that offsets it.",
+                    style={**_MUTED, "marginBottom": "12px"},
+                ),
+                html.Div(BETA_HINT, id="beta-message", style={**_MUTED, "marginBottom": "8px"}),
+                _beta_table(),
+            ]
+        ),
+        style=_CARD_STYLE,
+        className="mb-3",
+    )
+    return html.Div([html.H3("⚠️ VaR & Scenarios", style={**_HEADING, "marginBottom": "16px"}), var_section, scenario_section, beta_section])

@@ -334,6 +334,39 @@ def var_from_pnl_series(pnl: pd.Series, confidences: tuple[float, ...] = (0.95, 
     return var, cutoff
 
 
+def portfolio_pnl_series(
+    structures: list[Structure], data_loader: DataLoader
+) -> tuple[pd.Series | None, dict[str, str]]:
+    """The open structures' combined daily P&L series (undated-truncated), and skipped symbols.
+
+    portfolio_pnl[t] = sum over leg symbols of price_diff[t] * leg_dollar_weights[symbol],
+    inner-joined on date. Symbols without local Parquet history are skipped (reported in
+    the second dict) rather than backfilled or zero-filled. None (with an empty dict) if
+    there are no open structures; None (with skipped populated) if no symbol has usable
+    data or the legs share no common trading day. Shared by portfolio_pnl_var (which then
+    truncates to a lookback window) and the beta-vs-portfolio panels, which want the full
+    history for the regression.
+    """
+    weights = leg_dollar_weights(structures)
+    if not weights:
+        return None, {}
+
+    series: dict[str, pd.Series] = {}
+    skipped: dict[str, str] = {}
+    for symbol, weight in weights.items():
+        try:
+            if data_loader.get_available_date_range(symbol) is None:
+                raise CrudeOilRiskError("no price data in the local Parquet")
+            series[symbol] = data_loader.load_price_differences(symbol, min_rows=_SERIES_MIN_DIFF_ROWS) * weight
+        except CrudeOilRiskError as exc:
+            skipped[symbol] = str(exc)
+    if not series:
+        return None, skipped
+
+    combined = _combine_scenarios(series).dropna().sort_index()
+    return (combined if not combined.empty else None), skipped
+
+
 def portfolio_pnl_var(
     structures: list[Structure],
     lookback_days: int,
@@ -342,11 +375,10 @@ def portfolio_pnl_var(
 ) -> PortfolioVarResult:
     """1-day historical VaR of the open structures over the last `lookback_days` common days.
 
-    portfolio_pnl[t] = sum over leg symbols of price_diff[t] * leg_dollar_weights[symbol],
-    with the symbols inner-joined on date. Symbols without local Parquet history are
-    skipped and reported (this understates VaR); nothing is backfilled. Fewer common days
-    than requested uses them all; fewer than RELIABLE_OBSERVATIONS still returns a result
-    with a warning.
+    See portfolio_pnl_series for how the underlying combined P&L series is built. Symbols
+    without local Parquet history are skipped and reported (this understates VaR); nothing
+    is backfilled. Fewer common days than requested uses them all; fewer than
+    RELIABLE_OBSERVATIONS still returns a result with a warning.
     """
     if lookback_days < 1:
         raise ValueError(f"lookback_days must be >= 1, got {lookback_days}")
@@ -356,25 +388,16 @@ def portfolio_pnl_var(
         result.error = "No open structures — nothing to analyze"
         return result
 
-    series: dict[str, pd.Series] = {}
-    for symbol, weight in weights.items():
-        try:
-            if data_loader.get_available_date_range(symbol) is None:
-                raise CrudeOilRiskError("no price data in the local Parquet")
-            series[symbol] = data_loader.load_price_differences(symbol, min_rows=_SERIES_MIN_DIFF_ROWS) * weight
-        except CrudeOilRiskError as exc:
-            result.skipped[symbol] = str(exc)
+    combined, result.skipped = portfolio_pnl_series(structures, data_loader)
     if result.skipped:
         result.warnings.append(
             f"Skipped (no usable price data): {', '.join(result.skipped)}. VaR excludes these legs and is understated."
         )
-    if not series:
-        result.error = "No price data for any open leg — cannot compute VaR"
-        return result
-
-    combined = _combine_scenarios(series).dropna().sort_index()
-    if combined.empty:
-        result.error = "The open legs share no common trading days — cannot compute VaR"
+    if combined is None:
+        result.error = (
+            "No price data for any open leg — cannot compute VaR" if len(result.skipped) == len(weights)
+            else "The open legs share no common trading days — cannot compute VaR"
+        )
         return result
     result.pnl = combined.iloc[-lookback_days:]
     result.observations = len(result.pnl)
@@ -553,6 +576,49 @@ def monte_carlo_var(
     for confidence in confidence_levels:
         result.var[confidence], result.cutoff[confidence] = _var_from_scenarios(pnl, confidence)
     return result
+
+
+# ----------------------------------------------------------------------
+# Beta vs portfolio / position sizing
+# ----------------------------------------------------------------------
+
+
+def beta_vs_portfolio(
+    candidate_series: pd.Series,
+    candidate_lots: float,
+    reference_structures: list[Structure],
+    data_loader: DataLoader,
+    window: int,
+) -> dict:
+    """Beta of the reference structures' combined P&L on a candidate's own P&L series, and
+    the lot count at which the candidate would match or hedge it (regression-based position
+    sizing).
+
+    portfolio_pnl = alpha + beta * candidate_pnl + eps, with candidate_pnl already scaled to
+    `candidate_lots` (a structure's structure_difference_series, or an outright decomposition
+    times lots). beta is dollars-of-portfolio-move per dollar-of-candidate-move at
+    candidate_lots; core.regression.position_sizing_from_beta turns that into
+    lots_to_match/lots_to_hedge. `reference_structures` is the book to regress against — pass
+    every open structure for a brand-new candidate, or every OTHER open structure to see how
+    one already-open structure relates to the rest (self-regression would inflate beta).
+
+    Returns {"error": str} if the reference book has no positions or no usable price data,
+    or if the regression itself is underdetermined (see core.regression.beta_from_series).
+    Never raises.
+    """
+    from core.regression import beta_from_series, position_sizing_from_beta  # local import: avoids a cycle at module load
+
+    portfolio_series, skipped = portfolio_pnl_series(reference_structures, data_loader)
+    if portfolio_series is None:
+        return {"error": "No portfolio price data available to regress against."}
+    try:
+        beta_result = beta_from_series(portfolio_series, candidate_series, window)
+    except InsufficientDataError as exc:
+        return {"error": str(exc)}
+    sized = position_sizing_from_beta(beta_result, candidate_lots)
+    sized["skipped_from_portfolio"] = skipped
+    sized["error"] = None
+    return sized
 
 
 def get_var_term_structure(

@@ -35,12 +35,14 @@ from core.structure_utils import (
     split_validation_messages,
     validate_structure_legs,
 )
+from core.correlation import structure_return_series
 from core.user_settings import KEY_CORRELATION_WINDOW
-from core.var import DISTRIBUTION_NORMAL, monte_carlo_var
+from core.var import DISTRIBUTION_NORMAL, beta_vs_portfolio, monte_carlo_var
 from ui.callbacks.structures_callbacks import update_active_structures
 from ui.container import container
 from ui.layouts.shell import COLORS
 from ui.layouts.structure_builder import (
+    BETA_HINT,
     CORRELATION_HINT,
     HIDDEN,
     SHOWN,
@@ -52,6 +54,7 @@ from ui.layouts.structure_builder import (
     render_exposure_table,
     render_messages,
     render_step_indicator,
+    render_structure_beta,
     render_structure_var,
 )
 
@@ -86,9 +89,12 @@ def toggle_builder_modal(open_clicks, cancel_clicks, is_open):
     trigger = callback_context.triggered_id
     if trigger == "btn-new-structure" and open_clicks:
         hint = html.Div(CORRELATION_HINT, style=_MUTED)
-        return True, 1, None, [], None, None, None, None, None, None, hint, html.Div(VAR_HINT, style=_MUTED)
+        return (
+            True, 1, None, [], None, None, None, None, None, None, hint,
+            html.Div(VAR_HINT, style=_MUTED), html.Div(BETA_HINT, style=_MUTED),
+        )
     if trigger == "btn-builder-cancel" and cancel_clicks:
-        return (False,) + (no_update,) * 11
+        return (False,) + (no_update,) * 12
     raise PreventUpdate
 
 
@@ -193,7 +199,17 @@ def update_exposure_preview(symbols, ratios, legs_store):
 _FALLBACK_MULTIPLIER = 1000.0
 
 
-def _candidate_var(net_outright_weights: dict[str, float], window: int) -> dict:
+def _candidate_dollar_weights(net_outright_weights: dict[str, float]) -> dict[str, float]:
+    """Dollar P&L per 1.0-point move, per 1 lot of the candidate structure."""
+    dollar_weights = {}
+    for symbol, weight in net_outright_weights.items():
+        contract = container.repository.get_contract(symbol)
+        multiplier = contract.multiplier if contract else _FALLBACK_MULTIPLIER
+        dollar_weights[symbol] = weight * multiplier
+    return dollar_weights
+
+
+def _candidate_var(dollar_weights: dict[str, float], window: int) -> dict:
     """Monte Carlo VaR (1 lot of the candidate structure) from its outright decomposition.
 
     Normal(mean=0, std=1 point) draws, correlated via the same outright symbols' correlation
@@ -201,12 +217,6 @@ def _candidate_var(net_outright_weights: dict[str, float], window: int) -> dict:
     distribution picker here; the VaR & Scenarios tab has the full controls for an open
     structure's actual book).
     """
-    dollar_weights = {}
-    for symbol, weight in net_outright_weights.items():
-        contract = container.repository.get_contract(symbol)
-        multiplier = contract.multiplier if contract else _FALLBACK_MULTIPLIER
-        dollar_weights[symbol] = weight * multiplier
-
     result = monte_carlo_var(
         dollar_weights, container.data_loader, DISTRIBUTION_NORMAL,
         {"mean": 0.0, "std": 1.0}, correlation_window=window,
@@ -223,8 +233,17 @@ def _candidate_var(net_outright_weights: dict[str, float], window: int) -> dict:
     }
 
 
+def _candidate_beta(dollar_weights: dict[str, float], portfolio: list, window: int) -> dict:
+    """Beta of the current portfolio on the candidate structure (1 lot), and the lots of the
+    candidate that would match or hedge it — see core.var.beta_vs_portfolio."""
+    candidate_series = structure_return_series(dollar_weights, container.data_loader)
+    if candidate_series is None:
+        return {"error": "Not enough local price history for this structure's underlying contracts."}
+    return beta_vs_portfolio(candidate_series, 1.0, portfolio, container.data_loader, window)
+
+
 def check_correlation(n_clicks, symbols, ratios, template):
-    """Correlation and estimated VaR of the candidate structure; runs only on the button."""
+    """Correlation, estimated VaR and beta/position-sizing of the candidate; button-only."""
     if not n_clicks:
         raise PreventUpdate
     repository = container.repository
@@ -232,13 +251,16 @@ def check_correlation(n_clicks, symbols, ratios, template):
     net, _ignored = net_outright_equivalent(legs)
     if not net:
         placeholder = html.Div("Enter at least one valid leg symbol first.", style=_MUTED)
-        return placeholder, [], placeholder
+        return placeholder, [], placeholder, placeholder
 
     window = int(repository.get_setting(KEY_CORRELATION_WINDOW, settings.DEFAULT_CORRELATION_WINDOW))
     portfolio = repository.get_all_structures(status_filter=ACTIVE_STRUCTURE_STATUSES)
     rows = check_portfolio_correlation(legs, portfolio, window, container.data_loader)
-    var_result = _candidate_var(net, window)
-    return render_correlation_table(rows), rows, render_structure_var(var_result)
+
+    dollar_weights = _candidate_dollar_weights(net)
+    var_result = _candidate_var(dollar_weights, window)
+    beta_result = _candidate_beta(dollar_weights, portfolio, window)
+    return render_correlation_table(rows), rows, render_structure_var(var_result), render_structure_beta(beta_result)
 
 
 # ----------------------------------------------------------------------
@@ -350,6 +372,7 @@ def register_structure_builder_callbacks(app) -> None:
         Output("store-builder-correlation", "data"),
         Output("builder-correlation-panel", "children"),
         Output("builder-var-panel", "children"),
+        Output("builder-beta-panel", "children"),
         Input("btn-new-structure", "n_clicks"),
         Input("btn-builder-cancel", "n_clicks"),
         State("modal-new-structure", "is_open"),
@@ -428,6 +451,7 @@ def register_structure_builder_callbacks(app) -> None:
         Output("builder-correlation-panel", "children", allow_duplicate=True),
         Output("store-builder-correlation", "data", allow_duplicate=True),
         Output("builder-var-panel", "children", allow_duplicate=True),
+        Output("builder-beta-panel", "children", allow_duplicate=True),
         Input("btn-refresh-correlation", "n_clicks"),
         State(_LEG_SYMBOLS, "value"),
         State(_LEG_RATIOS, "value"),
