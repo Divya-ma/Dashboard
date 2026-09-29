@@ -6,6 +6,7 @@ can embed the URL.
 """
 
 import logging
+from datetime import datetime, timezone
 
 import requests
 
@@ -18,6 +19,10 @@ logger = logging.getLogger(__name__)
 WEBHOOK_SETTING_KEY = "teams_webhook_url"
 ENABLED_SETTING_KEY = "teams_alerts_enabled"
 
+# Stop-loss / target alerts resend every this many seconds until stopped (see
+# AlertManager.stop_repeating_alert) or until the price moves back off the level.
+ALERT_REPEAT_SECONDS = 300
+
 _TEAMS_TIMEOUT_SECONDS = 10
 _TEAMS_THEME_COLORS = {
     AlertLevel.INFO: "0076D7",
@@ -26,6 +31,17 @@ _TEAMS_THEME_COLORS = {
 }
 _MAX_TITLE_LENGTH = 100
 _MAX_BODY_LENGTH = 500
+
+
+def _trade_alert_checks(trade: Trade, live: float) -> tuple[tuple[str, float | None, bool], ...]:
+    """(kind, level, hit) for 'stop' and 'target'. A buy is stopped at or below its stop and
+    hits its target at or above it; a sell is the reverse."""
+    buy = trade.direction == "buy"
+    stop, target = trade.stop_loss_price, trade.target_price
+    return (
+        ("stop", stop, stop is not None and (live <= stop if buy else live >= stop)),
+        ("target", target, target is not None and (live >= target if buy else live <= target)),
+    )
 
 
 class AlertManager:
@@ -110,11 +126,18 @@ class AlertManager:
         `live_prices` is {symbol: price}; the structure price is the composite of its legs'
         prices (None if a leg has no price, in which case that trade is skipped). A buy is
         stopped at or below its stop and hits its target at or above it; a sell is the reverse.
-        Each trade + level fires once: the "sent" flag lives in the settings table under
-        `alert_sent_{trade_id}_{stop|target}`, so it survives a restart. Returns the alerts
-        raised this call (already sent and saved via send_alert). Never raises.
+
+        Each trade + level that is hit keeps re-alerting every ALERT_REPEAT_SECONDS (5 minutes)
+        until the user stops it (see stop_repeating_alert) — the last-sent timestamp lives in
+        the settings table under `alert_last_sent_{trade_id}_{stop|target}` and the stopped flag
+        under `alert_stopped_{trade_id}_{stop|target}`, so both survive a restart. The stop is
+        permanent for that trade + level (it is NOT cleared just because the live price ticks
+        back off the level momentarily — crude prices flicker right around a level, and clearing
+        on every such tick would silently un-stop an alert the user just stopped). Returns the
+        alerts raised this call (already sent and saved via send_alert). Never raises.
         """
         raised: list[Alert] = []
+        now = datetime.now(timezone.utc)
         for trade in open_trades:
             if trade.stop_loss_price is None and trade.target_price is None:
                 continue
@@ -125,22 +148,23 @@ class AlertManager:
             if live is None:
                 continue
 
-            buy = trade.direction == "buy"
-            stop, target = trade.stop_loss_price, trade.target_price
-            checks = (
-                ("stop", stop, stop is not None and (live <= stop if buy else live >= stop)),
-                ("target", target, target is not None and (live >= target if buy else live <= target)),
-            )
-            for kind, level, hit in checks:
-                if not hit:
+            for kind, level, hit in _trade_alert_checks(trade, live):
+                if level is None or not hit:
                     continue
-                key = f"alert_sent_{trade.trade_id}_{kind}"
+                stopped_key = f"alert_stopped_{trade.trade_id}_{kind}"
+                last_sent_key = f"alert_last_sent_{trade.trade_id}_{kind}"
+
                 try:
-                    if self.repository.get_setting(key, False):
+                    if self.repository.get_setting(stopped_key, False):
                         continue
+                    last_sent = self.repository.get_setting(last_sent_key, None)
                 except Exception as exc:  # noqa: BLE001 - alerting must never raise
-                    logger.error("Could not read alert state %s: %s", key, type(exc).__name__)
+                    logger.error("Could not read alert state %s: %s", last_sent_key, type(exc).__name__)
                     continue
+                if last_sent is not None:
+                    elapsed = (now - datetime.fromisoformat(last_sent)).total_seconds()
+                    if elapsed < ALERT_REPEAT_SECONDS:
+                        continue
 
                 if kind == "stop":
                     alert = self.send_alert(
@@ -158,11 +182,41 @@ class AlertManager:
                         structure.structure_id,
                     )
                 try:
-                    self.repository.set_setting(key, True)
+                    self.repository.set_setting(last_sent_key, now.isoformat())
                 except Exception as exc:  # noqa: BLE001
-                    logger.error("Could not save alert state %s: %s", key, type(exc).__name__)
+                    logger.error("Could not save alert state %s: %s", last_sent_key, type(exc).__name__)
                 raised.append(alert)
         return raised
+
+    def stop_repeating_alert(self, trade_id: str) -> None:
+        """Permanently stop resending stop-loss/target alerts for this trade (called from the
+        "Stop Alerts" button in the structure detail view). Remembered in the settings table so
+        it survives a restart; nothing clears it automatically (see check_price_alerts)."""
+        for kind in ("stop", "target"):
+            try:
+                self.repository.set_setting(f"alert_stopped_{trade_id}_{kind}", True)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Could not save alert-stopped state for %s %s: %s", trade_id, kind, type(exc).__name__)
+
+    def active_alert_kinds(self, trade: Trade, live: float | None) -> list[str]:
+        """Which of 'stop'/'target' are currently hit for `trade` at `live` and still repeating
+        (not yet stopped by the user). Used to show/hide the "Stop Alerts" button."""
+        if live is None:
+            return []
+        active: list[str] = []
+        for kind, level, hit in _trade_alert_checks(trade, live):
+            if level is None or not hit:
+                continue
+            try:
+                if self.repository.get_setting(f"alert_stopped_{trade.trade_id}_{kind}", False):
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Could not read alert-stopped state for %s %s: %s", trade.trade_id, kind, type(exc).__name__
+                )
+                continue
+            active.append(kind)
+        return active
 
     def send_test_alert(self, webhook_url: str | None = None) -> bool:
         """Send a test message to Teams. It is not saved as an alert.
@@ -219,7 +273,7 @@ class AlertManager:
             self.last_error = type(exc).__name__
             return False
 
-        if response.status_code != 200:
+        if response.status_code not in (200, 202):
             logger.error("Teams alert rejected with HTTP %s", response.status_code)
             self.last_error = f"Teams rejected the message (HTTP {response.status_code})"
             return False

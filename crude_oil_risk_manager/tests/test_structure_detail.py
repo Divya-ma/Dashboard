@@ -13,6 +13,7 @@ from core.structure_view import structure_entry_price
 from core.trade_entry import (
     TradeError, allocate_leg_entry_prices, enter_trade, exit_structure, recompute_structure_from_trades, structure_pnl,
 )
+from core.alerts import AlertManager
 from db.repository import Repository
 from ui.callbacks import structure_detail_callbacks as dc
 from ui.callbacks import structures_callbacks as sc
@@ -492,6 +493,60 @@ def test_open_delete_trade_confirm(repo, monkeypatch):
 
 def test_cancel_delete():
     assert dc.cancel_delete(1) == (False, None)
+
+
+# ---------- repeating stop-loss / target alerts ----------
+
+
+def trigger_stop_alert_btn(monkeypatch, trade_id, value=1):
+    """Simulate the pattern-matched {"type": "trade-stop-alert-btn", "index": trade_id} click."""
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.triggered_id = {"type": "trade-stop-alert-btn", "index": trade_id}
+    ctx.triggered = [{"prop_id": "x.n_clicks", "value": value}]
+    monkeypatch.setattr(dc, "callback_context", ctx)
+
+
+def _open_trade_with_stop(repo, stop=73.0):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    trade = Trade(structure_id=sid, leg_id=repo.get_structure(sid).legs[0].leg_id,
+                  event_type=TradeEventType.TRADE, lots=10, price=75.0, direction="buy", stop_loss_price=stop)
+    repo.save_trade(trade)
+    return sid, trade
+
+
+def test_render_shows_stop_alerts_button_only_while_alert_is_active(repo, monkeypatch):
+    sid, trade = _open_trade_with_stop(repo)
+    fresh = Container(repository=repo, alert_manager=AlertManager(repo))
+    monkeypatch.setattr(dc, "container", fresh)
+
+    live_below_stop = {"CLZ26": {"price": 72.0}}
+    body = dc.render_structure_detail(sid, live_below_stop)
+    assert "Stop Alerts" in str(body)
+
+    live_above_stop = {"CLZ26": {"price": 76.0}}
+    body = dc.render_structure_detail(sid, live_above_stop)
+    assert "Stop Alerts" not in str(body)
+
+
+def test_stop_trade_alert_button_stops_future_resends(repo, monkeypatch):
+    sid, trade = _open_trade_with_stop(repo)
+    fresh = Container(repository=repo, alert_manager=AlertManager(repo))
+    monkeypatch.setattr(dc, "container", fresh)
+
+    trigger_stop_alert_btn(monkeypatch, trade.trade_id)
+    live_below_stop = {"CLZ26": {"price": 72.0}}
+    body, toast_open, message, icon, header = dc.stop_trade_alert([1], sid, live_below_stop)
+    assert toast_open is True and "stopped" in message.lower()
+    assert "Stop Alerts" not in str(body)  # button hides once the alert is stopped
+    assert repo.get_setting(f"alert_stopped_{trade.trade_id}_stop") is True
+
+    trigger_stop_alert_btn(monkeypatch, trade.trade_id, value=None)  # newly-created button, not a real click
+    with pytest.raises(PreventUpdate):
+        dc.stop_trade_alert([None], sid, live_below_stop)
     with pytest.raises(PreventUpdate):
         dc.cancel_delete(None)
 

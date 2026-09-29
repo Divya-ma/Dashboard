@@ -1,5 +1,7 @@
 """Tests for core.alerts.AlertManager."""
 
+from datetime import datetime, timedelta, timezone
+
 import requests
 
 import pytest
@@ -304,13 +306,56 @@ def test_levels_not_reached_raise_nothing(manager):
     assert run_price_alerts(manager, alert_trade(s, "sell", stop=77.0, target=70.0), s, 75.0) == []
 
 
-def test_already_sent_alert_is_not_duplicated_even_after_restart(manager, repo):
+def test_already_sent_alert_is_not_duplicated_within_the_repeat_window(manager, repo):
     s = alert_structure()
     trade = alert_trade(s, "buy", stop=73.0)
     assert len(run_price_alerts(manager, trade, s, 72.0)) == 1
     assert run_price_alerts(manager, trade, s, 71.0) == []
-    assert repo.get_setting(f"alert_sent_{trade.trade_id}_stop") is True
-    assert run_price_alerts(AlertManager(repo), trade, s, 70.0) == []  # a new manager = an app restart
+    assert repo.get_setting(f"alert_last_sent_{trade.trade_id}_stop") is not None
+    # a new manager = an app restart; the last-sent timestamp is persisted, so still suppressed
+    assert run_price_alerts(AlertManager(repo), trade, s, 70.0) == []
+
+
+def test_alert_repeats_after_the_five_minute_window_elapses(manager, repo):
+    s = alert_structure()
+    trade = alert_trade(s, "buy", stop=73.0)
+    assert len(run_price_alerts(manager, trade, s, 72.0)) == 1
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
+    repo.set_setting(f"alert_last_sent_{trade.trade_id}_stop", stale)
+    assert len(run_price_alerts(manager, trade, s, 71.0)) == 1
+
+
+def test_stop_repeating_alert_suppresses_future_resends(manager, repo):
+    s = alert_structure()
+    trade = alert_trade(s, "buy", stop=73.0)
+    assert len(run_price_alerts(manager, trade, s, 72.0)) == 1
+    manager.stop_repeating_alert(trade.trade_id)
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
+    repo.set_setting(f"alert_last_sent_{trade.trade_id}_stop", stale)
+    assert run_price_alerts(manager, trade, s, 71.0) == []
+
+
+def test_stop_is_permanent_even_after_price_flickers_off_the_level(manager, repo):
+    """Regression: the stop must not be silently cleared just because a live tick moves the
+    price back off the level for a moment (crude prices flicker right around a level)."""
+    s = alert_structure()
+    trade = alert_trade(s, "buy", stop=73.0)
+    assert len(run_price_alerts(manager, trade, s, 72.0)) == 1
+    manager.stop_repeating_alert(trade.trade_id)
+    assert run_price_alerts(manager, trade, s, 74.0) == []  # price flickers above the stop
+    assert repo.get_setting(f"alert_stopped_{trade.trade_id}_stop") is True  # still stopped
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
+    repo.set_setting(f"alert_last_sent_{trade.trade_id}_stop", stale)
+    assert run_price_alerts(manager, trade, s, 72.0) == []  # crosses again -> still suppressed
+
+
+def test_active_alert_kinds_reports_hit_and_not_yet_stopped(manager):
+    s = alert_structure()
+    trade = alert_trade(s, "buy", stop=73.0, target=80.0)
+    assert manager.active_alert_kinds(trade, 72.0) == ["stop"]
+    assert manager.active_alert_kinds(trade, 75.0) == []  # neither level hit
+    manager.stop_repeating_alert(trade.trade_id)
+    assert manager.active_alert_kinds(trade, 72.0) == []
 
 
 def test_stop_and_target_are_deduplicated_independently(manager):

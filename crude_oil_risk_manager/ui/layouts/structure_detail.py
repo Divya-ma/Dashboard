@@ -265,10 +265,24 @@ def _net_outrights(structure: Structure) -> html.Details:
     )
 
 
-def _trade_history(trades: list[Trade]) -> html.Div:
+def _trade_history(trades: list[Trade], active_alert_trade_ids: frozenset[str] = frozenset()) -> html.Div:
     rows = []
     for trade in sorted(trades, key=lambda t: t.timestamp, reverse=True):
         color = _EVENT_COLORS[trade.event_type]
+        actions = [
+            dbc.Button(
+                "🗑", id={"type": "trade-delete-btn", "index": trade.trade_id},
+                color="danger", outline=True, size="sm", title="Delete this trade", className="me-1",
+            ),
+        ]
+        if trade.trade_id in active_alert_trade_ids:
+            actions.append(
+                dbc.Button(
+                    "🔕 Stop Alerts", id={"type": "trade-stop-alert-btn", "index": trade.trade_id},
+                    color="warning", outline=True, size="sm",
+                    title="Stop the repeating stop-loss/target alert for this trade",
+                )
+            )
         rows.append(
             [
                 trade.timestamp.strftime("%Y-%m-%d %H:%M"),
@@ -278,10 +292,7 @@ def _trade_history(trades: list[Trade]) -> html.Div:
                 pnl_span(trade.realized_pnl) if trade.realized_pnl is not None else EMPTY,
                 f"-${trade.transaction_cost:,.0f}" if trade.transaction_cost else EMPTY,
                 trade.notes or EMPTY,
-                dbc.Button(
-                    "🗑", id={"type": "trade-delete-btn", "index": trade.trade_id},
-                    color="danger", outline=True, size="sm", title="Delete this trade",
-                ),
+                html.Div(actions),
             ]
         )
     return html.Div(
@@ -399,6 +410,7 @@ def structure_detail_layout(
     trades: list[Trade],
     pnl_record: PnLRecord | None,
     edit_mode: bool = False,
+    active_alert_trade_ids: frozenset[str] = frozenset(),
 ) -> html.Div:
     """Content of the structure detail modal. Pure: everything it shows comes from the arguments."""
     prices = prices_from_store(live_prices)
@@ -430,7 +442,7 @@ def structure_detail_layout(
     sections.append(_legs_table(structure, prices, breakdown, total, edit_mode))
     sections.append(_net_outrights(structure))
     if trades:
-        sections.append(_trade_history(trades))
+        sections.append(_trade_history(trades, active_alert_trade_ids))
     sections.append(_entry_form(structure, live))
     sections.append(_exit_form(structure, live))
     return html.Div(sections)
