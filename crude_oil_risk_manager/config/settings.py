@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     # Historical data storage
     HISTORICAL_DATA_DIR: str = "data/historical"
 
+    # Manual Excel fallback source for the Correlation tab (used when the API can't
+    # provide a series for a symbol)
+    CORRELATION_UPLOADS_DIR: str = "data/correlation_uploads"
+
     # Live data adapter
     LIVE_API_BASE_URL: str = ""
     LIVE_API_TOKEN: str = ""

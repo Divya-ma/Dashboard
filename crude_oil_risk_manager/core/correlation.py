@@ -21,6 +21,7 @@ from scipy.stats import pearsonr
 
 from adapters.base import PRODUCT_TO_API_CODE, SymbolTranslator
 from core.data_loader import DataLoader
+from core.excel_correlation import ExcelCorrelationStore
 from core.exceptions import CrudeOilRiskError, InsufficientDataError
 from core.models import Structure
 from core.structure_utils import net_outright_equivalent, normalize_symbol
@@ -385,11 +386,16 @@ def watchlist_item_missing_symbols(
         if structure is None:
             return []
         return [leg.contract.symbol for leg in structure.legs if _safe_range(leg.contract.symbol, data_loader) is None]
+    if item["type"] == "excel":
+        return []  # nothing to backfill for an uploaded file
     return [] if _safe_range(item["key"], data_loader) is not None else [item["key"]]
 
 
 def watchlist_item_warning(
-    item: dict, structures_by_id: dict[str, Structure], data_loader: DataLoader
+    item: dict,
+    structures_by_id: dict[str, Structure],
+    data_loader: DataLoader,
+    excel_store: ExcelCorrelationStore | None = None,
 ) -> str | None:
     """Why a watchlist item cannot be computed (missing data, unknown symbol), or None if it can."""
     if item["type"] == "structure":
@@ -398,16 +404,43 @@ def watchlist_item_warning(
             return "structure not found or no longer open"
         missing = watchlist_item_missing_symbols(item, structures_by_id, data_loader)
         return f"missing price data for {', '.join(missing)}" if missing else None
+    if item["type"] == "excel":
+        if excel_store is None:
+            return "Excel data source not available"
+        filename, sheet, column = parse_excel_item_key(item["key"])
+        try:
+            excel_store.load_series(filename, sheet, column, min_rows=MIN_OBSERVATIONS)
+            return None
+        except CrudeOilRiskError as exc:
+            return str(exc)
     return None if _safe_range(item["key"], data_loader) is not None else "no price data found for this symbol"
 
 
+_EXCEL_KEY_SEP = "\x1f"  # unit separator: won't collide with realistic filenames/sheets/columns
+
+
+def excel_item_key(filename: str, sheet: str, column: str) -> str:
+    """Pack an Excel-sourced watchlist item's identity into its "key" field."""
+    return _EXCEL_KEY_SEP.join((filename, sheet, column))
+
+
+def parse_excel_item_key(key: str) -> tuple[str, str, str]:
+    filename, sheet, column = key.split(_EXCEL_KEY_SEP)
+    return filename, sheet, column
+
+
 def build_watchlist_series(
-    items: list[dict], structures_by_id: dict[str, Structure], data_loader: DataLoader
+    items: list[dict],
+    structures_by_id: dict[str, Structure],
+    data_loader: DataLoader,
+    excel_store: ExcelCorrelationStore | None = None,
 ) -> tuple[dict[str, pd.Series], dict[str, str]]:
     """Price-difference series for every watchlist item ({"type", "key", "label"}), by label.
 
     Instruments use their own exchange-quoted price differences; structures use
-    `structure_difference_series`. Local Parquet only — never backfills (see
+    `structure_difference_series`; "excel" items (a manual fallback source for when the API
+    can't provide a symbol — see core.excel_correlation) read a column from an uploaded
+    workbook via `excel_store`. Local Parquet / uploaded files only — never backfills (see
     `_load_local_differences`), so this is safe to call on every render/compute, not just
     on an explicit user action. Items with missing/invalid data are skipped rather than
     failing the run; the second dict is {label: reason}. Shared by every watchlist view
@@ -424,6 +457,11 @@ def build_watchlist_series(
                 if structure is None:
                     raise CrudeOilRiskError("structure not found or no longer open")
                 series[label] = structure_difference_series(structure, data_loader)
+            elif item["type"] == "excel":
+                if excel_store is None:
+                    raise CrudeOilRiskError("Excel data source not available")
+                filename, sheet, column = parse_excel_item_key(item["key"])
+                series[label] = excel_store.load_series(filename, sheet, column, min_rows=MIN_OBSERVATIONS)
             else:
                 series[label] = _load_local_differences(item["key"], data_loader)
         except (CrudeOilRiskError, ValueError) as exc:
@@ -448,8 +486,9 @@ def compute_watchlist_correlation(
     lookback_days: int,
     data_loader: DataLoader,
     as_of: date | None = None,
+    excel_store: ExcelCorrelationStore | None = None,
 ) -> WatchlistResult:
-    """Correlation matrix of watchlist items ({"type": instrument|structure, "key", "label"}).
+    """Correlation matrix of watchlist items ({"type": instrument|structure|excel, "key", "label"}).
 
     `as_of` restricts the matrix to data at or before that date (the Heatmap tab's as-of
     slider); omit it for "as of the latest available date" (the default).
@@ -459,7 +498,7 @@ def compute_watchlist_correlation(
         result.error = "Add at least 2 items to compute"
         return result
 
-    series, result.skipped = build_watchlist_series(items, structures_by_id, data_loader)
+    series, result.skipped = build_watchlist_series(items, structures_by_id, data_loader, excel_store)
 
     if not series:
         result.error = "No valid data to compute — check symbols"

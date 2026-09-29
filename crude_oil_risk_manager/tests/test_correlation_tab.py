@@ -1,5 +1,6 @@
 """Tests for the watchlist correlation engine, the Correlation tab layout and its callbacks."""
 
+import base64
 from datetime import date
 
 import numpy as np
@@ -12,7 +13,9 @@ from core.correlation import (
     build_correlation_matrix_from_series,
     build_watchlist_series,
     compute_watchlist_correlation,
+    excel_item_key,
     normalize_instrument_symbol,
+    parse_excel_item_key,
     rolling_correlation_from_series,
     structure_difference_series,
     watchlist_item_missing_symbols,
@@ -21,6 +24,7 @@ from core.correlation import (
     year_overlay_frame,
 )
 from core.data_loader import DataLoader
+from core.excel_correlation import ExcelCorrelationStore
 from core.exceptions import CrudeOilRiskError, InsufficientDataError
 from core.models import Contract, Leg, Structure, StructureStatus, StructureType
 from db.repository import Repository
@@ -389,10 +393,31 @@ def repo(tmp_db_path):
 
 
 @pytest.fixture
-def env(repo, loader, monkeypatch):
-    fresh = Container(repository=repo, data_loader=loader)
+def excel_store(tmp_path):
+    return ExcelCorrelationStore(str(tmp_path / "correlation_uploads"))
+
+
+@pytest.fixture
+def env(repo, loader, excel_store, monkeypatch):
+    fresh = Container(repository=repo, data_loader=loader, excel_store=excel_store)
     monkeypatch.setattr(cc, "container", fresh)
     return fresh
+
+
+def write_workbook(path, sheets: dict[str, "pd.DataFrame"]) -> None:
+    """A minimal Timestamp + value-columns workbook, matching the format this app expects."""
+    with pd.ExcelWriter(path) as writer:
+        for sheet_name, df in sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+
+def sample_frame(n=30, seed=1, columns=("CL1", "CL1-2")):
+    timestamps = pd.date_range("2026-01-01", periods=n, freq="D")
+    rng = np.random.default_rng(seed)
+    data = {"Timestamp": timestamps}
+    for i, col in enumerate(columns):
+        data[col] = 75.0 + np.cumsum(rng.normal(0.0, 1.0, n)) + i
+    return pd.DataFrame(data)
 
 
 def save(repo, s):
@@ -413,8 +438,10 @@ def trigger(monkeypatch, triggered_id, value=1):
 
 
 def test_toggle_mode_shows_the_right_input():
-    assert cc.toggle_mode("instrument") == ({}, {"display": "none"})
-    assert cc.toggle_mode("structure") == ({"display": "none"}, {})
+    hidden = {"display": "none"}
+    assert cc.toggle_mode("instrument") == ({}, hidden, hidden)
+    assert cc.toggle_mode("structure") == (hidden, {}, hidden)
+    assert cc.toggle_mode("excel") == (hidden, hidden, {})
 
 
 def test_structure_dropdown_lists_open_structures_only(env, repo):
@@ -428,26 +455,39 @@ def test_structure_dropdown_lists_open_structures_only(env, repo):
         cc.populate_structure_options("/structures")
 
 
+def _add_instrument(n_clicks, instrument_value, watchlist):
+    return cc.add_item(n_clicks, "instrument", instrument_value, None, None, None, None, watchlist)
+
+
+def _add_structure(n_clicks, structure_id, watchlist):
+    return cc.add_item(n_clicks, "structure", "", structure_id, None, None, None, watchlist)
+
+
+def _add_excel(n_clicks, excel_file, excel_sheet, excel_columns, watchlist):
+    return cc.add_item(n_clicks, "excel", "", None, excel_file, excel_sheet, excel_columns, watchlist)
+
+
 def test_add_instrument_validates_normalizes_and_ignores_duplicates(env):
-    assert cc.add_item(1, "instrument", "  ", None, []) [1] == "Enter an exchange symbol first."
-    items, message, cleared = cc.add_item(1, "instrument", "clz25-clh26", None, [])
+    assert _add_instrument(1, "  ", [])[1] == "Enter an exchange symbol first."
+    items, message, cleared, excel_cleared = _add_instrument(1, "clz25-clh26", [])
     assert items == [{"type": "instrument", "key": "CLZ25-H26", "label": "CLZ25-H26"}] and message == "" and cleared == ""
-    again, message, _ = cc.add_item(1, "instrument", "CLZ25-H26", None, items)
+    assert excel_cleared is cc.no_update
+    again, message, _, _ = _add_instrument(1, "CLZ25-H26", items)
     assert again is cc.no_update and message == ""  # duplicate: silently ignored
     with pytest.raises(PreventUpdate):
-        cc.add_item(None, "instrument", "CLZ26", None, [])
+        _add_instrument(None, "CLZ26", [])
 
 
 def test_add_structure_validates_and_disambiguates_names(env, repo):
     sid = save(repo, structure("Twin", [("CLZ26", 1, "buy", 2)]))
     other = save(repo, structure("Twin", [("CLF27", 1, "buy", 2)]))
-    assert cc.add_item(1, "structure", "", None, [])[1] == "Select a structure first."
-    assert "no longer open" in cc.add_item(1, "structure", "", "missing", [])[1]
-    first, _, _ = cc.add_item(1, "structure", "", sid, [])
+    assert _add_structure(1, None, [])[1] == "Select a structure first."
+    assert "no longer open" in _add_structure(1, "missing", [])[1]
+    first, _, _, _ = _add_structure(1, sid, [])
     assert first == [{"type": "structure", "key": sid, "label": "Twin"}]
-    second, _, _ = cc.add_item(1, "structure", "", other, first)
+    second, _, _, _ = _add_structure(1, other, first)
     assert second[1]["label"] == f"Twin ({other[:4]})"
-    assert cc.add_item(1, "structure", "", sid, first)[0] is cc.no_update
+    assert _add_structure(1, sid, first)[0] is cc.no_update
 
 
 def test_remove_item(monkeypatch):
@@ -589,3 +629,140 @@ def test_compute_summary_needs_two_items(env):
         cc.compute_summary(None, [], 20)
     table, status = cc.compute_summary(1, [instrument("CLZ26")], 20)
     assert MIN_ITEMS_TEXT in status.children
+
+
+# ---------- Excel fallback source ----------
+
+
+def test_excel_item_key_roundtrip():
+    key = excel_item_key("CL.xlsx", "Combined", "CL1-2")
+    assert parse_excel_item_key(key) == ("CL.xlsx", "Combined", "CL1-2")
+
+
+def test_excel_store_save_list_and_read_columns(tmp_path):
+    store = ExcelCorrelationStore(str(tmp_path / "uploads"))
+    assert store.list_files() == []
+
+    workbook_path = tmp_path / "scratch.xlsx"
+    write_workbook(workbook_path, {"Combined": sample_frame(columns=("CL1", "CL1-2"))})
+    saved_name = store.save_file("CL.xlsx", workbook_path.read_bytes())
+    assert saved_name == "CL.xlsx"
+    assert store.list_files() == ["CL.xlsx"]
+    assert store.sheet_names("CL.xlsx") == ["Combined"]
+    assert store.column_names("CL.xlsx", "Combined") == ["CL1", "CL1-2"]
+
+    series = store.load_series("CL.xlsx", "Combined", "CL1-2")
+    assert series.index.tz is not None  # UTC-indexed, like every other series in the app
+    assert len(series) == 29  # 30 rows, differenced
+
+    store.delete_file("CL.xlsx")
+    assert store.list_files() == []
+
+
+def test_excel_store_rejects_non_xlsx_names(tmp_path):
+    store = ExcelCorrelationStore(str(tmp_path / "uploads"))
+    with pytest.raises(ValueError):
+        store.save_file("not_excel.csv", b"whatever")
+
+
+def test_excel_store_rejects_unreadable_or_headerless_files(tmp_path):
+    store = ExcelCorrelationStore(str(tmp_path / "uploads"))
+    with pytest.raises(CrudeOilRiskError):
+        store.save_file("bad.xlsx", b"not a real workbook")
+    assert store.list_files() == []  # rejected upload is not left on disk
+
+    workbook_path = tmp_path / "no_timestamp.xlsx"
+    write_workbook(workbook_path, {"Sheet1": pd.DataFrame({"CL1": [1.0, 2.0, 3.0]})})
+    with pytest.raises(CrudeOilRiskError):
+        store.save_file("no_timestamp.xlsx", workbook_path.read_bytes())
+
+
+def test_excel_store_sanitizes_path_traversal_in_filenames(tmp_path):
+    store = ExcelCorrelationStore(str(tmp_path / "uploads"))
+    workbook_path = tmp_path / "scratch.xlsx"
+    write_workbook(workbook_path, {"Combined": sample_frame()})
+    saved_name = store.save_file("../../evil.xlsx", workbook_path.read_bytes())
+    assert saved_name == "evil.xlsx"
+    assert (tmp_path / "uploads" / "evil.xlsx").exists()
+
+
+def _excel_workbook(tmp_path, excel_store):
+    """Save a small sample workbook into the fixture's store and return its filename."""
+    tmp_workbook = tmp_path / "_scratch_source.xlsx"
+    write_workbook(tmp_workbook, {"Combined": sample_frame(columns=("CL1", "CL1-2"))})
+    return excel_store.save_file("CL.xlsx", tmp_workbook.read_bytes())
+
+
+def test_build_watchlist_series_and_warnings_support_excel_items(tmp_path, excel_store):
+    _excel_workbook(tmp_path, excel_store)
+    item = {"type": "excel", "key": excel_item_key("CL.xlsx", "Combined", "CL1-2"), "label": "CL1-2 (CL.xlsx)"}
+    missing_sheet = {"type": "excel", "key": excel_item_key("CL.xlsx", "NoSuchSheet", "CL1-2"), "label": "x"}
+
+    assert watchlist_item_warning(item, {}, None, excel_store) is None
+    assert "Sheet" in watchlist_item_warning(missing_sheet, {}, None, excel_store)
+    assert watchlist_item_warning(item, {}, None, None) == "Excel data source not available"
+    assert watchlist_item_missing_symbols(item, {}, None) == []
+
+    series, skipped = build_watchlist_series([item, missing_sheet], {}, None, excel_store)
+    assert list(series) == ["CL1-2 (CL.xlsx)"]
+    assert "x" in skipped
+
+
+def test_add_excel_columns_batches_and_dedupes(env, tmp_path):
+    _excel_workbook(tmp_path, env.excel_store)
+    assert _add_excel(1, None, None, ["CL1"], [])[1] == "Choose a file and sheet first."
+    assert _add_excel(1, "CL.xlsx", "Combined", [], [])[1] == "Select at least one column first."
+
+    items, message, _, cleared_columns = _add_excel(1, "CL.xlsx", "Combined", ["CL1", "CL1-2"], [])
+    assert message == "Added 2 column(s)." and cleared_columns == []
+    assert {i["key"] for i in items} == {
+        excel_item_key("CL.xlsx", "Combined", "CL1"),
+        excel_item_key("CL.xlsx", "Combined", "CL1-2"),
+    }
+    assert {i["label"] for i in items} == {"CL1 (CL.xlsx)", "CL1-2 (CL.xlsx)"}
+
+    again, message, _, _ = _add_excel(1, "CL.xlsx", "Combined", ["CL1"], items)
+    assert again == items and message == "Already in the watchlist."
+
+    with pytest.raises(PreventUpdate):
+        _add_excel(None, "CL.xlsx", "Combined", ["CL1"], [])
+
+
+def test_excel_file_upload_lists_and_deletes(env, tmp_path):
+    workbook_path = tmp_path / "scratch.xlsx"
+    write_workbook(workbook_path, {"Combined": sample_frame()})
+    contents_b64 = base64.b64encode(workbook_path.read_bytes()).decode()
+    contents = f"data:application/octet-stream;base64,{contents_b64}"
+
+    assert cc.populate_excel_file_options("/correlation") == []
+    with pytest.raises(PreventUpdate):
+        cc.populate_excel_file_options("/structures")
+
+    saved_name, status = cc.upload_excel_file(contents, "CL.xlsx")
+    assert saved_name == "CL.xlsx" and "Uploaded" in status
+    assert cc.populate_excel_file_options("/correlation") == [{"label": "CL.xlsx", "value": "CL.xlsx"}]
+
+    sheet_options, sheet_value = cc.populate_excel_sheet_options("CL.xlsx")
+    assert sheet_options == [{"label": "Combined", "value": "Combined"}] and sheet_value == "Combined"
+    column_options, column_value = cc.populate_excel_column_options("CL.xlsx", "Combined")
+    assert {o["value"] for o in column_options} == {"CL1", "CL1-2"} and column_value == []
+
+    cleared_value, status = cc.delete_excel_file(1, "CL.xlsx")
+    assert cleared_value is None and "Deleted" in status
+    assert cc.populate_excel_file_options("/correlation") == []
+    with pytest.raises(PreventUpdate):
+        cc.delete_excel_file(None, "CL.xlsx")
+
+
+def test_excel_upload_rejects_bad_file(env):
+    bad_contents = "data:application/octet-stream;base64," + base64.b64encode(b"not excel").decode()
+    saved_name, status = cc.upload_excel_file(bad_contents, "bad.xlsx")
+    assert saved_name is cc.no_update and "Could not save" in status
+
+
+def test_render_watchlist_rows_flags_excel_type(env, tmp_path):
+    _excel_workbook(tmp_path, env.excel_store)
+    item = {"type": "excel", "key": excel_item_key("CL.xlsx", "Combined", "CL1-2"), "label": "CL1-2 (CL.xlsx)"}
+    rendered, backfill_style, missing = cc.render_watchlist_rows([item])
+    assert "EXCEL" in str(rendered)
+    assert missing == []  # nothing to backfill for an excel-sourced item

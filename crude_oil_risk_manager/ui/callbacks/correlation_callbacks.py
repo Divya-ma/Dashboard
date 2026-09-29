@@ -6,6 +6,7 @@ correlation, pair summary); these functions gather inputs, call it and render th
 The data loader and repository come from ui.container.
 """
 
+import base64
 from datetime import date, datetime, timezone
 
 from dash import ALL, Input, Output, State, callback_context, html, no_update
@@ -14,6 +15,7 @@ from dash.exceptions import PreventUpdate
 from core.correlation import (
     build_watchlist_series,
     compute_watchlist_correlation,
+    excel_item_key,
     normalize_instrument_symbol,
     rolling_correlation_from_series,
     watchlist_item_missing_symbols,
@@ -59,9 +61,12 @@ def _legs_summary(structure) -> str:
 
 
 def toggle_mode(mode):
-    """Show the symbol box for Instrument mode, the structure dropdown for Structure mode."""
-    is_structure = mode == "structure"
-    return (_HIDDEN if is_structure else _SHOWN), (_SHOWN if is_structure else _HIDDEN)
+    """Show the matching input group for the selected watchlist source mode."""
+    return (
+        _SHOWN if mode == "instrument" else _HIDDEN,
+        _SHOWN if mode == "structure" else _HIDDEN,
+        _SHOWN if mode == "excel" else _HIDDEN,
+    )
 
 
 def populate_structure_options(pathname):
@@ -73,33 +78,59 @@ def populate_structure_options(pathname):
     ]
 
 
-def add_item(n_clicks, mode, instrument, structure_id, watchlist):
-    """Append an instrument or an open structure. Duplicates are ignored silently."""
+def add_item(n_clicks, mode, instrument, structure_id, excel_file, excel_sheet, excel_columns, watchlist):
+    """Append an instrument, an open structure, or one or more Excel columns at once.
+
+    Duplicates are ignored silently (instrument/structure) or skipped from the batch (excel).
+    """
     if not n_clicks:
         raise PreventUpdate
     items = list(watchlist or [])
 
     if mode == "structure":
         if not structure_id:
-            return no_update, "Select a structure first.", no_update
+            return no_update, "Select a structure first.", no_update, no_update
         structure = _open_structures().get(structure_id)
         if structure is None:
-            return no_update, "That structure is no longer open.", no_update
+            return no_update, "That structure is no longer open.", no_update, no_update
         new = {"type": "structure", "key": structure_id, "label": structure.name}
         taken = {item["label"] for item in items}
         if new["label"] in taken:  # two structures may share a name; keep matrix labels unique
             new["label"] = f"{structure.name} ({structure_id[:4]})"
-        cleared = no_update
-    else:
-        symbol = normalize_instrument_symbol(instrument)
-        if not symbol:
-            return no_update, "Enter an exchange symbol first.", no_update
-        new = {"type": "instrument", "key": symbol, "label": symbol}
-        cleared = ""
+        if any(item["type"] == new["type"] and item["key"] == new["key"] for item in items):
+            return no_update, "", no_update, no_update
+        return [*items, new], "", no_update, no_update
 
+    if mode == "excel":
+        if not excel_file or not excel_sheet:
+            return no_update, "Choose a file and sheet first.", no_update, no_update
+        columns = excel_columns or []
+        if not columns:
+            return no_update, "Select at least one column first.", no_update, no_update
+        existing_keys = {item["key"] for item in items if item["type"] == "excel"}
+        existing_labels = {item["label"] for item in items}
+        added = 0
+        for column in columns:
+            key = excel_item_key(excel_file, excel_sheet, column)
+            if key in existing_keys:
+                continue
+            label = f"{column} ({excel_file})"
+            if label in existing_labels:
+                label = f"{column} ({excel_file}/{excel_sheet})"
+            items.append({"type": "excel", "key": key, "label": label})
+            existing_keys.add(key)
+            existing_labels.add(label)
+            added += 1
+        message = f"Added {added} column(s)." if added else "Already in the watchlist."
+        return items, message, no_update, []
+
+    symbol = normalize_instrument_symbol(instrument)
+    if not symbol:
+        return no_update, "Enter an exchange symbol first.", no_update, no_update
+    new = {"type": "instrument", "key": symbol, "label": symbol}
     if any(item["type"] == new["type"] and item["key"] == new["key"] for item in items):
-        return no_update, "", cleared
-    return [*items, new], "", cleared
+        return no_update, "", "", no_update
+    return [*items, new], "", "", no_update
 
 
 def remove_item(remove_clicks, watchlist):
@@ -124,7 +155,11 @@ def render_watchlist_rows(watchlist):
     if loader is None:
         return render_watchlist(items, {}), _HIDDEN, []
 
-    warnings = {f"{item['type']}:{item['key']}": watchlist_item_warning(item, structures, loader) for item in items}
+    excel_store = container.excel_store
+    warnings = {
+        f"{item['type']}:{item['key']}": watchlist_item_warning(item, structures, loader, excel_store)
+        for item in items
+    }
     missing = sorted({sym for item in items for sym in watchlist_item_missing_symbols(item, structures, loader)})
     return render_watchlist(items, warnings), (_SHOWN if missing else _HIDDEN), missing
 
@@ -151,6 +186,78 @@ def backfill_missing(n_clicks, missing_symbols):
 
 
 # ----------------------------------------------------------------------
+# Excel fallback source: file upload / selection
+# ----------------------------------------------------------------------
+
+
+def _excel_file_options() -> list[dict]:
+    store = container.excel_store
+    return [{"label": name, "value": name} for name in store.list_files()] if store else []
+
+
+def populate_excel_file_options(pathname):
+    """Previously-uploaded files, refreshed whenever the Correlation tab opens."""
+    if pathname != "/correlation":
+        raise PreventUpdate
+    return _excel_file_options()
+
+
+def upload_excel_file(contents, filename):
+    """Save an uploaded workbook to disk (persists across restarts) and select it."""
+    if not contents or not filename:
+        raise PreventUpdate
+    store = container.excel_store
+    if store is None:
+        return no_update, "Excel storage is not available."
+    try:
+        _header, encoded = contents.split(",", 1)
+        data = base64.b64decode(encoded)
+        saved_name = store.save_file(filename, data)
+    except (ValueError, CrudeOilRiskError) as exc:
+        return no_update, f"Could not save {filename}: {exc}"
+    return saved_name, f"Uploaded {saved_name}."
+
+
+def delete_excel_file(n_clicks, selected_file):
+    """Remove an uploaded file from disk and clear the dependent dropdowns."""
+    if not n_clicks or not selected_file:
+        raise PreventUpdate
+    store = container.excel_store
+    if store is None:
+        raise PreventUpdate
+    store.delete_file(selected_file)
+    return None, f"Deleted {selected_file}."
+
+
+def populate_excel_sheet_options(selected_file):
+    """Sheet dropdown options for the chosen uploaded file."""
+    if not selected_file:
+        return [], None
+    store = container.excel_store
+    if store is None:
+        raise PreventUpdate
+    try:
+        sheets = store.sheet_names(selected_file)
+    except CrudeOilRiskError:
+        sheets = []
+    return [{"label": s, "value": s} for s in sheets], (sheets[0] if len(sheets) == 1 else None)
+
+
+def populate_excel_column_options(selected_file, selected_sheet):
+    """Column multi-select options for the chosen file/sheet."""
+    if not selected_file or not selected_sheet:
+        return [], []
+    store = container.excel_store
+    if store is None:
+        raise PreventUpdate
+    try:
+        columns = store.column_names(selected_file, selected_sheet)
+    except CrudeOilRiskError:
+        columns = []
+    return [{"label": c, "value": c} for c in columns], []
+
+
+# ----------------------------------------------------------------------
 # Compute
 # ----------------------------------------------------------------------
 
@@ -167,7 +274,9 @@ def compute_heatmap(n_clicks, watchlist, lookback, as_of_str):
     as_of = date.fromisoformat(as_of_str) if as_of_str else None
     items = watchlist or []
     structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
-    result = compute_watchlist_correlation(items, structures, lookback_days, container.data_loader, as_of)
+    result = compute_watchlist_correlation(
+        items, structures, lookback_days, container.data_loader, as_of, container.excel_store
+    )
 
     skipped = f" Skipped: {', '.join(result.skipped)}." if result.skipped else ""
     if result.error:
@@ -194,7 +303,7 @@ def _series_for_pair(watchlist, base: str, target: str) -> tuple[dict, dict]:
     """{label: series} for just the base/target watchlist items, plus {label: skip reason}."""
     items = _items_for_labels(watchlist, {base, target})
     structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
-    return build_watchlist_series(items, structures, container.data_loader)
+    return build_watchlist_series(items, structures, container.data_loader, container.excel_store)
 
 
 def _parse_windows(checked: list[int] | None, custom_text: str | None, defaults: list[int]) -> list[int]:
@@ -284,7 +393,7 @@ def compute_summary(n_clicks, watchlist, window):
 
     window = int(window or default_rolling_window())
     structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
-    series, skipped = build_watchlist_series(items, structures, container.data_loader)
+    series, skipped = build_watchlist_series(items, structures, container.data_loader, container.excel_store)
     if len(series) < 2:
         return html.Div(), _status("Need at least 2 valid series", is_error=True)
 
@@ -306,6 +415,7 @@ def register_correlation_callbacks(app) -> None:
     app.callback(
         Output("corr-instrument-group", "style"),
         Output("corr-structure-group", "style"),
+        Output("corr-excel-group", "style"),
         Input("corr-mode", "value"),
         prevent_initial_call=True,
     )(toggle_mode)
@@ -316,13 +426,52 @@ def register_correlation_callbacks(app) -> None:
     )(populate_structure_options)
 
     app.callback(
+        Output("corr-excel-file-select", "options"),
+        Input("url", "pathname"),
+    )(populate_excel_file_options)
+
+    app.callback(
+        Output("corr-excel-file-select", "value", allow_duplicate=True),
+        Output("corr-excel-upload-status", "children"),
+        Input("corr-excel-upload", "contents"),
+        State("corr-excel-upload", "filename"),
+        prevent_initial_call=True,
+    )(upload_excel_file)
+
+    app.callback(
+        Output("corr-excel-file-select", "value", allow_duplicate=True),
+        Output("corr-excel-upload-status", "children", allow_duplicate=True),
+        Input("corr-excel-delete-btn", "n_clicks"),
+        State("corr-excel-file-select", "value"),
+        prevent_initial_call=True,
+    )(delete_excel_file)
+
+    app.callback(
+        Output("corr-excel-sheet-select", "options"),
+        Output("corr-excel-sheet-select", "value"),
+        Input("corr-excel-file-select", "value"),
+    )(populate_excel_sheet_options)
+
+    app.callback(
+        Output("corr-excel-columns", "options"),
+        Output("corr-excel-columns", "value", allow_duplicate=True),
+        Input("corr-excel-file-select", "value"),
+        Input("corr-excel-sheet-select", "value"),
+        prevent_initial_call=True,
+    )(populate_excel_column_options)
+
+    app.callback(
         Output("corr-watchlist", "data"),
         Output("corr-add-message", "children"),
         Output("corr-instrument-input", "value"),
+        Output("corr-excel-columns", "value", allow_duplicate=True),
         Input("corr-add-btn", "n_clicks"),
         State("corr-mode", "value"),
         State("corr-instrument-input", "value"),
         State("corr-structure-select", "value"),
+        State("corr-excel-file-select", "value"),
+        State("corr-excel-sheet-select", "value"),
+        State("corr-excel-columns", "value"),
         State("corr-watchlist", "data"),
         prevent_initial_call=True,
     )(add_item)

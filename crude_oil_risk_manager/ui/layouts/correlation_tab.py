@@ -249,6 +249,9 @@ def build_summary_table(rows: list[dict]) -> dash_table.DataTable:
 # ----------------------------------------------------------------------
 
 
+_TYPE_LABELS = {"structure": "STRUCTURE", "excel": "EXCEL"}
+
+
 def render_watchlist(items: list[dict], warnings: dict[str, str | None] | None = None) -> html.Div:
     """One row per item: type, label, an optional warning and the remove (×) button."""
     if not items:
@@ -259,7 +262,7 @@ def render_watchlist(items: list[dict], warnings: dict[str, str | None] | None =
         warning = warnings.get(f"{item['type']}:{item['key']}")
         body = [
             html.Span(
-                "STRUCTURE" if item["type"] == "structure" else "INSTRUMENT",
+                _TYPE_LABELS.get(item["type"], "INSTRUMENT"),
                 style={**_MUTED, "fontSize": "10px", "marginRight": "8px", "letterSpacing": "0.05em"},
             ),
             html.Span(item["label"], style={"color": COLORS["TEXT_PRIMARY"], "fontWeight": "bold"}),
@@ -293,7 +296,11 @@ def render_watchlist(items: list[dict], warnings: dict[str, str | None] | None =
 def _left_panel() -> dbc.Card:
     mode = dbc.RadioItems(
         id="corr-mode",
-        options=[{"label": "Instrument", "value": "instrument"}, {"label": "Structure", "value": "structure"}],
+        options=[
+            {"label": "Instrument", "value": "instrument"},
+            {"label": "Structure", "value": "structure"},
+            {"label": "Excel", "value": "excel"},
+        ],
         value="instrument",
         className="btn-group mb-3",
         inputClassName="btn-check",
@@ -315,11 +322,51 @@ def _left_panel() -> dbc.Card:
         id="corr-structure-group",
         style=_HIDDEN,
     )
+    excel_group = html.Div(
+        [
+            html.Div(
+                "Manual fallback source: use this when the API can't provide a symbol. "
+                "Excel columns are generic curve labels (e.g. CL1), not exchange contract symbols — "
+                "you decide what each one stands in for.",
+                style={**_MUTED, "marginBottom": "8px"},
+            ),
+            html.Div("Uploaded file", style=_LABEL),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dcc.Dropdown(id="corr-excel-file-select", options=[], placeholder="Choose a file...", clearable=True),
+                        width=8,
+                    ),
+                    dbc.Col(
+                        dcc.Upload(
+                            id="corr-excel-upload",
+                            children=dbc.Button("+ Upload", color="secondary", outline=True, size="sm", style={"width": "100%"}),
+                            accept=".xlsx",
+                            multiple=False,
+                        ),
+                        width=4,
+                    ),
+                ],
+                className="g-1 mb-1",
+            ),
+            html.Div(id="corr-excel-upload-status", style={**_MUTED, "minHeight": "18px"}),
+            html.Div("Sheet", style=_LABEL),
+            dcc.Dropdown(id="corr-excel-sheet-select", options=[], placeholder="Select a sheet...", clearable=False, className="mb-2"),
+            html.Div("Column(s)", style=_LABEL),
+            dcc.Dropdown(id="corr-excel-columns", options=[], value=[], multi=True, placeholder="Select column(s)..."),
+            dbc.Button(
+                "🗑 Delete file", id="corr-excel-delete-btn", color="danger", outline=True, size="sm", className="mt-2",
+            ),
+        ],
+        id="corr-excel-group",
+        style=_HIDDEN,
+    )
     body = [
         html.Div("Build watchlist", style=_LABEL),
         mode,
         instrument_group,
         structure_group,
+        excel_group,
         dbc.Button("Add", id="corr-add-btn", color="secondary", className="mt-2 mb-1"),
         html.Div(id="corr-add-message", style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "13px", "minHeight": "20px"}),
         html.Hr(style={"borderColor": COLORS["BORDER_COLOR"]}),

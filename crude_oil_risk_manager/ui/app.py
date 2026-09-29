@@ -24,6 +24,7 @@ from adapters.live.fairvalue import FairValueLiveAdapter  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
 from core.data_loader import DataLoader  # noqa: E402
+from core.excel_correlation import ExcelCorrelationStore  # noqa: E402
 from core.structure_builder import active_composite_symbols  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_STALENESS  # noqa: E402
 from db.repository import Repository  # noqa: E402
@@ -96,6 +97,7 @@ container.live_adapter = live_adapter
 container.historical_adapter = historical_adapter
 container.alert_manager = alert_manager
 container.data_loader = DataLoader(_resolve_path(settings.HISTORICAL_DATA_DIR), historical_adapter)
+container.excel_store = ExcelCorrelationStore(_resolve_path(settings.CORRELATION_UPLOADS_DIR))
 
 
 def _run_morning_sync() -> None:
