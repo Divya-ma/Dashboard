@@ -352,8 +352,27 @@ def _left_panel() -> dbc.Card:
             html.Div(id="corr-excel-upload-status", style={**_MUTED, "minHeight": "18px"}),
             html.Div("Sheet", style=_LABEL),
             dcc.Dropdown(id="corr-excel-sheet-select", options=[], placeholder="Select a sheet...", clearable=False, className="mb-2"),
-            html.Div("Column(s)", style=_LABEL),
-            dcc.Dropdown(id="corr-excel-columns", options=[], value=[], multi=True, placeholder="Select column(s)..."),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            html.Div("Base", style=_LABEL),
+                            dcc.Dropdown(id="corr-excel-base", options=[], placeholder="Base column...", clearable=True),
+                        ],
+                        width=6,
+                    ),
+                    dbc.Col(
+                        [
+                            html.Div("Target", style=_LABEL),
+                            dcc.Dropdown(id="corr-excel-target", options=[], placeholder="Target column...", clearable=True),
+                        ],
+                        width=6,
+                    ),
+                ],
+                className="g-1 mb-2",
+            ),
+            html.Div("Additional column(s) (optional)", style=_LABEL),
+            dcc.Dropdown(id="corr-excel-columns", options=[], value=[], multi=True, placeholder="Extra columns for the Heatmap / Summary..."),
             dbc.Button(
                 "🗑 Delete file", id="corr-excel-delete-btn", color="danger", outline=True, size="sm", className="mt-2",
             ),
@@ -505,6 +524,7 @@ def correlation_layout() -> html.Div:
         [
             dcc.Store(id="corr-watchlist", data=[], storage_type="session"),
             dcc.Store(id="corr-missing-symbols", data=[]),
+            dcc.Store(id="corr-excel-pair", data=None),  # {base, target} labels from the last Excel Add
             html.H3("🔗 Correlation", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "16px"}),
             dbc.Row(
                 [

@@ -78,8 +78,40 @@ def populate_structure_options(pathname):
     ]
 
 
-def add_item(n_clicks, mode, instrument, structure_id, excel_file, excel_sheet, excel_columns, watchlist):
-    """Append an instrument, an open structure, or one or more Excel columns at once.
+def _excel_columns_to_add(excel_columns, excel_base, excel_target) -> list[str]:
+    """Base, then Target, then any extra multi-selected columns, without duplicates."""
+    return list(dict.fromkeys([c for c in (excel_base, excel_target, *(excel_columns or [])) if c]))
+
+
+def _resolve_excel_items(items, excel_file, excel_sheet, columns) -> list[tuple[str, dict, bool]]:
+    """(column, watchlist item, is_new) for each column; an already-listed column reuses its item.
+
+    Labels stay unique across the watchlist (file name, then file/sheet as the fallback). Pure,
+    so add_item and the Base/Target pre-selection callback agree on the labels.
+    """
+    existing = {item["key"]: item for item in items if item["type"] == "excel"}
+    labels = {item["label"] for item in items}
+    resolved = []
+    for column in columns:
+        key = excel_item_key(excel_file, excel_sheet, column)
+        if key in existing:
+            resolved.append((column, existing[key], False))
+            continue
+        label = f"{column} ({excel_file})"
+        if label in labels:
+            label = f"{column} ({excel_file}/{excel_sheet})"
+        item = {"type": "excel", "key": key, "label": label}
+        existing[key] = item
+        labels.add(label)
+        resolved.append((column, item, True))
+    return resolved
+
+
+def add_item(
+    n_clicks, mode, instrument, structure_id, excel_file, excel_sheet, excel_columns, watchlist,
+    excel_base=None, excel_target=None,
+):
+    """Append an instrument, an open structure, or Excel columns (Base, Target and extras) at once.
 
     Duplicates are ignored silently (instrument/structure) or skipped from the batch (excel).
     """
@@ -104,25 +136,18 @@ def add_item(n_clicks, mode, instrument, structure_id, excel_file, excel_sheet, 
     if mode == "excel":
         if not excel_file or not excel_sheet:
             return no_update, "Choose a file and sheet first.", no_update, no_update
-        columns = excel_columns or []
+        if excel_base and excel_base == excel_target:
+            return no_update, "Base and Target must be different columns.", no_update, no_update
+        columns = _excel_columns_to_add(excel_columns, excel_base, excel_target)
         if not columns:
             return no_update, "Select at least one column first.", no_update, no_update
-        existing_keys = {item["key"] for item in items if item["type"] == "excel"}
-        existing_labels = {item["label"] for item in items}
         added = 0
-        for column in columns:
-            key = excel_item_key(excel_file, excel_sheet, column)
-            if key in existing_keys:
-                continue
-            label = f"{column} ({excel_file})"
-            if label in existing_labels:
-                label = f"{column} ({excel_file}/{excel_sheet})"
-            items.append({"type": "excel", "key": key, "label": label})
-            existing_keys.add(key)
-            existing_labels.add(label)
-            added += 1
+        for _column, item, is_new in _resolve_excel_items(items, excel_file, excel_sheet, columns):
+            if is_new:
+                items.append(item)
+                added += 1
         message = f"Added {added} column(s)." if added else "Already in the watchlist."
-        return items, message, no_update, []
+        return items, message, no_update, []  # extras cleared; Base/Target stay for the next Add
 
     symbol = normalize_instrument_symbol(instrument)
     if not symbol:
@@ -164,11 +189,42 @@ def render_watchlist_rows(watchlist):
     return render_watchlist(items, warnings), (_SHOWN if missing else _HIDDEN), missing
 
 
+def select_excel_pair(n_clicks, mode, excel_file, excel_sheet, excel_base, excel_target, watchlist):
+    """After an Excel Add, remember the chosen Base/Target watchlist labels for the pair views."""
+    if not n_clicks or mode != "excel" or not excel_file or not excel_sheet:
+        raise PreventUpdate
+    if not (excel_base or excel_target) or excel_base == excel_target:
+        raise PreventUpdate
+    columns = [c for c in (excel_base, excel_target) if c]
+    labels = {
+        column: item["label"]
+        for column, item, _ in _resolve_excel_items(list(watchlist or []), excel_file, excel_sheet, columns)
+    }
+    return {"base": labels.get(excel_base), "target": labels.get(excel_target)}
+
+
 def populate_base_target_options(watchlist):
     """Base/Target dropdown options for Time Series and Year Overlay: the watchlist's own labels."""
     labels = [item["label"] for item in (watchlist or [])]
     options = [{"label": label, "value": label} for label in labels]
     return options, options, options, options
+
+
+def populate_base_target(watchlist, pair):
+    """Options for the four pair dropdowns, plus values when the Excel Base/Target just changed.
+
+    One callback sets options and values together so a value is never applied before its
+    option exists. When only the watchlist changed (e.g. a removal) the current selections are
+    left alone.
+    """
+    options = populate_base_target_options(watchlist)
+    values = [no_update] * 4
+    if "corr-excel-pair.data" in callback_context.triggered_prop_ids and pair:
+        labels = {item["label"] for item in (watchlist or [])}
+        base = pair.get("base") if pair.get("base") in labels else no_update
+        target = pair.get("target") if pair.get("target") in labels else no_update
+        values = [base, target, base, target]
+    return (*options, *values)
 
 
 def backfill_missing(n_clicks, missing_symbols):
@@ -255,6 +311,12 @@ def populate_excel_column_options(selected_file, selected_sheet):
     except CrudeOilRiskError:
         columns = []
     return [{"label": c, "value": c} for c in columns], []
+
+
+def populate_excel_base_target_options(selected_file, selected_sheet):
+    """Base and Target dropdown options (the sheet's columns); both selections reset."""
+    options, _ = populate_excel_column_options(selected_file, selected_sheet)
+    return options, None, options, None
 
 
 # ----------------------------------------------------------------------
@@ -461,6 +523,16 @@ def register_correlation_callbacks(app) -> None:
     )(populate_excel_column_options)
 
     app.callback(
+        Output("corr-excel-base", "options"),
+        Output("corr-excel-base", "value"),
+        Output("corr-excel-target", "options"),
+        Output("corr-excel-target", "value"),
+        Input("corr-excel-file-select", "value"),
+        Input("corr-excel-sheet-select", "value"),
+        prevent_initial_call=True,
+    )(populate_excel_base_target_options)
+
+    app.callback(
         Output("corr-watchlist", "data"),
         Output("corr-add-message", "children"),
         Output("corr-instrument-input", "value"),
@@ -473,6 +545,8 @@ def register_correlation_callbacks(app) -> None:
         State("corr-excel-sheet-select", "value"),
         State("corr-excel-columns", "value"),
         State("corr-watchlist", "data"),
+        State("corr-excel-base", "value"),
+        State("corr-excel-target", "value"),
         prevent_initial_call=True,
     )(add_item)
 
@@ -512,8 +586,26 @@ def register_correlation_callbacks(app) -> None:
         Output("corr-ts-target", "options"),
         Output("corr-yr-base", "options"),
         Output("corr-yr-target", "options"),
+        Output("corr-ts-base", "value", allow_duplicate=True),
+        Output("corr-ts-target", "value", allow_duplicate=True),
+        Output("corr-yr-base", "value", allow_duplicate=True),
+        Output("corr-yr-target", "value", allow_duplicate=True),
         Input("corr-watchlist", "data"),
-    )(populate_base_target_options)
+        Input("corr-excel-pair", "data"),
+        prevent_initial_call="initial_duplicate",
+    )(populate_base_target)
+
+    app.callback(
+        Output("corr-excel-pair", "data"),
+        Input("corr-add-btn", "n_clicks"),
+        State("corr-mode", "value"),
+        State("corr-excel-file-select", "value"),
+        State("corr-excel-sheet-select", "value"),
+        State("corr-excel-base", "value"),
+        State("corr-excel-target", "value"),
+        State("corr-watchlist", "data"),
+        prevent_initial_call=True,
+    )(select_excel_pair)
 
     app.callback(
         Output("corr-ts-graph", "figure"),
