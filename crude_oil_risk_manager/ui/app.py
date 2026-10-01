@@ -6,6 +6,7 @@ the data adapters; callbacks reach them through ui.container.
 """
 
 import logging
+import secrets
 import sys
 import threading
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import dash  # noqa: E402
+import dash_auth  # noqa: E402
 import dash_bootstrap_components as dbc  # noqa: E402
 from dash import dcc, html  # noqa: E402
 
@@ -130,6 +132,16 @@ app = dash.Dash(
     title=settings.APP_TITLE,
 )
 server = app.server  # for gunicorn: ui.app:server
+server.secret_key = settings.AUTH_SECRET_KEY or secrets.token_hex(32)
+
+if settings.AUTH_USERNAME and settings.AUTH_PASSWORD:
+    dash_auth.BasicAuth(app, {settings.AUTH_USERNAME: settings.AUTH_PASSWORD})
+    logger.info("HTTP Basic Auth enabled for user %s", settings.AUTH_USERNAME)
+else:
+    logger.warning(
+        "AUTH_USERNAME/AUTH_PASSWORD not set — the dashboard has NO login. "
+        "Set them in .env before this is reachable from anywhere but localhost."
+    )
 
 app.index_string = """<!DOCTYPE html>
 <html>

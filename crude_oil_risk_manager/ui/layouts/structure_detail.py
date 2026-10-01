@@ -11,7 +11,7 @@ from datetime import datetime
 import dash_bootstrap_components as dbc
 from dash import html
 
-from core.models import PnLRecord, Structure, StructureStatus, Trade, TradeEventType
+from core.models import Leg, PnLRecord, Structure, StructureStatus, Trade, TradeEventType
 from core.pnl import (
     calculate_structure_realized_pnl,
     calculate_structure_transaction_costs,
@@ -68,9 +68,14 @@ def format_price(value: float | None) -> str:
 
 
 def _status_badge(status: StructureStatus) -> dbc.Badge:
-    label = "OPEN" if status in (StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED) else status.value.upper()
-    background = {"OPEN": COLORS["ACCENT_GREEN"], "SHELL": COLORS["TEXT_SECONDARY"], "CLOSED": COLORS["BORDER_COLOR"]}[label]
-    text_color = COLORS["DARK_BG"] if label == "OPEN" else COLORS["TEXT_PRIMARY"]
+    label = "PARTIALLY CLOSED" if status == StructureStatus.PARTIALLY_CLOSED else (
+        "OPEN" if status == StructureStatus.OPEN else status.value.upper()
+    )
+    background = {
+        "OPEN": COLORS["ACCENT_GREEN"], "PARTIALLY CLOSED": COLORS["ACCENT_YELLOW"],
+        "SHELL": COLORS["TEXT_SECONDARY"], "CLOSED": COLORS["BORDER_COLOR"],
+    }[label]
+    text_color = COLORS["DARK_BG"] if label in ("OPEN", "PARTIALLY CLOSED") else COLORS["TEXT_PRIMARY"]
     return dbc.Badge(label, style={"backgroundColor": background, "color": text_color, "fontSize": "14px"}, className="ms-2")
 
 
@@ -205,18 +210,29 @@ def _table(headers: list[str], rows: list[list], footer: list | None = None) -> 
 def _legs_table(structure: Structure, prices: dict[str, float], breakdown: dict[str, float], total, edit_mode: bool):
     rows = []
     for number, leg in enumerate(structure.legs, start=1):
+        entry = leg.average_entry_price if leg.average_entry_price is not None else leg.entry_price
         if edit_mode:
             symbol = dbc.Input(id={"type": "edit-leg-symbol", "index": number - 1}, value=leg.contract.symbol, debounce=True, size="sm")
             ratio = dbc.Input(id={"type": "edit-leg-ratio", "index": number - 1}, type="number", step=1, value=leg.ratio, size="sm")
+            # Always an Input (disabled for a shell leg) so the ALL-pattern callback State
+            # stays positionally aligned with structure.legs regardless of which legs are traded.
+            entry_cell = dbc.Input(
+                id={"type": "edit-leg-entry-price", "index": number - 1},
+                type="number", step=0.01, value=entry, size="sm", disabled=not leg.is_traded,
+            )
         else:
-            symbol, ratio = leg.contract.symbol, f"{leg.ratio:+d}"
-        entry = leg.average_entry_price if leg.average_entry_price is not None else leg.entry_price
+            symbol, ratio, entry_cell = leg.contract.symbol, f"{leg.ratio:+d}", format_price(entry)
         rows.append(
             [
-                str(number), symbol, ratio, f"{leg.lots:g}", format_price(entry),
+                str(number), symbol, ratio, f"{leg.lots:g}", entry_cell,
                 format_price(prices.get(leg.contract.symbol)),
                 pnl_span(breakdown.get(leg.leg_id)) if leg.leg_id in breakdown else EMPTY,
-                "Long" if (leg.ratio > 0) == (leg.direction == "buy") else "Short",
+                html.Span(
+                    [
+                        "Long" if (leg.ratio > 0) == (leg.direction == "buy") else "Short",
+                        html.Span(" ⚠️ naked", style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "11px"}) if leg.is_naked else "",
+                    ]
+                ),
                 f"${leg.transaction_cost_per_lot:,.2f}" if leg.transaction_cost_per_lot else EMPTY,
             ]
         )
@@ -234,7 +250,7 @@ def _legs_table(structure: Structure, prices: dict[str, float], breakdown: dict[
                 [
                     dbc.Button("💾 Save Changes", id="btn-save-edit", color="success", size="sm", className="me-2"),
                     dbc.Button("Cancel Edit", id="btn-cancel-edit", color="secondary", outline=True, size="sm"),
-                    html.Span("  Only symbols and ratios can be edited; lots and entry prices are kept.", style=_MUTED),
+                    html.Span("  Lots are kept. A traded leg's entry price can be corrected here.", style=_MUTED),
                 ],
                 className="mb-3",
             )
@@ -317,9 +333,51 @@ def _field(label: str, *controls) -> html.Div:
     return html.Div([html.Label(label, style={**_MUTED, "display": "block", "marginBottom": "4px"}), *controls], className="mb-3")
 
 
-def _entry_form(structure: Structure, live: float | None) -> html.Div:
+def _leg_prices_section(structure: Structure, prices: dict[str, float]) -> html.Div | None:
+    """Optional per-leg price entry: one input per leg, used verbatim instead of the
+    synthetic allocation if every leg is filled in. Only offered for multi-leg structures
+    — a single-leg (outright) structure's price already IS its one leg's price."""
+    if len(structure.legs) < 2:
+        return None
+    rows = []
+    for i, leg in enumerate(structure.legs):
+        rows.append(
+            _field(
+                f"Leg {i + 1}: {leg.contract.symbol} (ratio {leg.ratio:+d})",
+                dbc.Input(id={"type": "trade-leg-price", "index": i}, type="number", step=0.01, placeholder="Optional", style={"display": "inline-block", "width": "220px"}),
+                dbc.Button("Use Live", id={"type": "btn-use-live-leg-price", "index": i}, size="sm", color="secondary", className="ms-2"),
+                html.Span(f"Live: {format_price(prices.get(leg.contract.symbol))}", style={**_MUTED, "marginLeft": "12px"}),
+            )
+        )
+    return html.Div(
+        [
+            dbc.Button(
+                "🧾 Enter Individual Leg Prices (Optional)", id="btn-toggle-leg-prices", color="secondary",
+                outline=True, size="sm", className="mb-2",
+            ),
+            dbc.Collapse(
+                html.Div(
+                    [
+                        html.Div(
+                            "Fill in every leg to record its real fill price instead of the automatic split; "
+                            "leave all blank to keep today's behavior. The Structure Price above still applies.",
+                            style={**_MUTED, "marginBottom": "8px"},
+                        ),
+                        *rows,
+                    ],
+                    style={"maxWidth": "480px"},
+                ),
+                id="leg-prices-collapse", is_open=False,
+            ),
+        ],
+        className="mb-2",
+    )
+
+
+def _entry_form(structure: Structure, live: float | None, prices: dict[str, float]) -> html.Div:
     is_open = structure.status != StructureStatus.SHELL
     title = "Add to Position" if is_open else "Enter Trade"
+    leg_prices_section = _leg_prices_section(structure, prices)
     form = html.Div(
         [
             html.H5(title, style=_TEXT),
@@ -330,6 +388,7 @@ def _entry_form(structure: Structure, live: float | None) -> html.Div:
                 _live_label(live, "trade-live-price-label"),
             ),
             _field("Lots", dbc.Input(id="trade-entry-lots", type="number", placeholder="Number of lots", min=0.01, step=0.01, style={"width": "220px"})),
+            *([leg_prices_section] if leg_prices_section is not None else []),
             html.H6("🎯 Price Alerts (Optional)", style=_TEXT),
             dbc.Row(
                 [
@@ -373,12 +432,17 @@ def _entry_form(structure: Structure, live: float | None) -> html.Div:
     )
 
 
+def _legs_uniform(structure: Structure) -> bool:
+    """False once a per-leg partial exit has left legs at unequal lots — the simple
+    one-price-closes-everything form no longer has a single meaningful lot count then."""
+    return len({leg.lots for leg in structure.legs}) <= 1
+
+
 def _exit_form(structure: Structure, live: float | None) -> html.Div:
     is_open = structure.status in (StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED)
-    return html.Div(
+    uniform = _legs_uniform(structure)
+    body = (
         [
-            html.Hr(style={"borderColor": COLORS["BORDER_COLOR"]}),
-            html.H5("Exit Structure", style={"color": COLORS["ACCENT_YELLOW"]}),
             _field(
                 "Exit Price",
                 dbc.Input(id="trade-exit-price", type="number", placeholder="Exchange-quoted exit price", style={"display": "inline-block", "width": "220px"}),
@@ -393,9 +457,108 @@ def _exit_form(structure: Structure, live: float | None) -> html.Div:
             html.Div(id="exit-pnl-preview", style={**_MUTED, "marginBottom": "12px"}),
             _field("Notes", dbc.Textarea(id="trade-exit-notes", rows=2, maxLength=200)),
             dbc.Button("🚪 Confirm Full Exit", id="btn-confirm-exit", color="danger", size="lg"),
-        ],
+        ]
+        if uniform
+        else [
+            html.Div(
+                "Legs are no longer equal lots (a per-leg exit already happened on this "
+                "structure) — use Exit Specific Legs below to close what remains.",
+                style=_MUTED,
+            ),
+        ]
+    )
+    return html.Div(
+        [html.Hr(style={"borderColor": COLORS["BORDER_COLOR"]}), html.H5("Exit Structure", style={"color": COLORS["ACCENT_YELLOW"]}), *body],
         id="trade-exit-form",
         style={} if is_open else _HIDDEN,
+    )
+
+
+LEG_EXIT_CONFIRM_TITLE = "Confirm Leg Exit"
+
+
+def _leg_exit_row(leg: Leg, number: int, prices: dict[str, float]) -> dbc.Row:
+    return dbc.Row(
+        [
+            dbc.Col(
+                dbc.Checklist(
+                    id={"type": "exit-leg-selected", "index": leg.leg_id},
+                    options=[{"label": f"Leg {number}: {leg.contract.symbol} ({leg.lots:g} lots open)", "value": "on"}],
+                    value=[],
+                ),
+                md=4,
+            ),
+            dbc.Col(
+                dbc.Input(
+                    id={"type": "exit-leg-lots", "index": leg.leg_id}, type="number", step=0.01,
+                    value=leg.lots, placeholder="Lots to exit", size="sm",
+                ),
+                md=2,
+            ),
+            dbc.Col(
+                [
+                    dbc.Input(
+                        id={"type": "exit-leg-price", "index": leg.leg_id}, type="number", step=0.01,
+                        placeholder="Exit price", size="sm", style={"display": "inline-block", "width": "120px"},
+                    ),
+                    dbc.Button("Use Live", id={"type": "btn-use-live-exit-leg-price", "index": leg.leg_id}, size="sm", color="secondary", className="ms-2"),
+                    html.Span(f"Live: {format_price(prices.get(leg.contract.symbol))}", style={**_MUTED, "marginLeft": "8px"}),
+                ],
+                md=6,
+            ),
+        ],
+        className="mb-2 align-items-center",
+    )
+
+
+def _leg_exit_section(structure: Structure, prices: dict[str, float]) -> html.Div:
+    """Exit a subset of legs (and/or partial lots of one leg), each at its own price —
+    the general mechanism; also the only way to close what remains once a prior partial
+    exit has already made the legs' lots unequal (see _legs_uniform)."""
+    is_open = structure.status in (StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED)
+    open_legs = [(i, leg) for i, leg in enumerate(structure.legs, start=1) if leg.lots > 0]
+    body = html.Div(
+        [
+            html.Div(
+                "Select one or more legs, set the lots and price for each, then confirm. "
+                "A leg not selected stays open unchanged.",
+                style={**_MUTED, "marginBottom": "8px"},
+            ),
+            *[_leg_exit_row(leg, number, prices) for number, leg in open_legs],
+            _field("Notes", dbc.Textarea(id="leg-exit-notes", rows=2, maxLength=200)),
+            dbc.Button("🎯 Exit Selected Legs", id="btn-open-leg-exit", color="danger", size="lg"),
+        ],
+        style={"maxWidth": "640px"},
+    )
+    return html.Div(
+        [
+            dbc.Button(
+                "🎯 Exit Specific Legs", id="btn-toggle-leg-exit", color="warning", outline=True, size="sm",
+                className="mb-2",
+            ),
+            dbc.Collapse(body, id="leg-exit-collapse", is_open=False),
+        ],
+        id="leg-exit-section",
+        style={"marginBottom": "20px"} if is_open else _HIDDEN,
+    )
+
+
+def confirm_leg_exit_modal() -> dbc.Modal:
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle(LEG_EXIT_CONFIRM_TITLE), close_button=False),
+            dbc.ModalBody(id="modal-confirm-leg-exit-body"),
+            dbc.ModalFooter(
+                [
+                    dbc.Button("Cancel", id="btn-cancel-leg-exit", color="secondary", outline=True),
+                    dbc.Button("Confirm Exit", id="btn-confirm-leg-exit-final", color="danger"),
+                ]
+            ),
+        ],
+        id="modal-confirm-leg-exit",
+        centered=True,
+        backdrop="static",
+        is_open=False,
     )
 
 
@@ -443,8 +606,9 @@ def structure_detail_layout(
     sections.append(_net_outrights(structure))
     if trades:
         sections.append(_trade_history(trades, active_alert_trade_ids))
-    sections.append(_entry_form(structure, live))
+    sections.append(_entry_form(structure, live, prices))
     sections.append(_exit_form(structure, live))
+    sections.append(_leg_exit_section(structure, prices))
     return html.Div(sections)
 
 

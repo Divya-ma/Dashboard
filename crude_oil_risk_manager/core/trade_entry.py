@@ -1,4 +1,4 @@
-"""Structure-level trade entry and full exit.
+"""Structure-level trade entry, full exit, and per-leg partial exit.
 
 Traders quote ONE structure price (the exchange-quoted spread/fly/outright price)
 and ONE lot count. The P&L engine, however, works per leg
@@ -9,14 +9,19 @@ and ONE lot count. The P&L engine, however, works per leg
   price. For multi-leg structures every leg but the first is anchored at its
   current live price and the first leg absorbs the difference, so
   sign * sum(ratio * entry) == the entered structure price. Only the sum matters
-  for P&L; individual leg entry prices are an allocation, not fills.
+  for P&L; individual leg entry prices are an allocation, not fills — UNLESS the
+  caller supplies real per-leg prices via enter_trade's optional `leg_prices`,
+  which are then used verbatim instead of being allocated.
 * P&L: (live - entry) * side * lots * multiplier on structure prices, using
   core.pnl.calculate_leg_unrealized_pnl. `side` is the sign of the first leg's ratio
   (matching how core.structure_view builds structure prices) and the position's
   buy/sell direction (stored on every leg) flips the result for a sell.
-* Exit: full exit only. It is recorded as one structure-level trade against the
-  first leg, and the legs' lots are zeroed (entry prices are kept for history) so
-  a closed structure no longer counts towards exposure.
+* Exit: `exit_structure` is a full exit only (one structure-level trade against the
+  first leg, all legs' lots zeroed). `partial_exit_legs` exits a subset of legs
+  (and/or partial lots of a leg), each at its own price, computing realized P&L
+  per leg via core.pnl.calculate_leg_realized_pnl and recording one Trade row per
+  leg touched. Entry prices are kept for history either way (a closed/partially
+  closed leg no longer counts towards exposure via Leg.is_traded).
 
 Pure functions: nothing here touches the database.
 """
@@ -26,7 +31,7 @@ from dataclasses import dataclass
 
 from core.exceptions import CrudeOilRiskError
 from core.models import Leg, Structure, StructureStatus, Trade, TradeEventType
-from core.pnl import calculate_average_entry_price, calculate_leg_unrealized_pnl
+from core.pnl import calculate_average_entry_price, calculate_leg_realized_pnl, calculate_leg_unrealized_pnl
 from core.structure_utils import get_structure_type_from_symbol
 from core.structure_view import structure_entry_price
 
@@ -56,6 +61,21 @@ class ExitResult:
     trade: Trade
     realized_pnl: float
     audit_note: str
+
+
+@dataclass
+class PartialExitResult:
+    """Result of exiting a subset of legs (and/or partial lots of a leg), each at its own price."""
+
+    legs: list[Leg]
+    trades: list[Trade]  # one per leg acted on, event_type PARTIAL_EXIT
+    realized_pnl_by_leg: dict[str, float]  # leg_id -> realized PnL for this exit
+    status: StructureStatus
+    audit_note: str
+
+    @property
+    def realized_pnl(self) -> float:
+        return sum(self.realized_pnl_by_leg.values())
 
 
 # ----------------------------------------------------------------------
@@ -161,15 +181,47 @@ def _validate_alert_levels(price, direction: str, stop_loss, target) -> list[str
     return errors
 
 
+def _validate_leg_prices(legs: list[Leg], leg_prices: list | None) -> list[str]:
+    """All-or-nothing per-leg price override: every leg filled, or none.
+
+    Each filled price must be finite and > 0 — every leg is itself always a single
+    outright contract month, so the same positivity rule as a single-leg structure
+    price applies (see _validate_price_and_lots).
+    """
+    if leg_prices is None:
+        return []
+    if len(leg_prices) != len(legs):
+        return ["Leg price count does not match the number of legs."]
+    filled = [p for p in leg_prices if p is not None]
+    if not filled:
+        return []
+    if len(filled) != len(legs):
+        return ["Enter a price for every leg, or leave all leg prices blank to auto-allocate."]
+    errors = []
+    for number, price in enumerate(leg_prices, start=1):
+        if not _finite(price) or price <= 0:
+            errors.append(f"Leg {number} price must be a number greater than 0.")
+    return errors
+
+
 def enter_trade(
     structure: Structure, price, lots, direction: str, notes: str | None, live_prices: dict[str, float],
     stop_loss_price: float | None = None, target_price: float | None = None,
+    leg_prices: list[float | None] | None = None,
 ) -> EntryResult:
     """First entry (SHELL -> OPEN, TRADE event) or an add to an open position (ADD event, average price).
 
     `direction` is stored on every leg and flips the PnL sign for a sell. An add must
     use the position's existing direction. Optional stop/target levels are structure
     prices and are stored with the trade for the price alerts.
+
+    `leg_prices`, if given with every element filled in (all-or-nothing), is used
+    verbatim as each leg's entry price instead of the synthetic allocation from
+    allocate_leg_entry_prices — a real recorded fill rather than an algebraic split.
+    The typed `price` stays the structure-level Trade price regardless (what stop/
+    target alerts and structure_entry_price compare against); the per-leg prices
+    only affect what's written into each Leg's entry_price/average_entry_price and
+    don't need to reconcile back to `price` algebraically.
     """
     errors = []
     if structure.status not in (StructureStatus.SHELL, *_OPEN_STATUSES):
@@ -183,13 +235,15 @@ def enter_trade(
             "Exit it and create a new structure to trade the other side."
         )
     errors += _validate_alert_levels(price, direction, stop_loss_price, target_price)
+    errors += _validate_leg_prices(structure.legs, leg_prices)
     notes = (notes or "").strip()
     if len(notes) > 200:
         errors.append("Trade notes are limited to 200 characters.")
     if errors:
         raise TradeError(errors)
 
-    new_entries = allocate_leg_entry_prices(structure.legs, price, live_prices)
+    custom_prices = leg_prices if leg_prices and all(p is not None for p in leg_prices) else None
+    new_entries = custom_prices if custom_prices is not None else allocate_leg_entry_prices(structure.legs, price, live_prices)
     is_add = structure.status in _OPEN_STATUSES and structure.legs[0].lots > 0
     legs = []
     for leg, entry in zip(structure.legs, new_entries):
@@ -265,6 +319,104 @@ def exit_structure(structure: Structure, price, lots, notes: str | None) -> Exit
 
 
 # ----------------------------------------------------------------------
+# Per-leg partial exit
+# ----------------------------------------------------------------------
+
+
+def _recompute_naked(legs: list[Leg]) -> list[Leg]:
+    """A leg is naked when it still has lots but at least one other leg in the
+    structure is now at zero — its counterpart hedge is gone. Never naked in a
+    single-leg (outright) structure."""
+    if len(legs) < 2:
+        return [leg.model_copy(update={"is_naked": False}) for leg in legs]
+    any_zero = any(leg.lots <= _LOT_TOLERANCE for leg in legs)
+    return [leg.model_copy(update={"is_naked": leg.lots > _LOT_TOLERANCE and any_zero}) for leg in legs]
+
+
+def partial_exit_legs(
+    structure: Structure, leg_exits: dict[str, tuple[float, float]], notes: str | None
+) -> PartialExitResult:
+    """Exit a subset of legs (and/or partial lots of a leg), each at its own price.
+
+    `leg_exits` is {leg_id: (price, lots)}. Each leg is validated independently: lots
+    must be > 0 and <= that leg's currently open lots; price must be finite and > 0
+    (a leg is always a single contract month, so the same positivity rule as a
+    single-leg outright structure price applies). Realized P&L is computed per leg via
+    core.pnl.calculate_leg_realized_pnl against that leg's current average/entry price
+    — genuinely per-leg, unlike exit_structure's single structure-level formula. One
+    Trade row (event_type PARTIAL_EXIT) is produced per leg acted on. Entry prices are
+    kept for history, like exit_structure. The resulting status is CLOSED once every
+    leg is at zero, PARTIALLY_CLOSED if some but not all are, otherwise unchanged.
+    """
+    errors = []
+    if structure.status not in _OPEN_STATUSES:
+        errors.append("Only an open structure can be exited.")
+    notes = (notes or "").strip()
+    if len(notes) > 200:
+        errors.append("Trade notes are limited to 200 characters.")
+    if not leg_exits:
+        errors.append("Select at least one leg to exit.")
+
+    by_id = {leg.leg_id: leg for leg in structure.legs}
+    for leg_id, (price, lots) in leg_exits.items():
+        leg = by_id.get(leg_id)
+        if leg is None:
+            errors.append(f"Unknown leg {leg_id}.")
+            continue
+        if not _finite(lots) or lots <= 0:
+            errors.append(f"Leg {leg.contract.symbol}: lots to exit must be greater than 0.")
+        elif lots - leg.lots > _LOT_TOLERANCE:
+            errors.append(f"Leg {leg.contract.symbol}: cannot exit more than its open {leg.lots:g} lots.")
+        if not _finite(price) or price <= 0:
+            errors.append(f"Leg {leg.contract.symbol}: exit price must be a number greater than 0.")
+    if errors:
+        raise TradeError(errors)
+
+    trades: list[Trade] = []
+    realized_by_leg: dict[str, float] = {}
+    new_legs = list(structure.legs)
+    note_parts = []
+    for leg_id, (price, lots) in leg_exits.items():
+        index = next(i for i, leg in enumerate(new_legs) if leg.leg_id == leg_id)
+        leg = new_legs[index]
+        entry = _leg_entry(leg)
+        realized = calculate_leg_realized_pnl(
+            entry_price=entry, exit_price=price, ratio=leg.ratio, lots=lots,
+            multiplier=leg.contract.multiplier, direction=leg.direction,
+        )
+        tc = leg.transaction_cost_per_lot * lots
+        trades.append(
+            Trade(
+                structure_id=structure.structure_id,
+                leg_id=leg_id,
+                event_type=TradeEventType.PARTIAL_EXIT,
+                lots=lots,
+                price=price,
+                direction="sell" if leg.direction == "buy" else "buy",
+                realized_pnl=realized,
+                notes=notes,
+                transaction_cost=tc,
+            )
+        )
+        realized_by_leg[leg_id] = realized
+        new_legs[index] = leg.model_copy(update={"lots": leg.lots - lots})
+        note_parts.append(f"{leg.contract.symbol} {lots:g} lots at {price:g} (realized {realized:+,.0f})")
+
+    new_legs = _recompute_naked(new_legs)
+    if all(leg.lots <= _LOT_TOLERANCE for leg in new_legs):
+        status = StructureStatus.CLOSED
+    elif any(leg.lots <= _LOT_TOLERANCE for leg in new_legs):
+        status = StructureStatus.PARTIALLY_CLOSED
+    else:
+        status = StructureStatus.OPEN
+
+    return PartialExitResult(
+        legs=new_legs, trades=trades, realized_pnl_by_leg=realized_by_leg, status=status,
+        audit_note="partial exit: " + "; ".join(note_parts),
+    )
+
+
+# ----------------------------------------------------------------------
 # Delete a trade: recompute everything downstream of it
 # ----------------------------------------------------------------------
 
@@ -292,9 +444,8 @@ def recompute_structure_from_trades(structure: Structure, trades: list[Trade]) -
     the deleted trade never happened, instead of reversing one trade's math in place —
     which is much easier to get subtly wrong once average-price adds are involved.
 
-    Only TRADE, ADD and FULL_EXIT are replayed (the only event types core.trade_entry can
-    produce elsewhere in the app); a PARTIAL_EXIT or ROLL trade in `trades` raises
-    TradeError, since there is no pure function here to replay it.
+    TRADE, ADD, FULL_EXIT and PARTIAL_EXIT are all replayed; a ROLL trade in `trades`
+    still raises TradeError, since there is no pure function here to replay it.
 
     Multi-leg entry-price allocation (see allocate_leg_entry_prices) needs an "other legs"
     price purely to split a structure price across legs algebraically — only the weighted
@@ -331,6 +482,13 @@ def recompute_structure_from_trades(structure: Structure, trades: list[Trade]) -
                 }
             )
             exit_updates[trade.trade_id] = (result.realized_pnl, result.trade.transaction_cost)
+        elif trade.event_type == TradeEventType.PARTIAL_EXIT:
+            leg_result = partial_exit_legs(current, {trade.leg_id: (trade.price, trade.lots)}, trade.notes)
+            updates = {"legs": leg_result.legs, "status": leg_result.status}
+            if leg_result.status == StructureStatus.CLOSED:
+                updates["closed_at"], updates["close_trigger"] = trade.timestamp, "manual"
+            current = current.model_copy(update=updates)
+            exit_updates[trade.trade_id] = (leg_result.realized_pnl_by_leg[trade.leg_id], leg_result.trades[0].transaction_cost)
         else:
             raise TradeError(
                 [f"Cannot recompute past a {trade.event_type.value} trade; delete newer trades first."]

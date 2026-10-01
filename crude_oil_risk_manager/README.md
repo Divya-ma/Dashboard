@@ -80,6 +80,48 @@ during local development.
    service\nssm_uninstall.bat
    ```
 
+## Opening the dashboard from another PC
+
+By default `python ui/app.py` binds to `0.0.0.0:8050`, so it already listens on
+every network interface — the only things standing between that and another
+PC are (1) a firewall rule and (2) a login, since **the dashboard has no
+authentication unless you set one up** (see below).
+
+### 1. Add a login (do this first if the other PC isn't on a fully trusted network)
+
+Set `AUTH_USERNAME` and `AUTH_PASSWORD` in `.env` (see `.env.example`). This
+turns on an HTTP Basic Auth prompt for the whole app via
+[`dash-auth`](https://pypi.org/project/dash-auth/). Leaving them empty keeps
+the app login-free, which is fine only if you are certain every device that
+can reach the machine's address is one you trust (e.g. your own two PCs on a
+home network with no one else on it).
+
+### 2. Reach the machine from the other PC
+
+Pick based on where the other PC actually is:
+
+- **Same office/home network (LAN)**: find this machine's local IP
+  (`ipconfig` → IPv4 Address, something like `192.168.1.23`), allow inbound
+  TCP `8050` in Windows Firewall, then browse to `http://192.168.1.23:8050`
+  from the other PC. Simplest option, no extra software, but only works
+  while both machines share that network.
+- **Different network / remote (e.g. home ↔ office, or travelling)**: install
+  [Tailscale](https://tailscale.com/) (free for personal/small-team use) on
+  both PCs. It creates a private, encrypted mesh network between only the
+  devices you sign in — no router port-forwarding, no exposing anything to
+  the public internet. Once both are on it, browse to
+  `http://<this-pc's-tailscale-ip>:8050` from the other PC. This is the
+  recommended default when you're not sure which case you're in, since it
+  works for both LAN and remote without changing anything else.
+- **Formal server deployment** (a machine that's always on, for more than
+  two people): run it via Docker (below) or as the Windows Service, on a
+  machine reachable by whichever of the two methods above fits, and keep
+  `AUTH_USERNAME`/`AUTH_PASSWORD` set.
+
+Never forward port 8050 directly on your home/office router to the public
+internet — that exposes the app (and, without a login, all positions and
+P&L) to the entire internet. Tailscale (or a VPN) avoids that entirely.
+
 ## Docker
 
 Build and run the application in a container:

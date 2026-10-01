@@ -11,7 +11,8 @@ from core.structure_builder import StructureBuildError
 from core.structure_edit import apply_leg_edits
 from core.structure_view import structure_entry_price
 from core.trade_entry import (
-    TradeError, allocate_leg_entry_prices, enter_trade, exit_structure, recompute_structure_from_trades, structure_pnl,
+    TradeError, allocate_leg_entry_prices, enter_trade, exit_structure, partial_exit_legs,
+    recompute_structure_from_trades, structure_pnl,
 )
 from core.alerts import AlertManager
 from db.repository import Repository
@@ -121,6 +122,90 @@ def test_exit_rejects_partial_and_wrong_status():
         exit_structure(s, None, 10, None)
 
 
+# ---------- core.trade_entry: optional per-leg entry prices ----------
+
+
+def test_leg_prices_blank_reproduces_todays_allocation():
+    """All leg prices left blank (None) behaves exactly like today: the synthetic allocation."""
+    s = spread()
+    with_none = enter_trade(s, 1.25, 5, "buy", None, LIVE, leg_prices=[None, None])
+    without = enter_trade(s, 1.25, 5, "buy", None, LIVE)
+    assert [l.entry_price for l in with_none.legs] == [l.entry_price for l in without.legs]
+
+
+def test_leg_prices_filled_are_used_verbatim():
+    s = spread()
+    result = enter_trade(s, 1.25, 5, "buy", None, LIVE, leg_prices=[76.5, 75.1])
+    assert [l.entry_price for l in result.legs] == [76.5, 75.1]
+    assert [l.average_entry_price for l in result.legs] == [76.5, 75.1]
+    assert result.trade.price == 1.25  # the structure price stays authoritative on the Trade row
+
+
+def test_leg_prices_partial_fill_or_bad_value_rejected():
+    s = spread()
+    with pytest.raises(TradeError, match="Enter a price for every leg"):
+        enter_trade(s, 1.25, 5, "buy", None, LIVE, leg_prices=[76.5, None])
+    with pytest.raises(TradeError, match="Leg 2 price"):
+        enter_trade(s, 1.25, 5, "buy", None, LIVE, leg_prices=[76.5, -1.0])
+
+
+# ---------- core.trade_entry: partial_exit_legs ----------
+
+
+def two_leg_open(lots_a=10.0, lots_b=10.0, entry_a=75.0, entry_b=74.0):
+    legs = [
+        Leg(contract=contract("CLX26", month=11), ratio=1, lots=lots_a, entry_price=entry_a, average_entry_price=entry_a),
+        Leg(contract=contract("CLZ26"), ratio=-1, lots=lots_b, entry_price=entry_b, average_entry_price=entry_b, direction="buy"),
+    ]
+    return Structure(name="Spread", structure_type=StructureType.SPREAD, products=["CL"], legs=legs, status=StructureStatus.OPEN)
+
+
+def test_partial_exit_one_leg_fully_leaves_the_other_open_and_naked():
+    s = two_leg_open()
+    leg_a_id = s.legs[0].leg_id
+    result = partial_exit_legs(s, {leg_a_id: (78.0, 10.0)}, "closing the front leg")
+    assert len(result.trades) == 1 and result.trades[0].event_type == TradeEventType.PARTIAL_EXIT
+    assert result.realized_pnl_by_leg[leg_a_id] == pytest.approx((78.0 - 75.0) * 1 * 10 * 1000)
+    new_a, new_b = result.legs
+    assert new_a.lots == 0 and new_a.is_naked is False  # closed legs are not "naked"
+    assert new_b.lots == 10 and new_b.is_naked is True  # its hedge is gone
+    assert result.status == StructureStatus.PARTIALLY_CLOSED
+
+
+def test_partial_exit_partial_lots_of_one_leg():
+    s = two_leg_open()
+    leg_a_id = s.legs[0].leg_id
+    result = partial_exit_legs(s, {leg_a_id: (78.0, 4.0)}, None)
+    new_a = result.legs[0]
+    assert new_a.lots == pytest.approx(6.0) and new_a.entry_price == 75.0  # entry kept for the remainder
+    assert result.status == StructureStatus.OPEN  # both legs still have lots
+
+
+def test_partial_exit_both_legs_at_different_prices_closes_the_structure():
+    s = two_leg_open()
+    leg_a_id, leg_b_id = s.legs[0].leg_id, s.legs[1].leg_id
+    result = partial_exit_legs(s, {leg_a_id: (78.0, 10.0), leg_b_id: (73.0, 10.0)}, "full close via legs")
+    assert {t.leg_id for t in result.trades} == {leg_a_id, leg_b_id}
+    assert result.status == StructureStatus.CLOSED
+    assert all(leg.lots == 0 for leg in result.legs)
+    assert result.realized_pnl == pytest.approx(
+        (78.0 - 75.0) * 1 * 10 * 1000 + (73.0 - 74.0) * -1 * 10 * 1000
+    )
+
+
+def test_partial_exit_validation():
+    s = two_leg_open()
+    leg_a_id = s.legs[0].leg_id
+    with pytest.raises(TradeError, match="Select at least one leg"):
+        partial_exit_legs(s, {}, None)
+    with pytest.raises(TradeError, match="cannot exit more than its open"):
+        partial_exit_legs(s, {leg_a_id: (78.0, 11.0)}, None)
+    with pytest.raises(TradeError, match="exit price must be"):
+        partial_exit_legs(s, {leg_a_id: (0.0, 5.0)}, None)
+    with pytest.raises(TradeError, match="open structure"):
+        partial_exit_legs(outright(), {leg_a_id: (78.0, 1.0)}, None)
+
+
 # ---------- core.trade_entry: recompute_structure_from_trades (delete-trade support) ----------
 
 
@@ -196,11 +281,21 @@ def test_recompute_lot_mismatch_before_a_surviving_exit_raises():
         recompute_structure_from_trades(s, [entry, exit_trade])
 
 
-def test_recompute_rejects_partial_exit_and_roll_trades():
+def test_recompute_rejects_roll_trades():
     s = outright()
-    for bad_type in (TradeEventType.PARTIAL_EXIT, TradeEventType.ROLL):
-        with pytest.raises(TradeError, match="Cannot recompute past"):
-            recompute_structure_from_trades(s, [_mk_trade(s, bad_type, 10, 70.0)])
+    with pytest.raises(TradeError, match="Cannot recompute past"):
+        recompute_structure_from_trades(s, [_mk_trade(s, TradeEventType.ROLL, 10, 70.0)])
+
+
+def test_recompute_replays_a_surviving_partial_exit():
+    s = outright()
+    entry = _mk_trade(s, TradeEventType.TRADE, 10, 70.0, timestamp=_T1)
+    partial = _mk_trade(s, TradeEventType.PARTIAL_EXIT, 4, 90.0, direction="sell", timestamp=_T2)
+    result = recompute_structure_from_trades(s, [entry, partial])
+    assert result.structure.status == StructureStatus.OPEN  # a single-leg structure has no "other" leg to go naked
+    leg = result.structure.legs[0]
+    assert leg.lots == pytest.approx(6.0)
+    assert result.exit_trade_updates[partial.trade_id][0] == pytest.approx(80000.0)  # (90-70)*4*1000
 
 
 def test_recompute_does_not_need_live_prices_for_a_multi_leg_structure():
@@ -232,6 +327,34 @@ def test_apply_leg_edits_validates():
     assert len(exc.value.errors) == 2
     with pytest.raises(StructureBuildError, match="number of legs"):
         apply_leg_edits(s, ["CLZ26", "CLF27"], [1, -1], lambda symbol: None)
+
+
+def test_apply_leg_edits_corrects_entry_price():
+    s = outright(StructureStatus.OPEN, lots=10, entry=75.0)
+    result = apply_leg_edits(s, ["CLZ26"], [1], lambda symbol: None, entry_prices=[75.35])
+    assert result.legs[0].entry_price == 75.35 and result.legs[0].average_entry_price == 75.35
+    assert "entry price 75 -> 75.35 (manual correction)" in result.audit_note
+
+
+def test_apply_leg_edits_entry_price_blank_or_unchanged_is_a_no_op():
+    s = outright(StructureStatus.OPEN, lots=10, entry=75.0)
+    blank = apply_leg_edits(s, ["CLZ26"], [1], lambda symbol: None, entry_prices=[None])
+    assert blank.legs[0].entry_price == 75.0 and blank.audit_note == "edit saved (no changes)"
+    same = apply_leg_edits(s, ["CLZ26"], [1], lambda symbol: None, entry_prices=[75.0])
+    assert same.audit_note == "edit saved (no changes)"
+
+
+def test_apply_leg_edits_entry_price_ignored_for_shell_leg():
+    """A leg with no position yet has nothing to correct."""
+    s = outright()
+    result = apply_leg_edits(s, ["CLZ26"], [1], lambda symbol: None, entry_prices=[75.0])
+    assert result.legs[0].entry_price is None
+
+
+def test_apply_leg_edits_rejects_bad_entry_price():
+    s = outright(StructureStatus.OPEN, lots=10, entry=75.0)
+    with pytest.raises(StructureBuildError, match="entry price must be"):
+        apply_leg_edits(s, ["CLZ26"], [1], lambda symbol: None, entry_prices=[-1.0])
 
 
 # ---------- layout ----------
@@ -303,6 +426,61 @@ def test_layout_edit_mode_has_inline_inputs():
     assert find(structure_detail_layout(outright(), {}, [], None), "btn-save-edit") is None
 
 
+def test_layout_edit_mode_entry_price_input_disabled_for_shell_leg():
+    traded = structure_detail_layout(outright(StructureStatus.OPEN, 10, 75.0), {}, [], None, edit_mode=True)
+    price_input = find(traded, {"type": "edit-leg-entry-price", "index": 0})
+    assert price_input is not None and price_input.disabled is False and price_input.value == 75.0
+
+    shell = structure_detail_layout(outright(), {}, [], None, edit_mode=True)
+    shell_input = find(shell, {"type": "edit-leg-entry-price", "index": 0})
+    assert shell_input is not None and shell_input.disabled is True
+
+
+def test_layout_leg_prices_section_only_for_multi_leg():
+    single = structure_detail_layout(outright(), {}, [], None)
+    assert find(single, "btn-toggle-leg-prices") is None
+
+    multi = structure_detail_layout(spread(), {"CLX26": {"price": 75.0}, "CLZ26": {"price": 74.0}}, [], None)
+    assert find(multi, "btn-toggle-leg-prices") is not None
+    assert find(multi, {"type": "trade-leg-price", "index": 0}) is not None
+    assert find(multi, {"type": "trade-leg-price", "index": 1}) is not None
+
+
+def test_layout_leg_exit_section_present_and_hidden_when_not_open():
+    s = outright(StructureStatus.OPEN, 10, 75.0)
+    opened = structure_detail_layout(s, {}, [], None)
+    section = find(opened, "leg-exit-section")
+    assert section is not None and section.style != {"display": "none"}
+    assert find(opened, {"type": "exit-leg-selected", "index": s.legs[0].leg_id}) is not None
+
+    shell = structure_detail_layout(outright(), {}, [], None)
+    assert find(shell, "leg-exit-section").style == {"display": "none"}
+
+
+def test_layout_exit_form_hides_the_simple_full_exit_once_legs_are_uneven():
+    s = two_leg_open(lots_a=6.0, lots_b=10.0)
+    text = str(structure_detail_layout(s, {}, [], None))
+    assert "btn-confirm-exit" not in text
+    assert "Exit Specific Legs" in text
+    uniform = structure_detail_layout(two_leg_open(), {}, [], None)
+    assert find(uniform, "btn-confirm-exit") is not None
+
+
+def test_status_badge_partially_closed_is_distinct():
+    s = two_leg_open(lots_a=0.0, lots_b=10.0).model_copy(update={"status": StructureStatus.PARTIALLY_CLOSED})
+    text = str(structure_detail_layout(s, {}, [], None))
+    assert "PARTIALLY CLOSED" in text
+
+
+def test_legs_table_flags_a_naked_leg():
+    s = two_leg_open(lots_a=0.0, lots_b=10.0)
+    legs = list(s.legs)
+    legs[1] = legs[1].model_copy(update={"is_naked": True})
+    s = s.model_copy(update={"legs": legs})
+    text = str(structure_detail_layout(s, {}, [], None))
+    assert "naked" in text
+
+
 # ---------- callbacks ----------
 
 
@@ -357,7 +535,7 @@ def test_pnl_previews(repo):
 
 def test_confirm_trade_entry_opens_shell_and_writes_audit(repo):
     sid = save(repo, outright())
-    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(1, 75.0, 10, "buy", "n", None, None, sid, LIVE_STORE, *GRID)
+    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(1, 75.0, 10, "buy", "n", None, None, None, sid, LIVE_STORE, *GRID)
     saved = repo.get_structure(sid)
     assert saved.status == StructureStatus.OPEN and saved.legs[0].lots == 10 and saved.legs[0].entry_price == 75.0
     assert "trade entered: 10 lots at 75" in saved.notes
@@ -369,17 +547,47 @@ def test_confirm_trade_entry_opens_shell_and_writes_audit(repo):
 
 def test_confirm_trade_entry_validation_error_saves_nothing(repo):
     sid = save(repo, outright())
-    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(1, 75.0, 0, "buy", None, None, None, sid, LIVE_STORE, *GRID)
+    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(1, 75.0, 0, "buy", None, None, None, None, sid, LIVE_STORE, *GRID)
     assert body is dc.no_update and rows is dc.no_update and icon == "danger"
     assert repo.get_trades_for_structure(sid) == [] and repo.get_structure(sid).status == StructureStatus.SHELL
 
 
 def test_multi_leg_trade_entry_persists_consistent_legs(repo):
     sid = save(repo, spread())
-    dc.confirm_trade_entry(1, 1.25, 5, "buy", None, None, None, sid, LIVE_STORE, *GRID)
+    dc.confirm_trade_entry(1, 1.25, 5, "buy", None, None, None, None, sid, LIVE_STORE, *GRID)
     saved = repo.get_structure(sid)
     assert structure_entry_price(saved) == pytest.approx(1.25)
     assert calculate_portfolio_pnl([saved], {}, {"CLX26": 75.0, "CLZ26": 73.75}, [])["total_unrealized"] == pytest.approx(0.0)
+
+
+def test_confirm_trade_entry_with_custom_leg_prices(repo):
+    sid = save(repo, spread())
+    dc.confirm_trade_entry(1, 1.25, 5, "buy", None, None, None, [76.5, 75.25], sid, LIVE_STORE, *GRID)
+    saved = repo.get_structure(sid)
+    assert [leg.entry_price for leg in saved.legs] == [76.5, 75.25]
+    assert (saved.legs[0].average_entry_price, saved.legs[1].average_entry_price) == (76.5, 75.25)
+
+
+def test_confirm_trade_entry_leg_prices_partial_fill_is_rejected(repo):
+    sid = save(repo, spread())
+    body, rows, is_open, message, icon, header = dc.confirm_trade_entry(
+        1, 1.25, 5, "buy", None, None, None, [76.5, None], sid, LIVE_STORE, *GRID
+    )
+    assert icon == "danger" and "Enter a price for every leg" in str(message)
+    assert repo.get_trades_for_structure(sid) == []
+
+
+def test_toggle_leg_prices_and_fill_live_leg_price(repo, monkeypatch):
+    sid = save(repo, spread())
+    assert dc.toggle_leg_prices(1, False) is True
+    with pytest.raises(PreventUpdate):
+        dc.toggle_leg_prices(None, False)
+
+    trigger(monkeypatch, {"type": "btn-use-live-leg-price", "index": 1})
+    assert dc.fill_live_leg_price(1, sid, LIVE_STORE) == 76.0  # legs[1] is CLZ26
+    trigger(monkeypatch, {"type": "btn-use-live-leg-price", "index": 1})
+    with pytest.raises(PreventUpdate):
+        dc.fill_live_leg_price(1, sid, {})  # no live price available
 
 
 def test_exit_confirmation_and_execution(repo):
@@ -406,6 +614,73 @@ def test_execute_full_exit_rejects_partial(repo):
     assert repo.get_structure(sid).status == StructureStatus.OPEN and repo.get_trades_for_structure(sid) == []
 
 
+def test_leg_exit_confirmation_and_execution(repo):
+    sid = save(repo, spread())
+    dc.confirm_trade_entry(1, 1.25, 5, "buy", None, None, None, None, sid, LIVE_STORE, *GRID)
+    leg_a, leg_b = repo.get_structure(sid).legs
+    ids = [{"type": "exit-leg-selected", "index": leg_a.leg_id}, {"type": "exit-leg-selected", "index": leg_b.leg_id}]
+
+    # Only leg A selected: exit its full 5 lots at 76.0.
+    is_open, body, disabled = dc.open_leg_exit_confirmation(1, [["on"], []], [5, 5], [76.0, None], ids, sid)
+    assert is_open is True and disabled is False and "realized" in str(body).lower()
+    assert repo.get_structure(sid).legs[0].lots == 5  # confirmation alone never exits
+
+    body, rows, is_open2, message, icon, header, confirm_open = dc.execute_leg_exit(
+        1, [["on"], []], [5, 5], [76.0, None], ids, "closing front leg", sid, *GRID
+    )
+    saved = repo.get_structure(sid)
+    assert saved.legs[0].lots == 0 and saved.legs[1].lots == 5
+    assert saved.status == StructureStatus.PARTIALLY_CLOSED
+    assert saved.legs[1].is_naked is True
+    trades = repo.get_trades_for_structure(sid)
+    partial = [t for t in trades if t.event_type == TradeEventType.PARTIAL_EXIT]
+    assert len(partial) == 1 and partial[0].leg_id == leg_a.leg_id and partial[0].lots == 5
+    assert confirm_open is False and icon == "success" and "exited" in message.lower()
+
+
+def test_leg_exit_closing_every_remaining_leg_closes_the_structure(repo):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    leg_id = repo.get_structure(sid).legs[0].leg_id
+    ids = [{"type": "exit-leg-selected", "index": leg_id}]
+    dc.execute_leg_exit(1, [["on"]], [10], [77.0], ids, None, sid, *GRID)
+    saved = repo.get_structure(sid)
+    assert saved.status == StructureStatus.CLOSED and saved.close_trigger == "manual" and saved.closed_at
+    assert saved.legs[0].lots == 0
+
+
+def test_leg_exit_validation_rejects_nothing_selected(repo):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    leg_id = repo.get_structure(sid).legs[0].leg_id
+    ids = [{"type": "exit-leg-selected", "index": leg_id}]
+    is_open, body, disabled = dc.open_leg_exit_confirmation(1, [[]], [10], [77.0], ids, sid)
+    assert disabled is True and "Select at least one leg" in str(body)
+
+    body, rows, is_open2, message, icon, header, confirm_open = dc.execute_leg_exit(
+        1, [[]], [10], [77.0], ids, None, sid, *GRID
+    )
+    assert icon == "danger" and confirm_open is False
+    assert repo.get_trades_for_structure(sid) == []
+
+
+def test_cancel_leg_exit():
+    assert dc.cancel_leg_exit(1) is False
+    with pytest.raises(PreventUpdate):
+        dc.cancel_leg_exit(None)
+
+
+def test_toggle_leg_exit_and_fill_live_exit_leg_price(repo, monkeypatch):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    leg_id = repo.get_structure(sid).legs[0].leg_id
+    assert dc.toggle_leg_exit(1, False) is True
+    with pytest.raises(PreventUpdate):
+        dc.toggle_leg_exit(None, False)
+
+    trigger(monkeypatch, {"type": "btn-use-live-exit-leg-price", "index": leg_id})
+    assert dc.fill_live_exit_leg_price(1, sid, LIVE_STORE) == 76.0  # CLZ26
+    with pytest.raises(PreventUpdate):
+        dc.fill_live_exit_leg_price(1, sid, {})
+
+
 def test_edit_flow_without_and_with_trades(repo):
     sid = save(repo, outright())
     confirm_open, body = dc.initiate_edit(1, sid, LIVE_STORE)
@@ -426,11 +701,11 @@ def test_edit_flow_without_and_with_trades(repo):
 
 def test_save_edit_persists_and_audits(repo):
     sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
-    body, is_open, message, icon, header = dc.save_edit(1, ["CLF27"], [1], sid, LIVE_STORE)
+    body, is_open, message, icon, header = dc.save_edit(1, ["CLF27"], [1], None, sid, LIVE_STORE)
     saved = repo.get_structure(sid)
     assert saved.legs[0].contract.symbol == "CLF27" and saved.legs[0].lots == 10
     assert "edited: leg 1 symbol CLZ26 -> CLF27" in saved.notes and icon == "success"
-    body, is_open, message, icon, header = dc.save_edit(1, ["bad"], [1], sid, LIVE_STORE)
+    body, is_open, message, icon, header = dc.save_edit(1, ["bad"], [1], None, sid, LIVE_STORE)
     assert body is dc.no_update and icon == "danger"
 
 
@@ -442,6 +717,18 @@ def test_audit_notes_can_accumulate_beyond_500_chars(repo):
 
 
 # ---------- delete structure / delete trade ----------
+
+
+def trigger(monkeypatch, triggered_id, value=1):
+    """Simulate a pattern-matched-button click by setting dc.callback_context directly."""
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.triggered_id = triggered_id
+    ctx.triggered = [{"prop_id": "x.n_clicks", "value": value}]
+    monkeypatch.setattr(dc, "callback_context", ctx)
 
 
 def trigger_delete_btn(monkeypatch, trade_id, value=1):
@@ -566,9 +853,9 @@ def test_execute_delete_removes_structure_and_closes_both_modals(repo):
 
 def test_execute_delete_removes_trade_and_recomputes_pnl(repo):
     sid = save(repo, outright())
-    dc.confirm_trade_entry(1, 70.0, 10, "buy", None, None, None, sid, LIVE_STORE, *GRID)
+    dc.confirm_trade_entry(1, 70.0, 10, "buy", None, None, None, None, sid, LIVE_STORE, *GRID)
     (trade_to_delete,) = repo.get_trades_for_structure(sid)
-    dc.confirm_trade_entry(1, 80.0, 10, "buy", None, None, None, sid, LIVE_STORE, *GRID)  # ADD@80
+    dc.confirm_trade_entry(1, 80.0, 10, "buy", None, None, None, None, sid, LIVE_STORE, *GRID)  # ADD@80
 
     pending = {"kind": "trade", "id": trade_to_delete.trade_id}
     confirm_open, detail_open, body, rows, cleared, toast_open, message, icon, header = dc.execute_delete(
@@ -647,7 +934,7 @@ def test_stop_and_target_are_stored_and_validated_by_direction():
 
 def test_trade_entry_persists_direction_and_alert_levels(repo):
     sid = save(repo, outright())
-    dc.confirm_trade_entry(1, 0.45, 10, "sell", None, 0.5, 0.37, sid, LIVE_STORE, *GRID)
+    dc.confirm_trade_entry(1, 0.45, 10, "sell", None, 0.5, 0.37, None, sid, LIVE_STORE, *GRID)
     saved = repo.get_structure(sid)
     assert saved.legs[0].direction == "sell"
     (trade,) = repo.get_trades_for_structure(sid)

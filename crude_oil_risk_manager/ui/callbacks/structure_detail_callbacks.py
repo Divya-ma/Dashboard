@@ -12,7 +12,7 @@ body replaced, so their buttons always exist.
 
 import logging
 
-from dash import ALL, Input, Output, State, callback_context, html, no_update
+from dash import ALL, MATCH, Input, Output, State, callback_context, html, no_update
 from dash.exceptions import PreventUpdate
 
 from core.models import StructureStatus
@@ -24,6 +24,7 @@ from core.trade_entry import (
     TradeError,
     enter_trade,
     exit_structure,
+    partial_exit_legs,
     recompute_structure_from_trades,
     structure_open_lots,
     structure_pnl,
@@ -140,6 +141,47 @@ def toggle_add_trade(n_clicks, is_open):
     return not is_open
 
 
+def toggle_leg_prices(n_clicks, is_open):
+    if not n_clicks:
+        raise PreventUpdate
+    return not is_open
+
+
+def fill_live_leg_price(n_clicks, structure_id, live_prices):
+    """One leg's live price into its price box (Use Live button, MATCH-paired by leg index)."""
+    if not n_clicks:
+        raise PreventUpdate
+    index = callback_context.triggered_id["index"]
+    structure = _load(structure_id)
+    if index >= len(structure.legs):
+        raise PreventUpdate
+    price = prices_from_store(live_prices).get(structure.legs[index].contract.symbol)
+    if price is None:
+        raise PreventUpdate
+    return round(price, 4)
+
+
+def toggle_leg_exit(n_clicks, is_open):
+    if not n_clicks:
+        raise PreventUpdate
+    return not is_open
+
+
+def fill_live_exit_leg_price(n_clicks, structure_id, live_prices):
+    """One leg's live price into its exit price box (Use Live button, MATCH-paired by leg_id)."""
+    if not n_clicks:
+        raise PreventUpdate
+    leg_id = callback_context.triggered_id["index"]
+    structure = _load(structure_id)
+    leg = next((leg for leg in structure.legs if leg.leg_id == leg_id), None)
+    if leg is None:
+        raise PreventUpdate
+    price = prices_from_store(live_prices).get(leg.contract.symbol)
+    if price is None:
+        raise PreventUpdate
+    return round(price, 4)
+
+
 # ----------------------------------------------------------------------
 # Previews
 # ----------------------------------------------------------------------
@@ -182,18 +224,20 @@ def preview_exit_pnl(exit_price, lots, structure_id):
 
 
 def confirm_trade_entry(
-    n_clicks, price, lots, direction, notes, stop_loss_price, target_price, structure_id, live_prices,
+    n_clicks, price, lots, direction, notes, stop_loss_price, target_price, leg_prices, structure_id, live_prices,
     status_filter, product_filter, sort_by, portfolio_pnl, grid_live_prices,
 ):
-    """Enter a trade at one structure price; the system derives the per-leg entries."""
+    """Enter a trade at one structure price; the system derives the per-leg entries unless
+    `leg_prices` (every slot filled in) gives real per-leg fills instead."""
     if not n_clicks:
         raise PreventUpdate
     repository = container.repository
     structure = _load(structure_id)
+    leg_prices = [p if p not in (None, "") else None for p in (leg_prices or [])] or None
     try:
         result = enter_trade(
             structure, price, lots, direction, notes, prices_from_store(live_prices),
-            stop_loss_price=stop_loss_price, target_price=target_price,
+            stop_loss_price=stop_loss_price, target_price=target_price, leg_prices=leg_prices,
         )
         # Legs first (with the audit line), then status, then the trade record.
         repository.update_structure_legs(structure_id, result.legs, result.audit_note)
@@ -272,6 +316,84 @@ def execute_full_exit(
     message = f"{structure.name} closed at {exit_price:g}. Realized PnL (net of TC): {format_pnl(net_pnl)}"
     # The portfolio PnL stop is re-checked on the next 5s PnL refresh (shell_callbacks.check_alerts).
     return (False, rows, *_toast(message, header="Structure closed"), False)
+
+
+# ----------------------------------------------------------------------
+# Per-leg partial exit
+# ----------------------------------------------------------------------
+
+
+def _leg_exits_from_inputs(selected, lots_values, price_values, ids) -> dict:
+    """{leg_id: (price, lots)} for every checked row, from the leg-exit form's
+    checklist/lots/price State lists — all positionally aligned via `ids` (the matched
+    component ids, read alongside them from the same pattern-matched row order)."""
+    leg_exits = {}
+    for checked, lots, price, id_dict in zip(selected, lots_values, price_values, ids):
+        if checked:
+            leg_exits[id_dict["index"]] = (price, lots)
+    return leg_exits
+
+
+def open_leg_exit_confirmation(n_clicks, selected, lots_values, price_values, ids, structure_id):
+    """Always shown before a per-leg exit runs; also validates and previews realized PnL per leg."""
+    if not n_clicks:
+        raise PreventUpdate
+    structure = _load(structure_id)
+    leg_exits = _leg_exits_from_inputs(selected, lots_values, price_values, ids)
+    try:
+        result = partial_exit_legs(structure, leg_exits, None)
+    except TradeError as exc:
+        body = [html.Div(f"⛔ {message}", style={"color": COLORS["ACCENT_RED"]}) for message in exc.errors]
+        return True, body, True
+
+    by_id = {leg.leg_id: leg for leg in structure.legs}
+    body = [html.P("Are you sure you want to exit these legs?")]
+    for trade in result.trades:
+        symbol = by_id[trade.leg_id].contract.symbol
+        body.append(html.P([f"{symbol}: {trade.lots:g} lots at {trade.price:g} — realized ", pnl_span(trade.realized_pnl, fontWeight="bold")]))
+    total_tc = sum(trade.transaction_cost for trade in result.trades)
+    if total_tc:
+        body.append(html.P(f"Total transaction cost: -${total_tc:,.0f}", style={"color": COLORS["ACCENT_YELLOW"]}))
+    body.append(html.P(["Total realized PnL (before transaction costs): ", pnl_span(result.realized_pnl, fontWeight="bold")]))
+    body.append(html.P("This cannot be undone.", style={"color": COLORS["ACCENT_YELLOW"]}))
+    return True, body, False
+
+
+def cancel_leg_exit(n_clicks):
+    if not n_clicks:
+        raise PreventUpdate
+    return False
+
+
+def execute_leg_exit(
+    n_clicks, selected, lots_values, price_values, ids, notes, structure_id,
+    status_filter, product_filter, sort_by, portfolio_pnl, live_prices,
+):
+    """Persist a per-leg exit: one Trade row per leg acted on; status becomes CLOSED only
+    once every leg is at zero, PARTIALLY_CLOSED if some but not all are."""
+    if not n_clicks:
+        raise PreventUpdate
+    repository = container.repository
+    structure = _load(structure_id)
+    leg_exits = _leg_exits_from_inputs(selected, lots_values, price_values, ids)
+    try:
+        result = partial_exit_legs(structure, leg_exits, notes)
+        repository.update_structure_legs(structure_id, result.legs, result.audit_note)
+        for trade in result.trades:
+            repository.save_trade(trade)
+        if structure.status != result.status:
+            close_trigger = "manual" if result.status == StructureStatus.CLOSED else None
+            repository.update_structure_status(structure_id, result.status, close_trigger=close_trigger)
+    except TradeError as exc:
+        return (no_update, no_update, *_toast(exc.errors, ok=False, header="Exit not executed"), False)
+    except Exception:  # noqa: BLE001
+        logger.exception("Leg exit failed for %s", structure_id)
+        return (no_update, no_update, *_toast("Could not save the exit; see the server log.", ok=False), False)
+
+    rows = _grid_rows(status_filter, product_filter, sort_by, portfolio_pnl, live_prices)
+    legs_desc = ", ".join(f"{t.lots:g} lots at {t.price:g}" for t in result.trades)
+    message = f"{structure.name}: exited {legs_desc}. Realized PnL (gross): {format_pnl(result.realized_pnl)}"
+    return (_render_body(structure_id, live_prices), rows, *_toast(message, header="Legs exited"), False)
 
 
 # ----------------------------------------------------------------------
@@ -372,14 +494,15 @@ def cancel_edit(n_clicks, structure_id, live_prices):
     return _render_body(structure_id, live_prices)
 
 
-def save_edit(n_clicks, symbols, ratios, structure_id, live_prices):
-    """Save inline leg edits with an audit line describing what changed."""
+def save_edit(n_clicks, symbols, ratios, entry_prices, structure_id, live_prices):
+    """Save inline leg edits (symbol, ratio, and a traded leg's entry price correction)
+    with an audit line describing what changed."""
     if not n_clicks:
         raise PreventUpdate
     repository = container.repository
     structure = _load(structure_id)
     try:
-        result = apply_leg_edits(structure, symbols, ratios, repository.get_contract)
+        result = apply_leg_edits(structure, symbols, ratios, repository.get_contract, entry_prices)
         for contract in result.new_contracts:
             repository.save_contract(contract)
         repository.update_structure_legs(structure_id, result.legs, result.audit_note)
@@ -560,6 +683,36 @@ def register_structure_detail_callbacks(app) -> None:
     )(toggle_add_trade)
 
     app.callback(
+        Output("leg-prices-collapse", "is_open"),
+        Input("btn-toggle-leg-prices", "n_clicks"),
+        State("leg-prices-collapse", "is_open"),
+        prevent_initial_call=True,
+    )(toggle_leg_prices)
+
+    app.callback(
+        Output({"type": "trade-leg-price", "index": MATCH}, "value"),
+        Input({"type": "btn-use-live-leg-price", "index": MATCH}, "n_clicks"),
+        State("store-selected-structure-id", "data"),
+        State("store-live-prices", "data"),
+        prevent_initial_call=True,
+    )(fill_live_leg_price)
+
+    app.callback(
+        Output("leg-exit-collapse", "is_open"),
+        Input("btn-toggle-leg-exit", "n_clicks"),
+        State("leg-exit-collapse", "is_open"),
+        prevent_initial_call=True,
+    )(toggle_leg_exit)
+
+    app.callback(
+        Output({"type": "exit-leg-price", "index": MATCH}, "value"),
+        Input({"type": "btn-use-live-exit-leg-price", "index": MATCH}, "n_clicks"),
+        State("store-selected-structure-id", "data"),
+        State("store-live-prices", "data"),
+        prevent_initial_call=True,
+    )(fill_live_exit_leg_price)
+
+    app.callback(
         Output("trade-pnl-preview", "children"),
         Input("trade-entry-price", "value"),
         Input("trade-entry-lots", "value"),
@@ -586,6 +739,7 @@ def register_structure_detail_callbacks(app) -> None:
         State("trade-entry-notes", "value"),
         State("trade-stop-loss-price", "value"),
         State("trade-target-price", "value"),
+        State({"type": "trade-leg-price", "index": ALL}, "value"),
         State("store-selected-structure-id", "data"),
         State("store-live-prices", "data"),
         *_GRID_STATES[:4],
@@ -623,6 +777,41 @@ def register_structure_detail_callbacks(app) -> None:
         *_GRID_STATES,
         prevent_initial_call=True,
     )(execute_full_exit)
+
+    app.callback(
+        Output("modal-confirm-leg-exit", "is_open"),
+        Output("modal-confirm-leg-exit-body", "children"),
+        Output("btn-confirm-leg-exit-final", "disabled"),
+        Input("btn-open-leg-exit", "n_clicks"),
+        State({"type": "exit-leg-selected", "index": ALL}, "value"),
+        State({"type": "exit-leg-lots", "index": ALL}, "value"),
+        State({"type": "exit-leg-price", "index": ALL}, "value"),
+        State({"type": "exit-leg-selected", "index": ALL}, "id"),
+        State("store-selected-structure-id", "data"),
+        prevent_initial_call=True,
+    )(open_leg_exit_confirmation)
+
+    app.callback(
+        Output("modal-confirm-leg-exit", "is_open", allow_duplicate=True),
+        Input("btn-cancel-leg-exit", "n_clicks"),
+        prevent_initial_call=True,
+    )(cancel_leg_exit)
+
+    app.callback(
+        _body_dup(),
+        Output("structures-active-grid", "rowData", allow_duplicate=True),
+        *_TOAST_OUTPUTS,
+        Output("modal-confirm-leg-exit", "is_open", allow_duplicate=True),
+        Input("btn-confirm-leg-exit-final", "n_clicks"),
+        State({"type": "exit-leg-selected", "index": ALL}, "value"),
+        State({"type": "exit-leg-lots", "index": ALL}, "value"),
+        State({"type": "exit-leg-price", "index": ALL}, "value"),
+        State({"type": "exit-leg-selected", "index": ALL}, "id"),
+        State("leg-exit-notes", "value"),
+        State("store-selected-structure-id", "data"),
+        *_GRID_STATES,
+        prevent_initial_call=True,
+    )(execute_leg_exit)
 
     app.callback(
         Output("reuse-collapse", "is_open"),

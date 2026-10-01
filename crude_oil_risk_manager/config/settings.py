@@ -19,6 +19,15 @@ class Settings(BaseSettings):
     APP_DEBUG: bool = False
     APP_TITLE: str = "Crude Oil Risk Manager"
 
+    # Dashboard access control (HTTP Basic Auth). Empty = no login — fine for
+    # localhost-only use, but set both before this is reachable from another PC.
+    AUTH_USERNAME: str = ""
+    AUTH_PASSWORD: str = ""
+    # Optional: a fixed Flask session secret (any long random string). If left
+    # empty, a new one is generated on every restart, which simply logs everyone
+    # out on restart — harmless, but set one if you want sessions to survive it.
+    AUTH_SECRET_KEY: str = ""
+
     # Database
     DB_PATH: str = "db/crude_oil_risk.db"
 
