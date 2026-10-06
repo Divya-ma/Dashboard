@@ -172,8 +172,8 @@ def test_check_connection_uses_given_token_and_leaves_saved_token_alone(tmp_db_p
     adapter, repo = _vendor(tmp_db_path)
     repo.set_setting("api_access_token", "saved-token")
     get = mocker.patch(
-        "adapters.live.vendor.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: [_candle()]),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: [_candle()]),
     )
 
     assert adapter.check_connection("typed-token", "CLZ26") == 1
@@ -187,14 +187,14 @@ def test_check_connection_raises_authentication_error_on_401(tmp_db_path, mocker
     from adapters.base import AuthenticationError
 
     adapter, _ = _vendor(tmp_db_path)
-    mocker.patch("adapters.live.vendor.requests.get", return_value=mocker.Mock(status_code=401))
+    mocker.patch("adapters.qh_api.client.requests.Session.request", return_value=mocker.Mock(headers={}, status_code=401))
     with pytest.raises(AuthenticationError):
         adapter.check_connection("bad-token")
 
 
 def test_check_connection_returns_zero_when_no_candles(tmp_db_path, mocker):
     adapter, _ = _vendor(tmp_db_path)
-    mocker.patch("adapters.live.vendor.requests.get", return_value=mocker.Mock(status_code=200, json=lambda: []))
+    mocker.patch("adapters.qh_api.client.requests.Session.request", return_value=mocker.Mock(headers={}, status_code=200, json=lambda: []))
     assert adapter.check_connection("good-token") == 0
 
 
@@ -202,8 +202,8 @@ def test_set_staleness_threshold_changes_what_is_flagged_stale(tmp_db_path, mock
     adapter, repo = _vendor(tmp_db_path, staleness=10.0)
     repo.set_setting("api_access_token", "tok")
     mocker.patch(
-        "adapters.live.vendor.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: [_candle(age_seconds=45)]),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: [_candle(age_seconds=45)]),
     )
     assert adapter.get_live_prices(["CLZ26"])["CLZ26"].is_stale is True
 

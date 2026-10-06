@@ -5,8 +5,9 @@ the adapter used for HISTORICAL data, untouched) with a faster, lighter feed:
 /fairvalue/ returns one current price per contract and is polled every 10 seconds
 instead of every 60 (see LIVE_POLL_INTERVAL_MS in ui/app.py). /fairvalue/ carries its
 own independent 7 req/min rate limit, separate from /ohlc/'s, so the two endpoints
-never contend for the same budget; at one request per 10s poll (6 req/min) this
-adapter stays under that limit on its own, without needing a token-bucket limiter.
+never contend for the same budget. The request goes through the shared QHApi client
+(adapters/qh_api), which enforces the minute/hour/day limits and the retry rules; at one
+request per 10s poll (6 req/min) the poll stays under the per-minute limit by itself.
 
 Contract selection (the "products" query param) is NOT simply the caller's `symbols`
 argument. Per spec the live feed must cover only:
@@ -37,26 +38,16 @@ writes `WATCHLIST_SETTING_KEY`, watchlist symbols are simply absent from the liv
 import logging
 from datetime import datetime, timezone
 
-import requests
-
-from adapters.base import (
-    APIConnectionError,
-    APIServerError,
-    APITimeoutError,
-    AuthenticationError,
-    LiveDataAdapter,
-    LivePrice,
-    RateLimitError,
-    SymbolTranslator,
-)
+from adapters.base import LiveDataAdapter, LivePrice, SymbolTranslator
+from adapters.qh_api import QHApi, make_api
 from core.models import StructureStatus
 from db.repository import Repository
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://qh-api.corp.hertshtengroup.com/apis"
-_FAIRVALUE_ENDPOINT = f"{_BASE_URL}/fairvalue/"
-_REQUEST_TIMEOUT_SECONDS = 10
+# The poll repeats every 10s, so a failed request is retried at most once rather than for
+# the client's full backoff (which would stall the callback past the next poll).
+_POLL_MAX_ATTEMPTS = 2
 
 # Settings-table key the correlation watchlist would need to be persisted under for its
 # symbols to be picked up here — see the KNOWN GAP note in the module docstring.
@@ -70,8 +61,10 @@ _LIVE_FEED_STATUSES = [StructureStatus.SHELL, StructureStatus.OPEN, StructureSta
 class FairValueLiveAdapter(LiveDataAdapter):
     """Live price adapter backed by the qh-api /fairvalue/ endpoint."""
 
-    def __init__(self, repository: Repository, staleness_threshold_seconds: float):
+    def __init__(self, repository: Repository, staleness_threshold_seconds: float, api: QHApi | None = None):
+        """`api` should be the app's shared QHApi so /fairvalue/ has one rate-limit budget."""
         self._repository = repository
+        self._api = api or make_api(lambda: repository.get_setting("api_access_token", ""))
         self._staleness_threshold_seconds = staleness_threshold_seconds
         # Product set requested on the previous poll; None until the first poll so that
         # poll always logs once (including the "nothing to poll" case) even if the target
@@ -175,27 +168,7 @@ class FairValueLiveAdapter(LiveDataAdapter):
     def _fetch(
         self, api_codes: list[str], internal_by_api: dict[str, str], token: str
     ) -> dict[str, LivePrice]:
-        params = {"products": ",".join(api_codes)}
-        headers = {"Authorization": f"Bearer {token}", "accept": "application/json"}
-
-        try:
-            response = requests.get(
-                _FAIRVALUE_ENDPOINT, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS
-            )
-        except requests.exceptions.Timeout as exc:
-            raise APITimeoutError("Request to the fair value API timed out.") from exc
-        except requests.exceptions.ConnectionError as exc:
-            raise APIConnectionError("Could not connect to the fair value API.") from exc
-
-        if response.status_code == 401:
-            raise AuthenticationError("Invalid or expired access token.")
-        if response.status_code == 429:
-            raise RateLimitError("API rate limit exceeded.")
-        if 500 <= response.status_code < 600:
-            raise APIServerError(f"Fair value API returned server error {response.status_code}.")
-        response.raise_for_status()
-
-        payload = response.json()
+        payload = self._api.fairvalue(api_codes, token=token, max_attempts=_POLL_MAX_ATTEMPTS)
         rows = payload.get("data", []) if isinstance(payload, dict) else payload
         now = datetime.now(timezone.utc)
         results: dict[str, LivePrice] = {}

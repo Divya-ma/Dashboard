@@ -23,6 +23,7 @@ from dash import dcc, html  # noqa: E402
 
 from adapters.historical.vendor import VendorHistoricalAdapter  # noqa: E402
 from adapters.live.fairvalue import FairValueLiveAdapter  # noqa: E402
+from adapters.qh_api import make_api  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
 from core.data_loader import DataLoader  # noqa: E402
@@ -80,15 +81,14 @@ def _is_token_configured() -> bool:
 
 TOKEN_CONFIGURED = _is_token_configured()
 
+# ONE shared QH API client: every endpoint's rate-limit budget (minute/hour/day) is enforced
+# in one place, whichever adapter or callback makes the call.
+qh_api = make_api(lambda: repository.get_setting(KEY_API_TOKEN, ""))
+
 live_adapter = FairValueLiveAdapter(
-    repository, repository.get_setting(KEY_STALENESS, settings.LIVE_STALENESS_THRESHOLD_SECONDS)
+    repository, repository.get_setting(KEY_STALENESS, settings.LIVE_STALENESS_THRESHOLD_SECONDS), api=qh_api
 )
-# One of the API's 7 calls/minute is reserved for the live price poll.
-historical_adapter = VendorHistoricalAdapter(
-    repository,
-    _resolve_path(settings.HISTORICAL_DATA_DIR),
-    calls_per_minute=max(1, settings.HISTORICAL_API_CALLS_PER_MINUTE - 1),
-)
+historical_adapter = VendorHistoricalAdapter(repository, _resolve_path(settings.HISTORICAL_DATA_DIR), api=qh_api)
 alert_manager = AlertManager(
     repository,
     fallback_webhook_url=settings.TEAMS_WEBHOOK_URL if settings.TEAMS_ALERTS_ENABLED else "",
@@ -100,6 +100,7 @@ container.historical_adapter = historical_adapter
 container.alert_manager = alert_manager
 container.data_loader = DataLoader(_resolve_path(settings.HISTORICAL_DATA_DIR), historical_adapter)
 container.excel_store = ExcelCorrelationStore(_resolve_path(settings.CORRELATION_UPLOADS_DIR))
+container.qh_api = qh_api
 
 
 def _run_morning_sync() -> None:

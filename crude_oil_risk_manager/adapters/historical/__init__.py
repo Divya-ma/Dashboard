@@ -1,5 +1,5 @@
-"""Historical market data adapter implementations."""
+"""Historical market data adapters."""
 
-from adapters.historical.vendor import RateLimitedQueue, VendorHistoricalAdapter
+from adapters.historical.vendor import VendorHistoricalAdapter
 
-__all__ = ["RateLimitedQueue", "VendorHistoricalAdapter"]
+__all__ = ["VendorHistoricalAdapter"]

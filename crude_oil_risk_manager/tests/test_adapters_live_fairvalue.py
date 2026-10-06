@@ -56,7 +56,7 @@ def _fairvalue_row(contract="CLZ26", price=75.5, age_seconds=0.0):
 
 def test_no_open_structures_or_watchlist_means_no_request(adapter, repo, mocker):
     repo.set_setting("api_access_token", "tok")
-    get = mocker.patch("adapters.live.fairvalue.requests.get")
+    get = mocker.patch("adapters.qh_api.client.requests.Session.request")
     assert adapter.get_live_prices(["ignored"]) == {}
     get.assert_not_called()
 
@@ -76,8 +76,8 @@ def test_requests_leg_symbols_of_open_and_shell_structures(adapter, repo, mocker
         status=StructureStatus.CLOSED,
     )
     get = mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": [_fairvalue_row(), _fairvalue_row(contract="COZ26")]}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": [_fairvalue_row(), _fairvalue_row(contract="COZ26")]}),
     )
     prices = adapter.get_live_prices([])
     requested = set(get.call_args.kwargs["params"]["products"].split(","))
@@ -95,8 +95,8 @@ def test_shell_structure_partially_traded_legs_are_all_included_anyway(adapter, 
         status=StructureStatus.SHELL,
     )
     get = mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": []}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
     )
     adapter.get_live_prices([])
     requested = set(get.call_args.kwargs["params"]["products"].split(","))
@@ -107,8 +107,8 @@ def test_partially_closed_structures_are_treated_as_open(adapter, repo, mocker):
     repo.set_setting("api_access_token", "tok")
     save_open_structure(repo, "Legacy", [make_leg()], status=StructureStatus.PARTIALLY_CLOSED)
     get = mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": []}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
     )
     adapter.get_live_prices([])
     assert get.call_args.kwargs["params"]["products"] == "CLZ26"
@@ -119,8 +119,8 @@ def test_watchlist_symbols_are_included_and_deduplicated(adapter, repo, mocker):
     save_open_structure(repo, "Open CL", [make_leg()])
     repo.set_setting(WATCHLIST_SETTING_KEY, ["CLZ26", "BRNZ26"])  # CLZ26 overlaps the open leg
     get = mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": []}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
     )
     adapter.get_live_prices([])
     requested = set(get.call_args.kwargs["params"]["products"].split(","))
@@ -132,8 +132,8 @@ def test_ignores_the_symbols_argument_entirely(adapter, repo, mocker):
     repo.set_setting("api_access_token", "tok")
     save_open_structure(repo, "Open CL", [make_leg()])
     get = mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": []}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
     )
     adapter.get_live_prices(["XYZ99", "totally-unrelated"])
     assert get.call_args.kwargs["params"]["products"] == "CLZ26"
@@ -153,8 +153,8 @@ def test_untranslatable_watchlist_symbol_is_skipped_not_fatal(adapter, repo, moc
     repo.set_setting("api_access_token", "tok")
     repo.set_setting(WATCHLIST_SETTING_KEY, ["CLZ26", "NOTAPRODUCT99"])
     get = mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": []}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
     )
     adapter.get_live_prices([])
     assert get.call_args.kwargs["params"]["products"] == "CLZ26"
@@ -167,8 +167,8 @@ def test_get_live_prices_parses_response_and_translates_symbols(adapter, repo, m
     repo.set_setting("api_access_token", "tok")
     save_open_structure(repo, "Open BRN", [make_leg(contract=make_contract(product="BRN", symbol="BRNZ26"))])
     mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": [_fairvalue_row(contract="COZ26", price=42.5)]}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": [_fairvalue_row(contract="COZ26", price=42.5)]}),
     )
     prices = adapter.get_live_prices([])
     assert prices["BRNZ26"].symbol == "BRNZ26"
@@ -181,12 +181,12 @@ def test_sends_bearer_token_and_products_param(adapter, repo, mocker):
     repo.set_setting("api_access_token", "secret-token")
     save_open_structure(repo, "Open CL", [make_leg()])
     get = mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": []}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
     )
     adapter.get_live_prices([])
     assert get.call_args.kwargs["headers"]["Authorization"] == "Bearer secret-token"
-    assert get.call_args.args[0] == "https://qh-api.corp.hertshtengroup.com/apis/fairvalue/"
+    assert get.call_args.args[1] == "https://qh-api.corp.hertshtengroup.com/apis/fairvalue/"
 
 
 def test_no_token_raises_runtime_error(adapter, repo):
@@ -199,8 +199,8 @@ def test_response_product_not_requested_is_ignored(adapter, repo, mocker):
     repo.set_setting("api_access_token", "tok")
     save_open_structure(repo, "Open CL", [make_leg()])
     mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": [_fairvalue_row(contract="XXXX99")]}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": [_fairvalue_row(contract="XXXX99")]}),
     )
     assert adapter.get_live_prices([]) == {}
 
@@ -209,8 +209,8 @@ def test_staleness_flag(adapter, repo, mocker):
     repo.set_setting("api_access_token", "tok")
     save_open_structure(repo, "Open CL", [make_leg()])
     mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": [_fairvalue_row(age_seconds=45)]}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": [_fairvalue_row(age_seconds=45)]}),
     )
     assert adapter.get_live_prices([])["CLZ26"].is_stale is True
 
@@ -224,7 +224,7 @@ def test_staleness_flag(adapter, repo, mocker):
 def test_401_raises_authentication_error(adapter, repo, mocker):
     repo.set_setting("api_access_token", "tok")
     save_open_structure(repo, "Open CL", [make_leg()])
-    mocker.patch("adapters.live.fairvalue.requests.get", return_value=mocker.Mock(status_code=401))
+    mocker.patch("adapters.qh_api.client.requests.Session.request", return_value=mocker.Mock(headers={}, status_code=401))
     with pytest.raises(AuthenticationError):
         adapter.get_live_prices([])
 
@@ -232,7 +232,7 @@ def test_401_raises_authentication_error(adapter, repo, mocker):
 def test_429_raises_rate_limit_error(adapter, repo, mocker):
     repo.set_setting("api_access_token", "tok")
     save_open_structure(repo, "Open CL", [make_leg()])
-    mocker.patch("adapters.live.fairvalue.requests.get", return_value=mocker.Mock(status_code=429))
+    mocker.patch("adapters.qh_api.client.requests.Session.request", return_value=mocker.Mock(status_code=429, headers={"Retry-After": "300"}))
     with pytest.raises(RateLimitError):
         adapter.get_live_prices([])
 
@@ -243,8 +243,8 @@ def test_429_raises_rate_limit_error(adapter, repo, mocker):
 def test_check_connection_uses_given_token_and_leaves_saved_token_alone(adapter, repo, mocker):
     repo.set_setting("api_access_token", "saved-token")
     get = mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": [_fairvalue_row()]}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": [_fairvalue_row()]}),
     )
     assert adapter.check_connection("typed-token", "CLZ26") == 1
     assert get.call_args.kwargs["headers"]["Authorization"] == "Bearer typed-token"
@@ -254,7 +254,7 @@ def test_check_connection_uses_given_token_and_leaves_saved_token_alone(adapter,
 
 def test_check_connection_returns_zero_when_no_data(adapter, repo, mocker):
     mocker.patch(
-        "adapters.live.fairvalue.requests.get",
-        return_value=mocker.Mock(status_code=200, json=lambda: {"data": []}),
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
     )
     assert adapter.check_connection("good-token") == 0

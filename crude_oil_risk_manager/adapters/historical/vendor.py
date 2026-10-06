@@ -3,32 +3,23 @@
 import logging
 import math
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
-import requests
 
 from adapters.base import (
     API_CODE_TO_PRODUCT,
-    APIConnectionError,
     APIError,
-    APIServerError,
-    APITimeoutError,
-    AuthenticationError,
     HistoricalDataAdapter,
-    RateLimitError,
     SymbolTranslator,
 )
+from adapters.qh_api import QHApi, make_api
 from core.models.structure import Structure
 from db.repository import Repository
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://qh-api.corp.hertshtengroup.com/apis"
-_OHLC_ENDPOINT = f"{_BASE_URL}/ohlc/"
-_REQUEST_TIMEOUT_SECONDS = 10
 _MAX_INSTRUMENTS_PER_REQUEST = 50
 _MAX_ROWS_PER_REQUEST = 10_000
 
@@ -39,53 +30,16 @@ _SYNC_LOG_COLUMNS = ["symbol", "last_sync_utc", "row_count", "status", "error_ms
 _FULL_BACKFILL_DAYS = 365 * 3
 
 
-class RateLimitedQueue:
-    """Token-bucket rate limiter ensuring API calls never exceed calls_per_minute."""
-
-    def __init__(self, calls_per_minute: int, refill_period_seconds: float = 60.0):
-        self._calls_per_minute = calls_per_minute
-        self._refill_period_seconds = refill_period_seconds
-        self._tokens = calls_per_minute
-        self._last_refill = time.monotonic()
-        self._lock = threading.Lock()
-
-    def _refill_locked(self) -> None:
-        now = time.monotonic()
-        if now - self._last_refill >= self._refill_period_seconds:
-            self._tokens = self._calls_per_minute
-            self._last_refill = now
-
-    def acquire(self) -> None:
-        """Block until a token is available, consuming one."""
-        while True:
-            with self._lock:
-                self._refill_locked()
-                if self._tokens > 0:
-                    self._tokens -= 1
-                    return
-                wait_time = self._refill_period_seconds - (time.monotonic() - self._last_refill)
-            wait_time = max(wait_time, 0.0)
-            logger.debug("Rate limiter: no tokens available, waiting %.2fs", wait_time)
-            if wait_time > 1:
-                logger.info("Rate limiter: waiting %.1fs for token refill", wait_time)
-            time.sleep(min(max(wait_time, 0.01), self._refill_period_seconds))
-
-    def remaining_tokens(self) -> int:
-        """Return the number of tokens currently available."""
-        with self._lock:
-            self._refill_locked()
-            return self._tokens
-
-
 class VendorHistoricalAdapter(HistoricalDataAdapter):
     """Historical OHLC adapter backed by a local Parquet cache with API fallback."""
 
-    def __init__(self, repository: Repository, data_dir: str, calls_per_minute: int = 6):
+    def __init__(self, repository: Repository, data_dir: str, api: QHApi | None = None):
+        """`api` should be the app's shared QHApi: it enforces /ohlc/'s rate limits for every caller."""
         self._repository = repository
+        self._api = api or make_api(lambda: repository.get_setting("api_access_token", ""))
         self._data_dir = Path(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         (self._data_dir / "_metadata").mkdir(parents=True, exist_ok=True)
-        self._rate_limiter = RateLimitedQueue(calls_per_minute)
 
     # ------------------------------------------------------------------
     # Local cache methods
@@ -190,12 +144,11 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         result: dict[str, pd.DataFrame] = {}
         for i in range(0, len(api_symbols), _MAX_INSTRUMENTS_PER_REQUEST):
             chunk = api_symbols[i : i + _MAX_INSTRUMENTS_PER_REQUEST]
-            self._rate_limiter.acquire()
             result.update(self._fetch_chunk(chunk, interval, token, start, end, count))
         return result
 
-    @staticmethod
     def _fetch_chunk(
+        self,
         api_symbols: list[str],
         interval: str,
         token: str,
@@ -203,36 +156,14 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         end: datetime | None,
         count: int | None,
     ) -> dict[str, pd.DataFrame]:
-        params: dict[str, str | int] = {
-            "instruments": ",".join(api_symbols),
-            "interval": interval,
-        }
-        if start is not None:
-            params["start"] = int(start.timestamp())
-        if end is not None:
-            params["end"] = int(end.timestamp())
-        if count is not None:
-            params["count"] = count
-        headers = {"Authorization": f"Bearer {token}", "accept": "application/json"}
-
-        try:
-            response = requests.get(
-                _OHLC_ENDPOINT, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS
-            )
-        except requests.exceptions.Timeout as exc:
-            raise APITimeoutError("Request to the historical price API timed out.") from exc
-        except requests.exceptions.ConnectionError as exc:
-            raise APIConnectionError("Could not connect to the historical price API.") from exc
-
-        if response.status_code == 401:
-            raise AuthenticationError("Invalid or expired access token.")
-        if response.status_code == 429:
-            raise RateLimitError("API rate limit exceeded.")
-        if 500 <= response.status_code < 600:
-            raise APIServerError(f"Historical API returned server error {response.status_code}.")
-        response.raise_for_status()
-
-        candles = response.json()
+        candles = self._api.ohlc(
+            interval,
+            instruments=api_symbols,
+            start=int(start.timestamp()) if start is not None else None,
+            end=int(end.timestamp()) if end is not None else None,
+            count=count,
+            token=token,
+        )
         by_api_symbol: dict[str, list[dict]] = {}
         for candle in candles:
             by_api_symbol.setdefault(candle["product"], []).append(candle)

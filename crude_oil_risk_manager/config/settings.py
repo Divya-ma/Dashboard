@@ -47,7 +47,6 @@ class Settings(BaseSettings):
     # Historical data adapter
     HISTORICAL_API_BASE_URL: str = ""
     HISTORICAL_API_TOKEN: str = ""
-    HISTORICAL_API_CALLS_PER_MINUTE: int = 7
 
     # Alerts - in-app
     ALERT_PORTFOLIO_PNL_STOP: float = -50000.0

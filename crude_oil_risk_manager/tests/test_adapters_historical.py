@@ -1,5 +1,5 @@
 """Tests for adapters.mock.mock_historical.MockHistoricalAdapter and
-adapters.historical.vendor.VendorHistoricalAdapter / RateLimitedQueue.
+adapters.historical.vendor.VendorHistoricalAdapter.
 """
 
 import time
@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from adapters.historical.vendor import RateLimitedQueue, VendorHistoricalAdapter
+from adapters.historical.vendor import VendorHistoricalAdapter
 from adapters.mock.mock_historical import MockHistoricalAdapter
 from db.repository import Repository
 
@@ -55,7 +55,7 @@ def repo(tmp_db_path):
 
 @pytest.fixture
 def vendor_adapter(repo, tmp_path):
-    return VendorHistoricalAdapter(repo, data_dir=str(tmp_path / "historical"), calls_per_minute=6)
+    return VendorHistoricalAdapter(repo, data_dir=str(tmp_path / "historical"))
 
 
 def make_ohlc_df(symbol: str, dates: list[datetime]) -> pd.DataFrame:
@@ -131,29 +131,6 @@ def test_get_ohlc_calls_api_when_cache_missing(vendor_adapter, mocker):
     fetch_mock.assert_called_once()
     assert len(result) == 1
     assert result.iloc[0]["symbol"] == "CLZ26"
-
-
-# ---------- RateLimitedQueue ----------
-
-
-def test_rate_limited_queue_blocks_until_refill():
-    queue = RateLimitedQueue(calls_per_minute=2, refill_period_seconds=0.3)
-    queue.acquire()
-    queue.acquire()
-    assert queue.remaining_tokens() == 0
-
-    start = time.monotonic()
-    queue.acquire()
-    elapsed = time.monotonic() - start
-
-    assert elapsed >= 0.25
-
-
-def test_rate_limited_queue_remaining_tokens_decrements():
-    queue = RateLimitedQueue(calls_per_minute=3, refill_period_seconds=60.0)
-    assert queue.remaining_tokens() == 3
-    queue.acquire()
-    assert queue.remaining_tokens() == 2
 
 
 # ---------- run_morning_sync ----------
@@ -392,3 +369,56 @@ def test_local_data_summary_counts_symbol_files_but_not_the_sync_log(vendor_adap
     summary = vendor_adapter.get_local_data_summary()  # sync_log.parquet exists now but must not count
     assert summary["symbol_count"] == 2
     assert summary["total_bytes"] > 0
+
+
+# ---------- API transport (goes through the shared QH API client) ----------
+
+
+def _candle(product="CLZ26", ts_ms=1_700_000_000_000, close=75.0):
+    return {"product": product, "time": ts_ms, "open": 74.0, "high": 76.0, "low": 73.0, "close": close, "volume": 10}
+
+
+def test_fetch_from_api_calls_ohlc_with_translated_params_and_parses_candles(vendor_adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    request = mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: [_candle("COZ26")]),
+    )
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    result = vendor_adapter._fetch_from_api(["COZ26"], "1D", start=start, count=5)
+
+    assert request.call_args.args[1].endswith("/apis/ohlc/")
+    assert request.call_args.kwargs["params"] == {
+        "instruments": "COZ26", "interval": "1D", "start": str(int(start.timestamp())), "count": "5",
+    }
+    assert request.call_args.kwargs["headers"]["Authorization"] == "Bearer tok"
+    assert list(result["COZ26"].columns) == _OHLC_COLUMNS
+    assert result["COZ26"].iloc[0]["symbol"] == "BRNZ26"  # API code translated back to internal
+
+
+def test_fetch_from_api_batches_at_50_instruments_per_request(vendor_adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    request = mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: []),
+    )
+    symbols = [f"CLZ{26}"] + [f"CL{m}{y:02d}" for m in "FGHJKMNQUVXZ" for y in (26, 27, 28, 29, 30)]
+    assert len(symbols) > 50
+    vendor_adapter._fetch_from_api(symbols, "1D", count=1)
+    assert request.call_count == 2
+
+
+def test_fetch_from_api_without_token_raises_runtime_error(vendor_adapter):
+    with pytest.raises(RuntimeError):
+        vendor_adapter._fetch_from_api(["CLZ26"], "1D", count=1)
+
+
+def test_adapters_built_with_one_api_share_each_endpoints_limiter(repo, tmp_path):
+    from adapters.live.fairvalue import FairValueLiveAdapter
+    from adapters.qh_api import ENDPOINTS, make_api
+
+    api = make_api(lambda: "tok")
+    live = FairValueLiveAdapter(repo, 10.0, api=api)
+    hist = VendorHistoricalAdapter(repo, data_dir=str(tmp_path / "h"), api=api)
+    assert live._api is hist._api is api
+    assert api.client.limiter_for(ENDPOINTS["ohlc"]) is api.client.limiter_for(ENDPOINTS["ohlc"])

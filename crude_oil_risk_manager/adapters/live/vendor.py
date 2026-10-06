@@ -3,33 +3,21 @@
 import logging
 from datetime import datetime, timezone
 
-import requests
-
-from adapters.base import (
-    APIConnectionError,
-    APIServerError,
-    APITimeoutError,
-    AuthenticationError,
-    LiveDataAdapter,
-    LivePrice,
-    RateLimitError,
-    SymbolTranslator,
-)
+from adapters.base import LiveDataAdapter, LivePrice, SymbolTranslator
+from adapters.qh_api import QHApi, make_api
 from db.repository import Repository
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://qh-api.corp.hertshtengroup.com/apis"
-_OHLC_ENDPOINT = f"{_BASE_URL}/ohlc/"
-_REQUEST_TIMEOUT_SECONDS = 10
 _MAX_INSTRUMENTS_PER_REQUEST = 50
 
 
 class VendorLiveAdapter(LiveDataAdapter):
     """Live price adapter backed by the qh-api OHLC endpoint."""
 
-    def __init__(self, repository: Repository, staleness_threshold_seconds: float):
+    def __init__(self, repository: Repository, staleness_threshold_seconds: float, api: QHApi | None = None):
         self._repository = repository
+        self._api = api or make_api(lambda: repository.get_setting("api_access_token", ""))
         self._staleness_threshold_seconds = staleness_threshold_seconds
 
     def set_staleness_threshold(self, seconds: float) -> None:
@@ -80,34 +68,7 @@ class VendorLiveAdapter(LiveDataAdapter):
     def _fetch_batch(
         self, api_codes: list[str], internal_by_api: dict[str, str], token: str
     ) -> dict[str, LivePrice]:
-        params = {
-            "instruments": ",".join(api_codes),
-            "interval": "1M",
-            "count": 1,
-        }
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "accept": "application/json",
-        }
-
-        try:
-            response = requests.get(
-                _OHLC_ENDPOINT, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS
-            )
-        except requests.exceptions.Timeout as exc:
-            raise APITimeoutError("Request to the live price API timed out.") from exc
-        except requests.exceptions.ConnectionError as exc:
-            raise APIConnectionError("Could not connect to the live price API.") from exc
-
-        if response.status_code == 401:
-            raise AuthenticationError("Invalid or expired access token.")
-        if response.status_code == 429:
-            raise RateLimitError("API rate limit exceeded.")
-        if 500 <= response.status_code < 600:
-            raise APIServerError(f"Live price API returned server error {response.status_code}.")
-        response.raise_for_status()
-
-        candles = response.json()
+        candles = self._api.ohlc("1M", instruments=api_codes, count=1, token=token)
         now = datetime.now(timezone.utc)
         results: dict[str, LivePrice] = {}
         for candle in candles:
