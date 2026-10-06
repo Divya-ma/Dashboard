@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Historical data storage
     HISTORICAL_DATA_DIR: str = "data/historical"
 
+    # Curve Kinks page: generic-contract history, previous settlements and daily snapshots
+    CURVE_DATA_DIR: str = "data/curves"
+
     # Manual Excel fallback source for the Correlation tab (used when the API can't
     # provide a series for a symbol)
     CORRELATION_UPLOADS_DIR: str = "data/correlation_uploads"

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from adapters.base import HistoricalDataAdapter, LiveDataAdapter
 from adapters.qh_api import QHApi
 from core.alerts import AlertManager
+from core.curve_service import CurveService
 from core.data_loader import DataLoader
 from core.excel_correlation import ExcelCorrelationStore
 from db.repository import Repository
@@ -37,6 +38,7 @@ class Container:
     alert_manager: AlertManager | None = None
     data_loader: DataLoader | None = None
     excel_store: ExcelCorrelationStore | None = None
+    curve_service: CurveService | None = None  # Curve Kinks engine (fed by the live poll)
     qh_api: QHApi | None = None  # rate-limited wrappers for every QH API endpoint
     live_cache: LivePriceCache = field(default_factory=LivePriceCache)
     pnl_stop_alert_active: bool = False

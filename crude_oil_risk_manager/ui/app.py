@@ -26,6 +26,9 @@ from adapters.live.fairvalue import FairValueLiveAdapter  # noqa: E402
 from adapters.qh_api import make_api  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
+from core.curve_history import CurveHistoryStore  # noqa: E402
+from core.curve_service import CurveService  # noqa: E402
+from core.curve_store import PrevSettlementStore, SnapshotStore  # noqa: E402
 from core.data_loader import DataLoader  # noqa: E402
 from core.excel_correlation import ExcelCorrelationStore  # noqa: E402
 from core.structure_builder import active_composite_symbols  # noqa: E402
@@ -38,7 +41,7 @@ from ui.callbacks.settings_callbacks import register_settings_callbacks  # noqa:
 from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
 from ui.callbacks.structure_detail_callbacks import register_structure_detail_callbacks  # noqa: E402
 from ui.callbacks.var_callbacks import register_var_callbacks  # noqa: E402
-from ui.callbacks.idea_callbacks import register_idea_callbacks  # noqa: E402
+from ui.callbacks.curve_callbacks import register_curve_callbacks  # noqa: E402
 from ui.callbacks.archive_callbacks import register_archive_callbacks  # noqa: E402
 from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
@@ -101,6 +104,15 @@ container.alert_manager = alert_manager
 container.data_loader = DataLoader(_resolve_path(settings.HISTORICAL_DATA_DIR), historical_adapter)
 container.excel_store = ExcelCorrelationStore(_resolve_path(settings.CORRELATION_UPLOADS_DIR))
 container.qh_api = qh_api
+
+_curve_dir = _resolve_path(settings.CURVE_DATA_DIR)
+container.curve_service = CurveService(
+    repository, qh_api, CurveHistoryStore(_curve_dir, qh_api),
+    PrevSettlementStore(Path(_curve_dir) / "prev_settlement.json"), SnapshotStore(_curve_dir), alert_manager,
+)
+# The curve ladder (outrights, spreads, flies of CL and BRN) is priced in the same /fairvalue/
+# request as the position prices, so it costs no extra call.
+live_adapter.set_curve_symbols_provider(container.curve_service.symbols_to_poll)
 
 
 def _run_morning_sync() -> None:
@@ -202,7 +214,7 @@ register_structure_detail_callbacks(app)
 register_correlation_callbacks(app)
 register_exposure_callbacks(app)
 register_var_callbacks(app)
-register_idea_callbacks(app)
+register_curve_callbacks(app)
 register_archive_callbacks(app)
 
 

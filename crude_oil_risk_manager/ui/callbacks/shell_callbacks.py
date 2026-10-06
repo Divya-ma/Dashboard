@@ -60,7 +60,7 @@ _ROUTES = {
     "/correlation": ("correlation_tab", "correlation_layout"),
     "/exposure": ("exposure_tab", "exposure_layout"),
     "/var-scenario": ("var_tab", "var_scenario_layout"),
-    "/trade-analyzer": ("idea_tab", "trade_analyzer_layout"),
+    "/trade-analyzer": ("curve_tab", "trade_analyzer_layout"),
     "/archive": ("archive_tab", "archive_layout"),
     "/settings": ("settings", "settings_layout"),
 }
@@ -176,6 +176,17 @@ def _save_pnl_records(live_prices: dict) -> None:
         logger.exception("Failed to save PnL records")
 
 
+def _feed_curves() -> None:
+    """Hand the curve contracts priced in this poll to the Curve Kinks engine (never raises)."""
+    service, adapter = container.curve_service, container.live_adapter
+    if service is None or not hasattr(adapter, "curve_prices"):
+        return
+    try:
+        service.on_prices(adapter.curve_prices())
+    except Exception:  # noqa: BLE001 - the curve engine must never break the price poll
+        logger.exception("Curve engine update failed")
+
+
 def _last_known_stale():
     """Last cached prices with every entry flagged stale (used when a poll fails)."""
     cache = container.live_cache
@@ -196,7 +207,7 @@ def fetch_live_prices(n_intervals):
         return cache.prices, cache.updated_label, stale_indicator(cache.is_stale), True
 
     symbols = sorted({c.symbol for c in repository.get_all_contracts() if _is_translatable(c.symbol)})
-    if not symbols:
+    if not symbols and container.curve_service is None:
         return {}, NO_UPDATE_LABEL, stale_indicator(False), True
 
     try:
@@ -232,6 +243,7 @@ def fetch_live_prices(n_intervals):
     cache.updated_label = label
     cache.is_stale = is_stale
 
+    _feed_curves()
     _save_pnl_records(prices)
     return prices, label, stale_indicator(is_stale), True
 

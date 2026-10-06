@@ -13,6 +13,13 @@ from dash.exceptions import PreventUpdate
 
 from adapters.base import APIError
 from config.settings import settings
+from core.curve_settings import (
+    DEFAULT_OPEN_TIME,
+    DEFAULT_OPEN_TZ,
+    KEY_CURVE_OPEN_TIME,
+    KEY_CURVE_OPEN_TZ,
+    validate_open_time,
+)
 from core.models import StructureStatus
 from core.pnl import calculate_portfolio_pnl
 from core.user_settings import (
@@ -100,6 +107,35 @@ def load_settings(pathname):
             repo.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0) or 0.0,
         ),
     )
+
+
+# ----------------------------------------------------------------------
+# Curve Kinks
+# ----------------------------------------------------------------------
+
+
+def load_curve_settings(pathname):
+    """Saved opening time and time zone (only when the Settings tab is open)."""
+    if pathname != "/settings":
+        raise PreventUpdate
+    repo = container.repository
+    return (
+        repo.get_setting(KEY_CURVE_OPEN_TIME, DEFAULT_OPEN_TIME),
+        repo.get_setting(KEY_CURVE_OPEN_TZ, DEFAULT_OPEN_TZ),
+    )
+
+
+def save_curve_settings(n_clicks, open_time, open_tz):
+    """Validate and store the previous-settlement fetch time."""
+    if not n_clicks:
+        raise PreventUpdate
+    try:
+        time_text, tz = validate_open_time(open_time, open_tz)
+    except ValueError as exc:
+        return f"❌ Not saved: {exc}"
+    container.repository.set_setting(KEY_CURVE_OPEN_TIME, time_text)
+    container.repository.set_setting(KEY_CURVE_OPEN_TZ, tz)
+    return f"✅ Saved: settlements are fetched daily from {time_text} {tz}"
 
 
 # ----------------------------------------------------------------------
@@ -392,6 +428,20 @@ def register_settings_callbacks(app) -> None:
         Output("settings-pnl-baseline-status", "children"),
         Input("url", "pathname"),
     )(load_settings)
+
+    app.callback(
+        Output("settings-curve-open-time", "value"),
+        Output("settings-curve-open-tz", "value"),
+        Input("url", "pathname"),
+    )(load_curve_settings)
+
+    app.callback(
+        Output("settings-curve-feedback", "children"),
+        Input("settings-save-curve", "n_clicks"),
+        State("settings-curve-open-time", "value"),
+        State("settings-curve-open-tz", "value"),
+        prevent_initial_call=True,
+    )(save_curve_settings)
 
     app.callback(
         Output("settings-api-token", "type"),

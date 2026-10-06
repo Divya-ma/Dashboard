@@ -37,6 +37,7 @@ writes `WATCHLIST_SETTING_KEY`, watchlist symbols are simply absent from the liv
 
 import logging
 from datetime import datetime, timezone
+from typing import Callable
 
 from adapters.base import LiveDataAdapter, LivePrice, SymbolTranslator
 from adapters.qh_api import QHApi, make_api
@@ -70,6 +71,21 @@ class FairValueLiveAdapter(LiveDataAdapter):
         # poll always logs once (including the "nothing to poll" case) even if the target
         # set turns out to be empty from the very start.
         self._last_symbols: frozenset[str] | None = None
+        # Extra API symbols (the Curve Kinks ladder: outrights, spreads, flies) priced in the SAME
+        # request as the position prices, so they cost no extra call from the 7/min budget.
+        self._curve_symbols: Callable[[], list[str]] | None = None
+        self._curve_prices: dict[str, tuple[float, float]] = {}
+
+    def set_curve_symbols_provider(self, provider: Callable[[], list[str]] | None) -> None:
+        """Register the function returning the extra API symbols to price on every poll."""
+        self._curve_symbols = provider
+
+    def curve_prices(self) -> dict[str, tuple[float, float]]:
+        """{API symbol: (price, unix seconds)} from the latest poll, for the extra symbols only.
+
+        Kept apart from get_live_prices' result on purpose: these are curve structures, not
+        positions, and must never reach the P&L code. Symbols the API did not return are absent."""
+        return dict(self._curve_prices)
 
     def set_staleness_threshold(self, seconds: float) -> None:
         """Change the staleness threshold used to flag prices as stale."""
@@ -150,7 +166,8 @@ class FairValueLiveAdapter(LiveDataAdapter):
                     len(self._last_symbols or ()), len(target),
                 )
             self._last_symbols = frozenset(target)
-        if not target:
+        extras = list(self._curve_symbols()) if self._curve_symbols is not None else []
+        if not target and not extras:
             return {}
 
         internal_by_api: dict[str, str] = {}
@@ -159,11 +176,12 @@ class FairValueLiveAdapter(LiveDataAdapter):
                 internal_by_api[SymbolTranslator.internal_to_api(symbol)] = symbol
             except ValueError:
                 logger.warning("Skipping %r: not a translatable outright symbol for /fairvalue/", symbol)
-        if not internal_by_api:
+        extras = [code for code in extras if code not in internal_by_api]
+        if not internal_by_api and not extras:
             return {}
 
         token = self.get_access_token()
-        return self._fetch(list(internal_by_api), internal_by_api, token)
+        return self._fetch([*internal_by_api, *extras], internal_by_api, token)
 
     def _fetch(
         self, api_codes: list[str], internal_by_api: dict[str, str], token: str
@@ -172,11 +190,15 @@ class FairValueLiveAdapter(LiveDataAdapter):
         rows = payload.get("data", []) if isinstance(payload, dict) else payload
         now = datetime.now(timezone.utc)
         results: dict[str, LivePrice] = {}
+        extra_codes = set(api_codes) - set(internal_by_api)
+        extra_prices: dict[str, tuple[float, float]] = {}
         for row in rows:
             api_code = row["Contract"]
             internal_symbol = internal_by_api.get(api_code)
             if internal_symbol is None:
-                # Response contains a product we did not request; skip it.
+                if api_code in extra_codes:
+                    extra_prices[api_code] = (row["Price"], row["Timestamp"] / 1000)
+                # anything else is a product we did not request; skip it
                 continue
             price = row["Price"]
             price_time = datetime.fromtimestamp(row["Timestamp"] / 1000, tz=timezone.utc)
@@ -197,6 +219,8 @@ class FairValueLiveAdapter(LiveDataAdapter):
                 raw_volume=0.0,
             )
 
+        if extra_codes:
+            self._curve_prices = extra_prices
         for symbol in internal_by_api.values():
             if symbol not in results:
                 logger.warning("No fair value data returned for %s", symbol)

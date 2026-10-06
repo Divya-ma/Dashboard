@@ -91,6 +91,24 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS curve_kink_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product TEXT NOT NULL,
+    family TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    cleared_at TEXT,
+    peak_score REAL NOT NULL,
+    peak_priority TEXT NOT NULL,
+    n_methods INTEGER NOT NULL,
+    seasonal_normal INTEGER NOT NULL DEFAULT 0,
+    detail TEXT NOT NULL DEFAULT '{}'      -- JSON: z-scores, value, residual at the peak
+);
+
 -- Indexes: foreign keys and common query patterns
 
 CREATE INDEX IF NOT EXISTS idx_legs_structure_id ON legs(structure_id);
@@ -105,3 +123,4 @@ CREATE INDEX IF NOT EXISTS idx_pnl_records_timestamp ON pnl_records(timestamp);
 CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp);
 CREATE INDEX IF NOT EXISTS idx_alerts_acknowledged ON alerts(acknowledged);
 CREATE INDEX IF NOT EXISTS idx_alerts_structure_id ON alerts(structure_id);
+CREATE INDEX IF NOT EXISTS idx_curve_kink_events_first_seen ON curve_kink_events(first_seen);

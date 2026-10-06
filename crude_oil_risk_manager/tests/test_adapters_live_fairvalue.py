@@ -258,3 +258,60 @@ def test_check_connection_returns_zero_when_no_data(adapter, repo, mocker):
         return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
     )
     assert adapter.check_connection("good-token") == 0
+
+
+# ---------- curve contracts priced in the same request ----------
+
+
+def _rows(*pairs):
+    return {"data": [_fairvalue_row(contract=c, price=p) for c, p in pairs]}
+
+
+def test_curve_symbols_are_polled_even_with_no_open_structures(adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    adapter.set_curve_symbols_provider(lambda: ["COZ26", "COZ26-F27"])
+    request = mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: _rows(("COZ26", 100.0), ("COZ26-F27", 2.9))),
+    )
+    assert adapter.get_live_prices([]) == {}  # no positions: nothing in the position price map
+    assert request.call_args.kwargs["params"]["products"] == "COZ26,COZ26-F27"
+    prices = adapter.curve_prices()
+    assert prices["COZ26"][0] == 100.0 and prices["COZ26-F27"][0] == 2.9
+    assert prices["COZ26"][1] > 1e9  # unix seconds, not milliseconds
+
+
+def test_curve_symbols_share_one_request_with_position_symbols_and_stay_separate(adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    save_open_structure(repo, "Open CL", [make_leg()])
+    adapter.set_curve_symbols_provider(lambda: ["CLZ26", "CLZ26-F27"])  # CLZ26 overlaps the open leg
+    request = mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: _rows(("CLZ26", 75.5), ("CLZ26-F27", 1.2))),
+    )
+    prices = adapter.get_live_prices([])
+    assert request.call_count == 1
+    assert request.call_args.kwargs["params"]["products"].split(",") == ["CLZ26", "CLZ26-F27"]
+    assert set(prices) == {"CLZ26"}  # the spread never reaches the position prices (and so never P&L)
+    assert set(adapter.curve_prices()) == {"CLZ26-F27"}  # CLZ26 is already a position price
+
+
+def test_no_curve_provider_means_no_change_in_behaviour(adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    get = mocker.patch("adapters.qh_api.client.requests.Session.request")
+    assert adapter.get_live_prices([]) == {}
+    get.assert_not_called()
+    assert adapter.curve_prices() == {}
+
+
+def test_curve_prices_drop_symbols_the_api_stopped_returning(adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    adapter.set_curve_symbols_provider(lambda: ["COZ26", "COF27"])
+    responses = iter([_rows(("COZ26", 100.0), ("COF27", 99.0)), _rows(("COZ26", 100.5))])
+    mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        side_effect=lambda *a, **k: mocker.Mock(headers={}, status_code=200, json=lambda r=next(responses): r),
+    )
+    adapter.get_live_prices([])
+    adapter.get_live_prices([])
+    assert set(adapter.curve_prices()) == {"COZ26"}

@@ -8,6 +8,7 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html
 
 from config.settings import settings
+from core.curve_settings import DEFAULT_OPEN_TIME, DEFAULT_OPEN_TZ, TIMEZONE_CHOICES
 from core.user_settings import KEY_API_TOKEN
 from ui.container import container
 from ui.layouts.shell import COLORS
@@ -111,6 +112,32 @@ def _defaults_section() -> dbc.AccordionItem:
     )
 
 
+def _curve_section() -> dbc.AccordionItem:
+    return dbc.AccordionItem(
+        [
+            _field(
+                "Market opening time (HH:MM)",
+                dbc.Input(id="settings-curve-open-time", type="text", value=DEFAULT_OPEN_TIME, placeholder="07:00"),
+                "Once a day, from this time, the previous trading day's settlement prices are fetched "
+                "for the Curve Kinks page (the dashed line on each curve).",
+            ),
+            _field(
+                "Time zone",
+                dcc.Dropdown(
+                    id="settings-curve-open-tz",
+                    options=[{"label": tz, "value": tz} for tz in TIMEZONE_CHOICES],
+                    value=DEFAULT_OPEN_TZ,
+                    clearable=False,
+                ),
+            ),
+            dbc.Button("Save Curve Settings", id="settings-save-curve", color="primary"),
+            html.Div("", id="settings-curve-feedback", style=_STATUS_STYLE),
+        ],
+        title="🎯 Curve Kinks",
+        item_id="curve",
+    )
+
+
 def _teams_section() -> dbc.AccordionItem:
     return dbc.AccordionItem(
         [
@@ -180,7 +207,7 @@ def settings_layout() -> html.Div:
         [
             html.H4("⚙️ Settings", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "20px"}),
             dbc.Accordion(
-                [_api_section(), _thresholds_section(), _defaults_section(), _teams_section(), _account_reset_section(), _data_section()],
+                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _teams_section(), _account_reset_section(), _data_section()],
                 id="settings-accordion",
                 always_open=True,
                 active_item=["thresholds"] if token_configured else ["api"],

@@ -86,7 +86,7 @@ def pnl_payload(total, **extra):
 def test_render_page_every_tab_has_a_real_layout():
     expected = {
         "/structures": "structures-active-grid", "/correlation": "corr-heatmap", "/exposure": "exposure-bar-chart",
-        "/var-scenario": "var-histogram", "/trade-analyzer": "idea-analyze-btn", "/archive": "archive-table",
+        "/var-scenario": "var-histogram", "/trade-analyzer": "curve-graph", "/archive": "archive-table",
     }
     for path, marker in expected.items():
         page, _ = cb.render_page(path, True)
@@ -102,7 +102,7 @@ def test_render_page_home_and_settings_use_real_layouts(env):
 
 def test_render_page_trade_analyzer_uses_real_layout():
     page, _ = cb.render_page("/trade-analyzer", True)
-    assert "idea-analyze-btn" in str(page)
+    assert "curve-graph" in str(page)
 
 
 def test_render_page_var_scenarios_uses_real_layout():

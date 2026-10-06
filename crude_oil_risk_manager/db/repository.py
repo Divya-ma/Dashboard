@@ -773,6 +773,100 @@ class Repository:
         )
 
     # ------------------------------------------------------------------
+    # Curve kink event log
+    # ------------------------------------------------------------------
+
+    def open_kink_event(
+        self, product: str, family: str, position: int, label: str, symbol: str, direction: str,
+        score: float, priority: str, n_methods: int, seasonal_normal: bool, detail: dict,
+    ) -> int:
+        """Start a kink event (first seen now) and return its id."""
+        now = _utcnow_iso()
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    INSERT INTO curve_kink_events (
+                        product, family, position, label, symbol, direction, first_seen, last_seen,
+                        peak_score, peak_priority, n_methods, seasonal_normal, detail
+                    ) VALUES (
+                        :product, :family, :position, :label, :symbol, :direction, :now, :now,
+                        :score, :priority, :n_methods, :seasonal, :detail
+                    )
+                    """
+                ),
+                {
+                    "product": product, "family": family, "position": position, "label": label,
+                    "symbol": symbol, "direction": direction, "now": now, "score": score,
+                    "priority": priority, "n_methods": n_methods, "seasonal": int(seasonal_normal),
+                    "detail": json.dumps(detail),
+                },
+            )
+            return int(result.lastrowid)
+
+    def update_kink_event(
+        self, event_id: int, score: float, priority: str, n_methods: int, seasonal_normal: bool, detail: dict,
+        priority_rank: dict[str, int],
+    ) -> None:
+        """Touch an open event: last_seen = now; the peak score/priority/detail only ever go up."""
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT peak_score, peak_priority FROM curve_kink_events WHERE event_id = :id"),
+                {"id": event_id},
+            ).mappings().first()
+            if row is None:
+                return
+            higher = score > row["peak_score"] or priority_rank[priority] > priority_rank[row["peak_priority"]]
+            conn.execute(
+                text(
+                    """
+                    UPDATE curve_kink_events SET last_seen = :now,
+                        peak_score = CASE WHEN :higher THEN :score ELSE peak_score END,
+                        peak_priority = CASE WHEN :higher THEN :priority ELSE peak_priority END,
+                        n_methods = CASE WHEN :higher THEN :n_methods ELSE n_methods END,
+                        seasonal_normal = CASE WHEN :higher THEN :seasonal ELSE seasonal_normal END,
+                        detail = CASE WHEN :higher THEN :detail ELSE detail END
+                    WHERE event_id = :id
+                    """
+                ),
+                {
+                    "now": _utcnow_iso(), "higher": int(higher), "score": score, "priority": priority,
+                    "n_methods": n_methods, "seasonal": int(seasonal_normal), "detail": json.dumps(detail),
+                    "id": event_id,
+                },
+            )
+
+    def clear_kink_event(self, event_id: int) -> None:
+        """Mark an event as no longer present."""
+        with self._engine.begin() as conn:
+            conn.execute(
+                text("UPDATE curve_kink_events SET cleared_at = :now WHERE event_id = :id AND cleared_at IS NULL"),
+                {"now": _utcnow_iso(), "id": event_id},
+            )
+
+    def clear_open_kink_events(self) -> None:
+        """Close every still-open event (used at start-up, when the in-memory tracking is lost)."""
+        with self._engine.begin() as conn:
+            conn.execute(
+                text("UPDATE curve_kink_events SET cleared_at = last_seen WHERE cleared_at IS NULL")
+            )
+
+    def get_kink_events(self, limit: int = 200) -> list[dict]:
+        """Most recent kink events, newest first, as plain dicts (detail decoded)."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT * FROM curve_kink_events ORDER BY first_seen DESC, event_id DESC LIMIT :limit"),
+                {"limit": limit},
+            ).mappings().all()
+        events = []
+        for row in rows:
+            event = dict(row)
+            event["detail"] = json.loads(event["detail"] or "{}")
+            event["seasonal_normal"] = bool(event["seasonal_normal"])
+            events.append(event)
+        return events
+
+    # ------------------------------------------------------------------
     # Settings methods
     # ------------------------------------------------------------------
 
