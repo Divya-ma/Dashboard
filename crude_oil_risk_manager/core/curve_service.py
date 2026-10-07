@@ -30,7 +30,6 @@ from adapters.qh_api import QHApi
 from core.curve_calendar import (
     FAMILIES,
     FAMILY_LABELS,
-    FLY,
     N_MONTHS,
     OUTRIGHT,
     CurveStructure,
@@ -40,9 +39,11 @@ from core.curve_calendar import (
     live_symbols,
 )
 from core.curve_history import CurveHistoryStore, generic_code
-from core.curve_kinks import METHOD_LABELS, METHODS, PositionResult, detect, is_kink, prepare_history
+from core.curve_kinks import METHOD_LABELS, METHODS, PositionResult, detect, is_kink, prepare_history, trade_side
 from core.curve_settings import PRIORITY_RANK, CurveParams, load_open_time, load_params
 from core.curve_store import PrevSettlementStore, SnapshotStore
+from core.curve_trade import HedgeCandidate, TradePlan, build_plan, change_frame, half_life, plan_summary, structure_generic, trade_legs
+from core.curve_backtest import run_backtest
 from core.models import AlertLevel
 from core.user_settings import KEY_API_TOKEN
 
@@ -52,6 +53,9 @@ KEY_HISTORY_REFRESHED_ON = "curve_history_refreshed_on"
 RETRY_AFTER_FAILURE = timedelta(minutes=30)
 CONSISTENCY_TOLERANCE = 0.10  # points; live spread vs the difference of the live outrights
 STALE_HISTORY_DAYS = 5
+ALERT_BODY_LIMIT = 1800  # trade plans are longer than the default 500 characters
+BACKTEST_DAYS_FOR_REVERSION = 250
+MAX_REVERSION_JOBS = 2  # at most this many backtests at once, so they never crowd out the live poll
 
 PriceMap = dict[str, tuple[float, float]]  # API symbol -> (price, unix timestamp seconds)
 
@@ -138,6 +142,11 @@ class CurveService:
         self._state = CurveState()
         self._ladders: dict[tuple[str, date], dict[str, list[CurveStructure]]] = {}
         self._prepared: dict[tuple, object] = {}
+        self._frames: dict[tuple, object] = {}
+        self._half_lives: dict[tuple, float | None] = {}
+        self._reversions: dict[tuple, tuple[float | None, int]] = {}
+        self._hedge_cache: dict = {}
+        self._reversion_pending: set[tuple] = set()
         self._active_alert_rank: dict[tuple, int] = {}
         self._last_alert_at: dict[tuple, datetime] = {}
         self._open_events: dict[tuple, int] = {}
@@ -231,7 +240,8 @@ class CurveService:
         for product in self.products:
             report = self.history.refresh(product, years, today, self.n)
             if report.errors:
-                failed.append(f"{product}: {len(report.errors)} series failed")
+                reason = next(iter(report.errors.values()))[:100]
+                failed.append(f"{product}: {len(report.errors)} series failed, e.g. {reason}")
         if failed:
             self.job_messages["history"] = "History refresh incomplete (" + "; ".join(failed) + "); will retry"
             self._retry_after["history"] = self._clock() + RETRY_AFTER_FAILURE
@@ -313,6 +323,7 @@ class CurveService:
             quality.extend(self._quality_flags(product, today, ladder, prices, params, now, state))
 
         state.kinks = self._current_kinks(state, params)
+        self._attach_plans(state, params)
         state.quality = quality
         self._handle_alerts(state, params, now)
         self._update_event_log(state, params)
@@ -326,13 +337,14 @@ class CurveService:
     @staticmethod
     def _kink_row(view: FamilyView, position: PositionView) -> dict:
         result, structure = position.result, position.structure
-        code = structure.generic_code or (
-            f"{generic_code(view.product, FLY, structure.position)} - {generic_code(view.product, FLY, structure.position + 1)}"
-        )
+        code = structure_generic(view.product, structure)
         return {
+            "structure": structure, "fair": result.fair, "plan": None,
             "product": view.product, "family": view.family, "label": structure.label,
             "position": structure.position, "generic": code, "symbol": structure.symbol,
-            "direction": result.direction, "priority": result.priority, "score": result.score,
+            "direction": result.direction, "trade": trade_side(result.direction),
+            "legs": trade_legs(structure, trade_side(result.direction)) if result.direction else "",
+            "priority": result.priority, "score": result.score,
             "n_flags": result.n_flags, "z": result.z, "flags": result.flags, "value": position.live,
             "implied": result.implied, "residual": result.residual, "seasonal_z": result.seasonal_z,
             "seasonal_normal": result.seasonal_normal, "seasonal_obs": result.seasonal_obs,
@@ -363,9 +375,20 @@ class CurveService:
             seasonal = f" Seasonally normal for this delivery month at this time of year (seasonal z {row['seasonal_z']:+.1f})."
         elif row["seasonal_z"] is not None:
             seasonal = f" Not explained by seasonality (seasonal z {row['seasonal_z']:+.1f})."
-        title = f"Kink {row['priority']}: {row['product']} {FAMILY_LABELS[row['family']].lower()} {row['label']}"
+        family_name = FAMILY_LABELS[row["family"]].lower()
+        title = f"Kink {row['priority']}: {row['product']} {family_name} {row['label']} - {row['trade']}"
+        plan = row.get("plan")
+        if plan is not None:
+            trade = "TRADE: " + plan_summary(row["label"], family_name, row["legs"], plan)
+            notes = (" Notes: " + "; ".join(plan.warnings[:3]) + ".") if plan.warnings else ""
+        else:
+            trade = (
+                f"TRADE: {row['trade']} {family_name} {row['label']} ({row['legs']}) @ {_fmt(row['value'])} to fade the kink "
+                "(lots, stop, target and hedges need price history, which is not loaded yet)."
+            )
+            notes = ""
         body = (
-            f"{row['generic']} is {row['direction']} vs the curve. {row['n_flags']} method(s): {z}. "
+            f"{trade}{notes} WHY: {row['generic']} is {row['direction']} vs the curve. {row['n_flags']} method(s): {z}. "
             f"Live {_fmt(row['value'])}, implied by neighbours {_fmt(row['implied'])}, score {row['score']:.1f}.{seasonal}"
         )
         return title, body
@@ -377,8 +400,13 @@ class CurveService:
         current: dict[tuple, int] = {}
         to_send: list[dict] = []
         for row in state.kinks:
+            if f"{row['product']}:{row['family']}" not in params.alert_structures:
+                continue  # alerts for this product / curve type are switched off (still shown and logged)
             if not meets_priority_row(row, params.alert_min_priority):
                 continue
+            plan = row.get("plan")
+            if params.min_reward_risk > 0 and plan is not None and (plan.rr is None or plan.rr < params.min_reward_risk):
+                continue  # the plan's reward:risk is below the minimum asked for
             key = self.kink_key(row)
             rank = PRIORITY_RANK[row["priority"]]
             current[key] = rank
@@ -420,16 +448,108 @@ class CurveService:
             if len(group) > 1:
                 title += f" (+{len(group) - 1} related)"
                 body += " Also: " + "; ".join(
-                    f"{FAMILY_LABELS[r['family']].lower()} {r['label']} {r['direction']} ({r['priority']})"
+                    f"{r['trade']} {FAMILY_LABELS[r['family']].lower()} {r['label']} ({r['priority']})"
                     for r in group[1:7]
                 ) + ("..." if len(group) > 7 else ".")
             level = AlertLevel.WARNING if group[0]["priority"] == "HIGH" else AlertLevel.INFO
-            self._alerts.send_alert(level, title, body)
+            self._alerts.send_alert(level, title, body, max_body_length=ALERT_BODY_LIMIT)
+
+    # ------------------------------------------------------------------
+    # Trade plans
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _plan_detail(plan: TradePlan | None) -> dict | None:
+        """The plan's key numbers in a JSON-safe form, for the event log."""
+        if plan is None:
+            return None
+        return {
+            "side": plan.side, "entry": plan.entry, "lots": plan.lots, "stop": plan.stop, "target": plan.target,
+            "rr": plan.rr, "hedges": [f"{h.side} {h.lots} {h.family} {h.label}" for h in plan.hedges],
+        }
+
+    def _change_frame(self, product: str):
+        key = (product, self.history.version)
+        if key not in self._frames:
+            self._frames = {k: v for k, v in self._frames.items() if k[1] == self.history.version}
+            self._frames[key] = change_frame(self.history, product, self.n)
+        return self._frames[key]
+
+    def _half_life(self, product: str, family: str, prepared, params: CurveParams) -> float | None:
+        key = (product, family, self.history.version, params.lookback_days)
+        if key not in self._half_lives:
+            self._half_lives[key] = None if prepared is None else half_life(prepared.resid_hist, params.lookback_days)
+        return self._half_lives[key]
+
+    def _reversion(self, product: str, family: str, history, params: CurveParams) -> tuple[float | None, int]:
+        """(median share of a kink's gap that closed within the horizon, kinks it is based on).
+
+        Replaying the detector over a year takes a second or two, so it runs in the background and
+        is cached per history version and thresholds; until it is ready the plan uses the minimum
+        share (and says so) instead of holding up the live poll."""
+        horizon = params.reversion_horizon
+        key = (product, family, self.history.version, horizon, params.lookback_days, params.z_fit,
+               params.z_neighbour, params.z_pca, params.z_history)
+        if key in self._reversions:
+            return self._reversions[key]
+
+        def compute() -> None:
+            try:
+                result = run_backtest(product, family, history, params, test_days=BACKTEST_DAYS_FOR_REVERSION, horizons=(horizon,))
+                self._reversions[key] = (result.reversion.get(horizon), result.reversion_events.get(horizon, 0))
+            except Exception:  # noqa: BLE001
+                logger.exception("Reversion estimate failed for %s %s", product, family)
+                self._reversions[key] = (None, 0)
+            finally:
+                self._reversion_pending.discard(key)
+
+        if not self._background:
+            compute()
+            return self._reversions[key]
+        if key not in self._reversion_pending and len(self._reversion_pending) < MAX_REVERSION_JOBS:
+            self._reversion_pending.add(key)
+            threading.Thread(target=compute, name="curve-reversion", daemon=True).start()
+        return None, 0
+
+    def _attach_plans(self, state: CurveState, params: CurveParams) -> None:
+        for row in state.kinks:
+            try:
+                row["plan"] = self._plan_for(row, state, params)
+            except Exception:  # noqa: BLE001 - a plan failure must not lose the kink itself
+                logger.exception("Could not build a trade plan for %s", row.get("label"))
+                row["plan"] = None
+
+    def _plan_for(self, row: dict, state: CurveState, params: CurveParams) -> TradePlan | None:
+        product, family, structure = row["product"], row["family"], row["structure"]
+        history, prepared = self._prepared_history(product, family, params)
+        if history is None or row["value"] is None or not row["trade"]:
+            return None
+        candidates = []
+        for hedge_family in params.hedge_types.get(family, []):
+            view = state.families.get((product, hedge_family))
+            if view is None or view.suspect:
+                continue
+            for position in view.positions:
+                other = position.structure
+                if position.live is None or (hedge_family == family and other.position == structure.position):
+                    continue
+                if params.hedge_exclude_overlap and set(other.legs) & set(structure.legs):
+                    continue
+                candidates.append(HedgeCandidate(hedge_family, other, position.live))
+        share, events = self._reversion(product, family, history, params)
+        return build_plan(
+            product=product, structure=structure, side=row["trade"], live=row["value"], fair=row["fair"],
+            flags=row["flags"], frame=self._change_frame(product),
+            half_life_days=self._half_life(product, family, prepared, params),
+            reversion_share=share, reversion_events=events, candidates=candidates, params=params,
+            hedge_cache=self._hedge_cache,
+        )
 
     def _update_event_log(self, state: CurveState, params: CurveParams) -> None:
         current = {self.kink_key(r): r for r in state.kinks if meets_priority_row(r, params.alert_min_priority)}
         for key, row in current.items():
-            detail = {"z": row["z"], "value": row["value"], "implied": row["implied"], "residual": row["residual"],
+            plan = row.get("plan")
+            detail = {"plan": self._plan_detail(plan), "trade": row["trade"], "legs": row["legs"], "z": row["z"], "value": row["value"], "implied": row["implied"], "residual": row["residual"],
                       "seasonal_z": row["seasonal_z"], "generic": row["generic"]}
             event_id = self._open_events.get(key)
             if event_id is None:

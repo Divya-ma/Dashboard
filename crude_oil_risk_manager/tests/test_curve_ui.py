@@ -35,6 +35,7 @@ def clock():
 
 @pytest.fixture
 def env(repo, tmp_path, clock, monkeypatch):
+    monkeypatch.setattr(CurveService, "_reversion", lambda self, product, family, history, params: (0.8, 40))
     api = FakeApi()
     service = CurveService(
         repo, api, CurveHistoryStore(tmp_path / "curves", api),
@@ -90,7 +91,7 @@ def test_backtest_on_a_clean_history_says_nothing_was_flagged():
 def test_render_curve_returns_figures_and_tables_for_every_family(env, clock):
     feed(env, clock, kinks={"COG27": 0.4})
     for family in FAMILIES:
-        figure, strength, status, kinks, change, quality = cc.render_curve(1, "BRN", family, None)
+        figure, strength, status, kinks, change, quality, plans = cc.render_curve(1, "BRN", family, None)
         assert len(figure.data) >= 1 and figure.data[0].name == "Live"
         assert len(strength.data) == 1
     figure, *_ = cc.render_curve(1, "BRN", OUTRIGHT, None)
@@ -122,7 +123,7 @@ def test_change_table_shows_live_vs_settlement(env, clock):
         env.curve_service._api, env.curve_service.outright_symbols(), clock().date(), clock().date()
     )
     feed(env, clock)
-    *_, change, _quality = cc.render_curve(1, "BRN", OUTRIGHT, None)
+    *_, change, _quality, _plans = cc.render_curve(1, "BRN", OUTRIGHT, None)
     rows = change.data if hasattr(change, "data") else change.children[0].data
     assert len(rows) == 15 and rows[0]["structure"] == "Dec26" and rows[0]["prev"] != "n/a"
 
@@ -144,7 +145,7 @@ def test_kinks_table_lists_priority_methods_and_seasonality(env, clock):
     rows = curve_tab.kinks_rows(state.kinks)
     top = next(r for r in rows if r["product"] == "BRN" and r["family"] == "Outright")
     assert top["structure"] == "Feb27" and top["priority"] == "HIGH" and "Fit" in top["methods"]
-    assert top["seasonal"] == "no baseline" and top["direction"] == "rich"
+    assert top["seasonal"] == "no baseline" and top["direction"] == "rich" and top["trade"] == "SELL"
 
 
 def test_quality_panel_shows_buffer_flags_first(env, clock):
@@ -176,7 +177,10 @@ def test_backtest_callback_with_and_without_history(env, clock):
 def form_values(**overrides):
     params = {**CurveParams().__dict__, **overrides}
     names = [name for name, *_ in curve_tab.PARAM_FIELDS]
-    return [params[n] for n in names] + [params["alert_min_priority"], params["alerts_enabled"]]
+    by_product = [
+        [family for family in FAMILIES if f"{code}:{family}" in params["alert_structures"]] for code in ("CL", "BRN")
+    ]
+    return [params[n] for n in names] + [params["alert_min_priority"], params["alerts_enabled"], *by_product]
 
 
 def test_saving_thresholds_stores_them_and_the_service_uses_them(env, repo, clock):
@@ -185,6 +189,15 @@ def test_saving_thresholds_stores_them_and_the_service_uses_them(env, repo, cloc
     loaded = load_params(repo)
     assert loaded.z_fit == 5.5 and loaded.alert_min_priority == "HIGH" and loaded.alerts_enabled is False
     assert env.curve_service.params().z_fit == 5.5
+
+
+def test_choosing_which_structures_may_alert_is_saved_per_product(env, repo):
+    keep = ["CL:spread", "CL:fly", "BRN:outright"]
+    message = cc.save_thresholds(1, *form_values(alert_structures=keep))
+    assert "Saved" in message.children
+    assert load_params(repo).alert_structures == ["CL:spread", "CL:fly", "BRN:outright"]  # canonical order
+    layout = str(curve_tab.trade_analyzer_layout())
+    assert "curve-alert-CL" in layout and "curve-alert-BRN" in layout
 
 
 def test_invalid_thresholds_are_rejected_with_a_message(env, repo):
@@ -215,3 +228,100 @@ def test_curve_settings_load_and_save(env, repo):
 
 def test_settings_layout_has_the_curve_section(env):
     assert "settings-curve-open-time" in str(settings_layout_module.settings_layout())
+
+
+# ---------- trade plan on the dashboard ----------
+
+
+def planned_state(env, repo, clock):
+    repo.set_setting("api_access_token", "tok")  # lets the service load history, so plans can be built
+    feed(env, clock)
+    feed(env, clock, kinks={"COG27": 0.4})
+    return env.curve_service.state()
+
+
+def test_kinks_table_shows_the_plan_columns(env, repo, clock):
+    state = planned_state(env, repo, clock)
+    row = next(r for r in curve_tab.kinks_rows(state.kinks) if r["product"] == "BRN" and r["family"] == "Outright")
+    assert row["trade"] == "SELL" and row["entry"] != "" and int(row["lots"]) >= 1
+    assert float(row["stop"]) > float(row["entry"]) > float(row["target"])  # a short: stop above, target below
+    assert row["hedge"].split()[0] in ("BUY", "SELL") and float(row["rr"]) > 0
+    table = curve_tab.build_kinks_table(state.kinks)
+    assert {"entry", "lots", "stop", "target", "rr", "hedge"} <= {c["id"] for c in table.columns}
+
+
+def test_plan_cards_show_entry_lots_stop_target_and_hedge_options(env, repo, clock):
+    state = planned_state(env, repo, clock)
+    text = str(curve_tab.build_plan_cards(state.kinks))
+    for needle in ("SELL BRN Outright Feb27", "sell Feb27", "Stop", "Target", "Reward : risk", "Time stop",
+                   "Hedge alternatives", "Ratio (VaR)", "Ratio (min-var)", "VaR change"):
+        assert needle in text, needle
+
+
+def test_plan_cards_explain_when_history_is_missing(env, clock):
+    feed(env, clock, kinks={"COG27": 0.4})  # no token, no history
+    text = str(curve_tab.build_plan_cards(env.curve_service.state().kinks))
+    assert "need price history" in text and "Stop" not in text
+
+
+def test_plan_cards_are_limited_to_the_strongest_ten(env, repo, clock):
+    state = planned_state(env, repo, clock)
+    many = (state.kinks * 5)[: curve_tab.PLAN_CARD_LIMIT + 3]
+    assert "strongest" in str(curve_tab.build_plan_cards(many))
+    assert "no trade plans" in str(curve_tab.build_plan_cards([]))
+
+
+def test_render_curve_returns_the_plan_tab_content(env, repo, clock):
+    planned_state(env, repo, clock)
+    *_, plans = cc.render_curve(1, "BRN", OUTRIGHT, None)
+    assert "Hedge alternatives" in str(plans)
+
+
+# ---------- settings tab: risk appetite and hedge rules ----------
+
+
+TRADE_FORM = [5000, 1000, 1000, 100, 1.5, 60, 10, 0.5, 0.0, 2, 0.5, 120]  # in CURVE_TRADE_FIELDS order
+
+
+def test_trade_settings_load_defaults_and_save(env, repo):
+    with pytest.raises(PreventUpdate):
+        sc.load_curve_trade_settings("/home")
+    loaded = sc.load_curve_trade_settings("/settings")
+    assert list(loaded[:12]) == TRADE_FORM and loaded[12] is True
+    assert loaded[16] == ["fly", "dfly"] and loaded[13][0] == "outright"  # dfly kinks: fly or dfly hedges
+
+    form = [2500, 400, 1000, 50, 2.0, 30, 5, 0.6, 1.5, 3, 0.6, 90]
+    hedge_types = [["fly"], ["spread", "fly", "dfly"], ["fly", "dfly"], ["dfly"]]
+    message = sc.save_curve_trade_settings(1, *form, False, *hedge_types)
+    assert "Saved" in message
+    saved = load_params(repo)
+    assert (saved.risk_per_trade, saved.risk_per_lot, saved.max_lots, saved.min_reward_risk, saved.hedge_count) == (2500, 400, 50, 1.5, 3)
+    assert saved.hedge_exclude_overlap is False and saved.hedge_types["outright"] == ["fly"] and saved.hedge_types["dfly"] == ["dfly"]
+
+
+def test_saving_trade_settings_keeps_the_thresholds_set_elsewhere(env, repo):
+    from core.curve_settings import save_params
+    save_params(repo, CurveParams(z_fit=4.4, alert_min_priority="HIGH", alert_structures=["CL:spread"]))
+    sc.save_curve_trade_settings(1, *TRADE_FORM, True, *[["fly"]] * 4)
+    kept = load_params(repo)
+    assert kept.z_fit == 4.4 and kept.alert_min_priority == "HIGH" and kept.alert_structures == ["CL:spread"]
+
+
+def test_bad_trade_settings_are_rejected_and_nothing_changes(env, repo):
+    for bad_form, hedge_types in (
+        ([0] + TRADE_FORM[1:], [["fly"]] * 4),  # risk per trade of zero
+        (TRADE_FORM[:9] + [0] + TRADE_FORM[10:], [["fly"]] * 4),  # no hedges shown
+        (TRADE_FORM, [[], ["fly"], ["fly"], ["fly"]]),  # an outright kink with no allowed hedge type
+        ([None] + TRADE_FORM[1:], [["fly"]] * 4),
+    ):
+        assert "Not saved" in sc.save_curve_trade_settings(1, *bad_form, True, *hedge_types)
+    assert load_params(repo) == CurveParams()
+    with pytest.raises(PreventUpdate):
+        sc.save_curve_trade_settings(None, *TRADE_FORM, True, *[["fly"]] * 4)
+
+
+def test_settings_layout_has_the_trade_plan_fields(env):
+    layout = str(settings_layout_module.settings_layout())
+    for needle in ("settings-curve-risk_per_trade", "settings-curve-risk_per_lot", "settings-curve-hedge_count",
+                   "settings-curve-hedge-dfly", "settings-save-curve-trade", "settings-curve-hedge_exclude_overlap"):
+        assert needle in layout, needle

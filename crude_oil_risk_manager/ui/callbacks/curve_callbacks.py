@@ -10,6 +10,7 @@ from dash import Input, Output, State, html
 from dash.exceptions import PreventUpdate
 
 from core.curve_backtest import run_backtest
+from core.curve_calendar import PRODUCTS
 from core.curve_settings import save_params, validate_params
 from ui.container import container
 from ui.layouts.curve_tab import (
@@ -19,6 +20,7 @@ from ui.layouts.curve_tab import (
     build_change_table,
     build_curve_figure,
     build_kinks_table,
+    build_plan_cards,
     build_log_table,
     build_quality,
     build_strength_figure,
@@ -48,7 +50,7 @@ def render_curve(n_intervals, product, family, snapshot_date):
     service = container.curve_service
     if service is None:
         message = html.Div("The curve engine is not running.", style=_MUTED)
-        return empty_figure("Curve engine not running"), empty_figure(""), message, message, message, message
+        return empty_figure("Curve engine not running"), empty_figure(""), message, message, message, message, message
     state = service.state()
     params = service.params()
     view = state.families.get((product, family))
@@ -60,6 +62,7 @@ def render_curve(n_intervals, product, family, snapshot_date):
         build_kinks_table(state.kinks),
         build_change_table(view),
         build_quality(state.quality),
+        build_plan_cards(state.kinks),
     )
 
 
@@ -98,6 +101,8 @@ def save_thresholds(n_clicks, *values):
     names = [name for name, *_ in PARAM_FIELDS]
     raw = dict(zip(names, values[: len(names)]))
     raw["alert_min_priority"], raw["alerts_enabled"] = values[len(names)], values[len(names) + 1]
+    selected = values[len(names) + 2:]  # one list of curve types per product, in PRODUCTS order
+    raw["alert_structures"] = [f"{code}:{family}" for code, families in zip(PRODUCTS, selected) for family in families or []]
     try:
         params = validate_params(raw)
     except ValueError as exc:
@@ -114,6 +119,7 @@ def register_curve_callbacks(app) -> None:
         Output("curve-kinks-wrap", "children"),
         Output("curve-change-wrap", "children"),
         Output("curve-quality-wrap", "children"),
+        Output("curve-plans-wrap", "children"),
         Input("curve-refresh", "n_intervals"),
         Input("curve-product", "value"),
         Input("curve-family", "value"),
@@ -139,5 +145,6 @@ def register_curve_callbacks(app) -> None:
         *(State(f"curve-param-{name}", "value") for name, *_ in PARAM_FIELDS),
         State("curve-param-alert_min_priority", "value"),
         State("curve-param-alerts_enabled", "value"),
+        *(State(f"curve-alert-{code}", "value") for code in PRODUCTS),
         prevent_initial_call=True,
     )(save_thresholds)

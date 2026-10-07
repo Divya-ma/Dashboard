@@ -98,8 +98,12 @@ def robust_fit(y: np.ndarray, degree: int, iterations: int = 12) -> np.ndarray:
     weights = np.ones(int(ok.sum()))
     coefficients = np.zeros(degree + 1)
     for _ in range(iterations):
-        root = np.sqrt(weights)
-        coefficients, *_ = np.linalg.lstsq(design * root[:, None], y[ok] * root, rcond=None)
+        weighted = design * weights[:, None]
+        try:  # weighted normal equations: far cheaper than a least-squares SVD for this tiny, well-scaled problem
+            coefficients = np.linalg.solve(design.T @ weighted + 1e-12 * np.eye(degree + 1), weighted.T @ y[ok])
+        except np.linalg.LinAlgError:
+            root = np.sqrt(weights)
+            coefficients, *_ = np.linalg.lstsq(design * root[:, None], y[ok] * root, rcond=None)
         residual = y[ok] - design @ coefficients
         scale = max(_MAD_TO_STD * float(np.median(np.abs(residual - np.median(residual)))), 1e-9)
         u = residual / (4.685 * scale)
@@ -109,10 +113,32 @@ def robust_fit(y: np.ndarray, degree: int, iterations: int = 12) -> np.ndarray:
     return fit
 
 
-def fit_residuals(values: np.ndarray, degree: int) -> np.ndarray:
-    """Robust-fit residual of every row of a T x n matrix (each day fitted on its own)."""
+def fit_residuals(values: np.ndarray, degree: int, iterations: int = 12) -> np.ndarray:
+    """Robust-fit residual of every row of a T x n matrix (each day fitted on its own).
+
+    Same Tukey-biweight IRLS as robust_fit, run for all complete rows at once (the design matrix
+    is the same for every day); rows with a missing value fall back to robust_fit one by one."""
+    values = np.asarray(values, dtype=float)
+    rows, n = values.shape
     out = np.full(values.shape, np.nan)
-    for row in range(values.shape[0]):
+    complete = np.isfinite(values).all(axis=1)
+    degree_used = min(degree, n - 2)
+    if complete.any() and degree_used >= 1:
+        v = values[complete]
+        design = np.vander(np.linspace(-1.0, 1.0, n), degree_used + 1)
+        ridge = 1e-12 * np.eye(degree_used + 1)
+        weights = np.ones_like(v)
+        for _ in range(iterations):
+            normal = np.einsum("tn,np,nq->tpq", weights, design, design) + ridge
+            rhs = np.einsum("tn,np,tn->tp", weights, design, v)
+            coefficients = np.linalg.solve(normal, rhs[..., None])[..., 0]
+            residual = v - coefficients @ design.T
+            centre = np.median(residual, axis=1, keepdims=True)
+            scale = np.maximum(_MAD_TO_STD * np.median(np.abs(residual - centre), axis=1, keepdims=True), 1e-9)
+            u = residual / (4.685 * scale)
+            weights = np.where(np.abs(u) < 1, (1 - u**2) ** 2, 0.0) + 1e-6
+        out[complete] = residual
+    for row in np.flatnonzero(~complete):
         out[row] = values[row] - robust_fit(values[row], degree)
     return out
 
@@ -211,21 +237,29 @@ class PositionResult:
     seasonal_normal: bool = False
     seasonal_obs: int = 0
     echo_of: int | None = None  # index of the stronger neighbouring kink this one is an interpolation echo of
+    fair: dict[str, float | None] = field(default_factory=dict)  # each method's idea of the fair value
 
 
-def _pca_z(values: np.ndarray, prepared: PreparedHistory) -> np.ndarray:
+def _pca_z(values: np.ndarray, prepared: PreparedHistory) -> tuple[np.ndarray, np.ndarray]:
+    """(z, implied value) from rebuilding the curve with the principal components; NaN where unavailable."""
     z = np.full(len(values), np.nan)
+    implied = np.full(len(values), np.nan)
     if prepared.pca_components is None:
-        return z
+        return z, implied
     deviation = values - prepared.pca_mean
     ok = np.isfinite(deviation)
     basis = prepared.pca_components
     if ok.sum() <= basis.shape[0] + 1:
-        return z
+        return z, implied
     coefficients, *_ = np.linalg.lstsq(basis[:, ok].T, deviation[ok], rcond=None)
     leftover = deviation - coefficients @ basis
     z[ok] = leftover[ok] / prepared.pca_scale[ok]
-    return z
+    implied[ok] = values[ok] - leftover[ok]
+    return z, implied
+
+
+def _finite(value: float) -> float | None:
+    return float(value) if np.isfinite(value) else None
 
 
 def seasonal_context(
@@ -286,15 +320,18 @@ def _detect_once(
     residual = neighbour_residuals(values)
     if prepared is not None and prepared.n == n:
         neighbour_z = residual / prepared.resid_scale
-        pca_z = _pca_z(values, prepared)
+        pca_z, pca_implied = _pca_z(values, prepared)
         history_z = (values - prepared.center) / prepared.spread if use_history_method else np.full(n, np.nan)
+        history_fair = prepared.center if use_history_method else np.full(n, np.nan)
     else:  # no usable history: cross-sectional fallback for the neighbour method, others unavailable
         prepared = None
         finite = residual[np.isfinite(residual)]
         scale = float(robust_scale(finite, floor=params.min_scale)) if len(finite) >= 3 else np.nan
         neighbour_z = residual / scale
         pca_z = np.full(n, np.nan)
+        pca_implied = np.full(n, np.nan)
         history_z = np.full(n, np.nan)
+        history_fair = np.full(n, np.nan)
 
     seasonal = (
         seasonal_context(prepared, month_numbers, residual, today, params)
@@ -328,6 +365,10 @@ def _detect_once(
                 implied=float(values[i] - residual[i]) if np.isfinite(residual[i]) else None,
                 residual=float(residual[i]) if np.isfinite(residual[i]) else None,
                 z=z, flags=flags, n_flags=len(flagged), score=float(score), direction=direction,
+                fair={
+                    "fit": _finite(fitted[i]), "neighbour": _finite(values[i] - residual[i]),
+                    "pca": _finite(pca_implied[i]), "history": _finite(history_fair[i]),
+                },
                 priority=_PRIORITY_BY_LEVEL[level], seasonal_z=seasonal_z,
                 seasonal_normal=bool(flagged) and seasonal_normal, seasonal_obs=seasonal_obs,
             )
@@ -386,6 +427,11 @@ def detect(
         else:
             final.append(position)
     return final
+
+
+def trade_side(direction: str) -> str:
+    """The trade that fades a kink: a contract rich against the curve is SOLD (short), a cheap one BOUGHT (long)."""
+    return {"rich": "SELL", "cheap": "BUY"}.get(direction, "")
 
 
 def is_kink(result: PositionResult) -> bool:

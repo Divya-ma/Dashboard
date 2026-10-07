@@ -89,6 +89,7 @@ class AlertManager:
         title: str,
         body: str,
         structure_id: str | None = None,
+        max_body_length: int = _MAX_BODY_LENGTH,
     ) -> Alert:
         """Create an alert, dispatch it to Teams if configured, persist it, and return it.
 
@@ -99,7 +100,7 @@ class AlertManager:
         alert = Alert(
             level=level,
             title=title[:_MAX_TITLE_LENGTH],
-            body=body[:_MAX_BODY_LENGTH],
+            body=body[:max_body_length],
             structure_id=structure_id,
         )
 

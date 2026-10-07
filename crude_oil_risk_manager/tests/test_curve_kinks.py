@@ -62,6 +62,17 @@ def test_robust_fit_ignores_a_single_outlier():
     assert abs(fit[6] - clean[6]) < 0.05  # the fit stays on the curve, not on the spike
 
 
+def test_batched_fit_residuals_equal_fitting_one_day_at_a_time():
+    from core.curve_kinks import fit_residuals
+    values, _, _ = smooth_history(rows=120)
+    values = values.copy()
+    values[40, 6] += 0.5
+    values[7, 3] = np.nan  # a day with a missing price falls back to the single-row fit
+    expected = np.array([row - robust_fit(row, 3) for row in values])
+    got = fit_residuals(values, 3)
+    assert np.allclose(got, expected, atol=1e-8, equal_nan=True)
+
+
 def test_detects_an_injected_kink_by_several_methods_and_suppresses_echoes():
     values, dates, months = smooth_history()
     params = CurveParams()
@@ -206,6 +217,17 @@ def test_validate_params_accepts_defaults_and_rejects_bad_values():
         validate_params({**defaults, "alert_min_priority": "URGENT"})
     with pytest.raises(ValueError):
         validate_params({**defaults, "lookback_days": None})
+
+
+def test_alert_structures_default_to_everything_and_reject_unknown_keys():
+    defaults = CurveParams().__dict__
+    assert len(CurveParams().alert_structures) == 8 and "BRN:dfly" in CurveParams().alert_structures
+    assert validate_params({**defaults, "alert_structures": ["BRN:fly"]}).alert_structures == ["BRN:fly"]
+    assert validate_params({**defaults, "alert_structures": []}).alert_structures == []
+    with pytest.raises(ValueError):
+        validate_params({**defaults, "alert_structures": ["WTI:fly"]})
+    old_settings = {k: v for k, v in defaults.items() if k != "alert_structures"}  # saved before this option existed
+    assert len(validate_params(old_settings).alert_structures) == 8
 
 
 def test_params_roundtrip_through_the_settings_table(tmp_db_path):

@@ -14,9 +14,18 @@ NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 class FakeApi:
     """Answers generic_chart_data / get_all like the real API, deterministically."""
 
-    def __init__(self, today: date = NOW.date(), fail_generic: bool = False):
+    def __init__(
+        self, today: date = NOW.date(), fail_generic: bool = False, batch_bug_codes: set[str] | None = None,
+        code_errors: dict[str, str] | None = None, max_rows_per_call: int | None = None,
+    ):
         self.today = today
         self.fail_generic = fail_generic
+        # Reproduces the real API: a batch of several groups that holds one of these codes fails as a
+        # whole (an error entry, no rows, for every group in it), while the code alone is fine.
+        self.batch_bug_codes = batch_bug_codes or set()
+        # Also like the real API: a call asking for more than this many days in total fails as a whole.
+        self.max_rows_per_call = max_rows_per_call
+        self.code_errors = code_errors or {}
         self.generic_calls: list[list[dict]] = []
         self.settlement_calls: list[dict] = []
 
@@ -25,8 +34,16 @@ class FakeApi:
         if self.fail_generic:
             raise APIError("generic endpoint down")
         out = {}
+        batch_fails = len(groups) > 1 and (
+            any(g["product"] in self.batch_bug_codes for g in groups)
+            or (self.max_rows_per_call is not None and sum(g["count"] for g in groups) > self.max_rows_per_call)
+        )
         for group in groups:
             code, count = group["product"], group["count"]
+            if batch_fails or code in self.code_errors:
+                message = self.code_errors.get(code, "Error fetching generic data: ValueError: Length mismatch")
+                out[f"{code}_1D"] = {"status": "SUCCESS", "df": [], "isVolumeAvailable": False, "error": message}
+                continue
             days = pd.bdate_range(end=pd.Timestamp(self.today), periods=count)  # includes today's unfinished bar
             rng = np.random.default_rng(sum(map(ord, code)))
             api = "".join(ch for ch in code if ch.isalpha())
@@ -76,7 +93,7 @@ class FakeAlerts:
     def __init__(self):
         self.sent: list[tuple[str, str, str]] = []
 
-    def send_alert(self, level, title, body, structure_id=None):
+    def send_alert(self, level, title, body, structure_id=None, **kwargs):
         self.sent.append((level.value, title, body))
 
     def titles(self) -> list[str]:

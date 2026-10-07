@@ -23,7 +23,7 @@ class Alert(BaseModel):
     )
     level: AlertLevel = Field(..., description="Severity level of this alert.")
     title: str = Field(..., max_length=100, description="Short alert title.")
-    body: str = Field(..., max_length=500, description="Full alert message body.")
+    body: str = Field(..., max_length=2000, description="Full alert message body.")
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), description="Auto-set to UTC now."
     )

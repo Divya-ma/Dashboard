@@ -13,12 +13,17 @@ from dash.exceptions import PreventUpdate
 
 from adapters.base import APIError
 from config.settings import settings
+from dataclasses import asdict
+
 from core.curve_settings import (
     DEFAULT_OPEN_TIME,
     DEFAULT_OPEN_TZ,
     KEY_CURVE_OPEN_TIME,
     KEY_CURVE_OPEN_TZ,
+    load_params,
+    save_params,
     validate_open_time,
+    validate_params,
 )
 from core.models import StructureStatus
 from core.pnl import calculate_portfolio_pnl
@@ -42,6 +47,7 @@ from core.user_settings import (
     validate_webhook_url,
 )
 from ui.container import container
+from ui.layouts.settings import CURVE_HEDGE_FAMILIES, CURVE_TRADE_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +142,39 @@ def save_curve_settings(n_clicks, open_time, open_tz):
     container.repository.set_setting(KEY_CURVE_OPEN_TIME, time_text)
     container.repository.set_setting(KEY_CURVE_OPEN_TZ, tz)
     return f"✅ Saved: settlements are fetched daily from {time_text} {tz}"
+
+
+_TRADE_NUMERIC = [name for name, *_ in CURVE_TRADE_FIELDS]
+_HEDGE_FAMILIES = [family for family, _ in CURVE_HEDGE_FAMILIES]
+
+
+def load_curve_trade_settings(pathname):
+    """Saved risk appetite and hedge rules (only when the Settings tab is open)."""
+    if pathname != "/settings":
+        raise PreventUpdate
+    params = asdict(load_params(container.repository))
+    return (
+        *(params[name] for name in _TRADE_NUMERIC),
+        params["hedge_exclude_overlap"],
+        *(params["hedge_types"][family] for family in _HEDGE_FAMILIES),
+    )
+
+
+def save_curve_trade_settings(n_clicks, *values):
+    """Validate and store the risk appetite and hedge rules, leaving every other curve setting as it is."""
+    if not n_clicks:
+        raise PreventUpdate
+    count = len(_TRADE_NUMERIC)
+    raw = asdict(load_params(container.repository))
+    raw.update(dict(zip(_TRADE_NUMERIC, values[:count])))
+    raw["hedge_exclude_overlap"] = bool(values[count])
+    raw["hedge_types"] = {family: list(chosen or []) for family, chosen in zip(_HEDGE_FAMILIES, values[count + 1:])}
+    try:
+        params = validate_params(raw)
+    except ValueError as exc:
+        return f"❌ Not saved: {exc}"
+    save_params(container.repository, params)
+    return "✅ Saved: used from the next compute"
 
 
 # ----------------------------------------------------------------------
@@ -434,6 +473,22 @@ def register_settings_callbacks(app) -> None:
         Output("settings-curve-open-tz", "value"),
         Input("url", "pathname"),
     )(load_curve_settings)
+
+    app.callback(
+        *(Output(f"settings-curve-{name}", "value") for name in _TRADE_NUMERIC),
+        Output("settings-curve-hedge_exclude_overlap", "value"),
+        *(Output(f"settings-curve-hedge-{family}", "value") for family in _HEDGE_FAMILIES),
+        Input("url", "pathname"),
+    )(load_curve_trade_settings)
+
+    app.callback(
+        Output("settings-curve-trade-feedback", "children"),
+        Input("settings-save-curve-trade", "n_clicks"),
+        *(State(f"settings-curve-{name}", "value") for name in _TRADE_NUMERIC),
+        State("settings-curve-hedge_exclude_overlap", "value"),
+        *(State(f"settings-curve-hedge-{family}", "value") for family in _HEDGE_FAMILIES),
+        prevent_initial_call=True,
+    )(save_curve_trade_settings)
 
     app.callback(
         Output("settings-curve-feedback", "children"),

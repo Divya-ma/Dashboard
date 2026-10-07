@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 
 from core.curve_calendar import DFLY, FAMILIES, FAMILY_LABELS, OUTRIGHT, PRODUCTS
-from core.curve_kinks import METHOD_LABELS, METHODS
+from core.curve_kinks import METHOD_LABELS, METHODS, trade_side
 from core.curve_service import FamilyView
 from core.curve_settings import PRIORITIES, CurveParams, load_params
 from ui.container import container
@@ -99,7 +99,7 @@ def _hover(position) -> str:
         lines.append(f"Implied by neighbours {_fmt(result.implied)}")
     if result is not None and result.n_flags and result.echo_of is None:
         z = ", ".join(f"{METHOD_LABELS[m]} {result.z[m]:+.1f}" for m in METHODS if result.flags[m])
-        lines.append(f"<b>KINK {result.priority} ({result.direction})</b>: {z}")
+        lines.append(f"<b>KINK {result.priority}: {trade_side(result.direction)}</b> ({result.direction}): {z}")
         if result.seasonal_normal:
             lines.append(f"seasonally normal (z {result.seasonal_z:+.1f})")
     if position.stale:
@@ -231,24 +231,103 @@ def kinks_rows(kinks: list[dict]) -> list[dict]:
         else:
             seasonal = f"{'normal' if k['seasonal_normal'] else 'unusual'} (z {k['seasonal_z']:+.1f})"
         rows.append({
-            "priority": k["priority"], "product": k["product"], "family": FAMILY_LABELS[k["family"]],
+            "priority": k["priority"], "trade": k["trade"], "product": k["product"], "family": FAMILY_LABELS[k["family"]],
             "structure": k["label"], "generic": k["generic"], "direction": k["direction"],
             "methods": " · ".join(f"{METHOD_LABELS[m]} {k['z'][m]:+.1f}" for m in METHODS if k["flags"].get(m)),
             "score": round(k["score"], 1), "seasonal": seasonal,
-            "live": _fmt(k["value"]), "implied": _fmt(k["implied"]),
+            "live": _fmt(k["value"]), "implied": _fmt(k["implied"]), **_plan_columns(k.get("plan")),
         })
     return rows
+
+
+def _plan_columns(plan) -> dict:
+    """The trade plan's headline numbers as table cells (blank until the plan can be built)."""
+    if plan is None:
+        return {"entry": "", "lots": "", "stop": "", "target": "", "rr": "", "hedge": ""}
+    hedge = plan.hedges[0] if plan.hedges else None
+    return {
+        "entry": _fmt(plan.entry), "lots": plan.lots, "stop": _fmt(plan.stop),
+        "target": _fmt(plan.target), "rr": "" if plan.rr is None else f"{plan.rr:.1f}",
+        "hedge": "" if hedge is None else f"{hedge.side} {hedge.lots} {hedge.family} {hedge.label}",
+    }
 
 
 def build_kinks_table(kinks: list[dict]) -> html.Div:
     if not kinks:
         return html.Div("No kinks at the current thresholds.", style={**_MUTED, "padding": "12px"})
     columns = [{"id": c, "name": n} for c, n in (
-        ("priority", "Priority"), ("product", "Product"), ("family", "Curve"), ("structure", "Structure"),
-        ("generic", "Generic"), ("direction", "vs curve"), ("methods", "Methods flagged (z)"), ("score", "Score"),
-        ("seasonal", "Seasonality"), ("live", "Live"), ("implied", "Implied"),
+        ("priority", "Priority"), ("trade", "Trade"), ("product", "Product"), ("family", "Curve"),
+        ("structure", "Structure"), ("generic", "Generic"), ("direction", "vs curve"), ("methods", "Methods flagged (z)"), ("score", "Score"),
+        ("seasonal", "Seasonality"), ("live", "Live"), ("implied", "Implied"), ("entry", "Entry"), ("lots", "Lots"),
+        ("stop", "Stop"), ("target", "Target"), ("rr", "R:R"), ("hedge", "Best hedge"),
     )]
     return _table("curve-kinks-table", columns, kinks_rows(kinks), _priority_styles())
+
+
+PLAN_CARD_LIMIT = 10
+
+
+def _plan_card(kink: dict) -> dbc.Card:
+    plan = kink.get("plan")
+    family = FAMILY_LABELS[kink["family"]]
+    colour = PRIORITY_COLORS[kink["priority"]]
+    header = html.Div([
+        html.Span(f"{kink['priority']} ", style={"color": colour, "fontWeight": "bold"}),
+        html.Span(f"{kink['trade']} {kink['product']} {family} {kink['label']}", style={"fontWeight": "bold", "fontSize": "17px"}),
+        html.Span(f"   {kink['generic']} is {kink['direction']} vs the curve", style=_MUTED),
+    ])
+    body: list = [header, html.Div(f"Legs: {kink['legs']}", style={**_MUTED, "margin": "4px 0 8px"})]
+    if plan is None:
+        body.append(html.Div(
+            "Lots, stop, target and hedges need price history, which is not loaded yet.",
+            style={"color": COLORS["ACCENT_YELLOW"]},
+        ))
+        return dbc.Card(dbc.CardBody(body), style={**_CARD, "borderLeft": f"4px solid {colour}"}, className="mb-2")
+
+    def stat(label, value, sub=""):
+        return dbc.Col([
+            html.Div(label, style=_LABEL),
+            html.Div(value, style={"fontSize": "20px", "fontWeight": "bold", "color": COLORS["TEXT_PRIMARY"]}),
+            html.Div(sub, style={**_MUTED, "fontSize": "11px"}),
+        ], xs=6, md=2, className="mb-2")
+
+    target = "no target" if plan.target is None else _fmt(plan.target)
+    target_sub = "" if plan.target is None else f"{plan.target_distance:.2f} pts · {plan.reversion_share:.0%} of gap to fair {_fmt(plan.fair_value)}"
+    body.append(dbc.Row([
+        stat(f"{plan.side} at", _fmt(plan.entry), "live price"),
+        stat("Lots", str(plan.lots), f"risk ${plan.dollar_risk:,.0f}"),
+        stat("Stop", _fmt(plan.stop), f"{plan.stop_distance:.2f} pts · {plan.stop_basis}"),
+        stat("Target", target, target_sub),
+        stat("Reward : risk", "n/a" if plan.rr is None else f"{plan.rr:.1f}",
+             "" if plan.dollar_reward is None else f"reward ${plan.dollar_reward:,.0f}"),
+        stat("Time stop", "n/a" if not plan.time_stop_days else f"~{plan.time_stop_days}d",
+             "" if plan.half_life_days is None else f"half-life {plan.half_life_days:.1f}d"),
+    ]))
+    if plan.hedges:
+        rows = [{
+            "side": h.side, "lots": h.lots, "structure": f"{FAMILY_LABELS[h.family]} {h.label}", "legs": h.legs,
+            "entry": _fmt(h.entry), "ratio": f"{h.ratio:.2f}", "minvar": f"{abs(h.ratio_minvar):.2f}",
+            "corr": f"{h.corr:+.2f}", "var": f"-{h.var_reduction:.0%}", "note": h.warning,
+        } for h in plan.hedges]
+        columns = [{"id": c, "name": n} for c, n in (
+            ("side", "Hedge"), ("lots", "Lots"), ("structure", "Structure"), ("legs", "Legs"), ("entry", "At"),
+            ("ratio", "Ratio (VaR)"), ("minvar", "Ratio (min-var)"), ("corr", "Corr"), ("var", "VaR change"), ("note", "Note"),
+        )]
+        body.append(html.Div("Hedge alternatives, best first (pick one)", style={**_LABEL, "marginTop": "8px"}))
+        body.append(_table(f"curve-hedges-{kink['product']}-{kink['family']}-{kink['position']}", columns, rows, page_size=5))
+    for warning in plan.warnings:
+        body.append(html.Div(f"⚠️ {warning}", style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "13px", "marginTop": "4px"}))
+    return dbc.Card(dbc.CardBody(body), style={**_CARD, "borderLeft": f"4px solid {colour}"}, className="mb-2")
+
+
+def build_plan_cards(kinks: list[dict]) -> html.Div:
+    """A card per current kink (strongest first): entry, lots, stop, target, time stop and hedge options."""
+    if not kinks:
+        return html.Div("No kinks at the current thresholds, so no trade plans.", style={**_MUTED, "padding": "12px"})
+    cards = [_plan_card(k) for k in kinks[:PLAN_CARD_LIMIT]]
+    if len(kinks) > PLAN_CARD_LIMIT:
+        cards.append(html.Div(f"Showing the {PLAN_CARD_LIMIT} strongest of {len(kinks)} kinks; the Kinks tab lists all.", style=_MUTED))
+    return html.Div(cards, style={"paddingTop": "10px"})
 
 
 def build_change_table(view: FamilyView | None) -> html.Div:
@@ -300,13 +379,13 @@ def build_log_table(events: list[dict]) -> html.Div:
             "first": first.strftime("%Y-%m-%d %H:%M"), "status": "active" if e["cleared_at"] is None else "cleared",
             "duration": f"{minutes // 60}h {minutes % 60:02d}m", "product": e["product"],
             "family": FAMILY_LABELS.get(e["family"], e["family"]), "structure": e["label"], "direction": e["direction"],
-            "priority": e["peak_priority"], "score": round(e["peak_score"], 1),
+            "trade": trade_side(e["direction"]), "priority": e["peak_priority"], "score": round(e["peak_score"], 1),
             "methods": " · ".join(f"{METHOD_LABELS[m]} {z[m]:+.1f}" for m in METHODS if z.get(m) is not None),
             "seasonal": "normal" if e["seasonal_normal"] else "—",
         })
     columns = [{"id": c, "name": n} for c, n in (
         ("first", "First seen (UTC)"), ("status", "Status"), ("duration", "Duration"), ("product", "Product"),
-        ("family", "Curve"), ("structure", "Structure"), ("direction", "vs curve"), ("priority", "Peak priority"),
+        ("family", "Curve"), ("structure", "Structure"), ("direction", "vs curve"), ("trade", "Trade"), ("priority", "Peak priority"),
         ("score", "Peak score"), ("methods", "z at peak"), ("seasonal", "Seasonal"),
     )]
     return _table("curve-log-table", columns, rows, _priority_styles("priority"), page_size=20)
@@ -359,7 +438,27 @@ def _thresholds_tab(params: CurveParams) -> html.Div:
                      _dropdown("curve-param-alert_min_priority", [{"label": p, "value": p} for p in PRIORITIES], params.alert_min_priority)], md=4),
             dbc.Col(dbc.Switch(id="curve-param-alerts_enabled", label="Send alerts", value=params.alerts_enabled, className="mt-4"), md=4),
         ], className="mb-3"),
-        dbc.Button("Save thresholds", id="curve-params-save", color="primary"),
+        html.Div("Send alerts for", style=_LABEL),
+        html.Div(
+            "Kinks are still shown on the page and logged for every curve; this only chooses which ones send an alert.",
+            style={**_MUTED, "marginBottom": "8px"},
+        ),
+        *[
+            dbc.Row([
+                dbc.Col(html.Div(spec.name, style={"color": COLORS["TEXT_PRIMARY"], "paddingTop": "4px"}), md=3),
+                dbc.Col(
+                    dbc.Checklist(
+                        id=f"curve-alert-{code}",
+                        options=[{"label": FAMILY_LABELS[f], "value": f} for f in FAMILIES],
+                        value=[f for f in FAMILIES if f"{code}:{f}" in params.alert_structures],
+                        inline=True,
+                    ),
+                    md=9,
+                ),
+            ], className="mb-1")
+            for code, spec in PRODUCTS.items()
+        ],
+        dbc.Button("Save thresholds", id="curve-params-save", color="primary", className="mt-3"),
         html.Div(id="curve-params-message", style={**_MUTED, "marginTop": "10px", "minHeight": "20px"}),
     ])
 
@@ -398,6 +497,7 @@ def trade_analyzer_layout() -> html.Div:
         dbc.Tabs([
             dbc.Tab(html.Div(id="curve-kinks-wrap"), label="Kinks", tab_id="kinks"),
             dbc.Tab(html.Div(id="curve-change-wrap"), label="Change vs settlement", tab_id="change"),
+            dbc.Tab(html.Div(id="curve-plans-wrap"), label="Trade plans", tab_id="plans"),
             dbc.Tab(html.Div(id="curve-quality-wrap"), label="Data quality", tab_id="quality"),
             dbc.Tab(html.Div(id="curve-log-wrap"), label="History log", tab_id="log"),
             dbc.Tab(_backtest_tab(), label="Backtest", tab_id="backtest"),

@@ -6,8 +6,8 @@ import pytest
 
 from core.curve_calendar import DFLY, FAMILIES, FLY, OUTRIGHT, SPREAD
 from core.curve_history import CurveHistoryStore
-from core.curve_service import CurveService, structure_value
-from core.curve_settings import CurveParams, save_params
+from core.curve_service import CurveService, structure_value, trade_legs
+from core.curve_settings import ALERT_KEYS, CurveParams, save_params
 from core.curve_store import PrevSettlementStore, SnapshotStore
 from db.repository import Repository
 from tests.curve_fakes import NOW, FakeAlerts, FakeApi, MutableClock, make_prices
@@ -36,7 +36,8 @@ def api():
 
 
 @pytest.fixture
-def service(repo, tmp_path, clock, alerts, api):
+def service(repo, tmp_path, clock, alerts, api, monkeypatch):
+    monkeypatch.setattr(CurveService, "_reversion", lambda self, product, family, history, params: (0.8, 40))
     return CurveService(
         repo, api, CurveHistoryStore(tmp_path / "curves", api),
         PrevSettlementStore(tmp_path / "curves" / "prev.json"), SnapshotStore(tmp_path / "curves"),
@@ -131,6 +132,28 @@ def test_a_curve_with_most_points_flagged_is_treated_as_a_data_mismatch_not_kink
     assert not state.families[("CL", OUTRIGHT)].suspect  # CL was fine
 
 
+def test_trade_legs_flip_for_sell_and_scale_for_flies_and_dflies(service, clock):
+    ladder = service.ladder("BRN", clock().date())
+    assert trade_legs(ladder[OUTRIGHT][2], "SELL") == "sell Feb27"
+    assert trade_legs(ladder[OUTRIGHT][2], "BUY") == "buy Feb27"
+    assert trade_legs(ladder[SPREAD][2], "SELL") == "sell Feb27, buy Mar27"
+    assert trade_legs(ladder[FLY][2], "SELL") == "sell Feb27, buy 2 Mar27, sell Apr27"
+    assert trade_legs(ladder[FLY][2], "BUY") == "buy Feb27, sell 2 Mar27, buy Apr27"
+    assert trade_legs(ladder[DFLY][0], "BUY") == "buy Dec26, sell 3 Jan27, buy 3 Feb27, sell Mar27"
+
+
+def test_a_rich_kink_alert_says_sell_and_a_cheap_one_says_buy(service, clock, alerts):
+    state = feed(service, clock, kinks={"COG27": 0.4, "CLH27": -0.35})
+    brn = next(k for k in state.kinks if k["product"] == "BRN" and k["family"] == OUTRIGHT)
+    cl = next(k for k in state.kinks if k["product"] == "CL" and k["family"] == OUTRIGHT)
+    assert (brn["direction"], brn["trade"], brn["legs"]) == ("rich", "SELL", "sell Feb27")
+    assert (cl["direction"], cl["trade"], cl["legs"]) == ("cheap", "BUY", "buy Mar27")
+    brn_alert = next((t, b) for _, t, b in alerts.sent if "BRN" in t)
+    cl_alert = next((t, b) for _, t, b in alerts.sent if "CL" in t)
+    assert "- SELL" in brn_alert[0] and "TRADE: SELL" in brn_alert[1]
+    assert "- BUY" in cl_alert[0] and "TRADE: BUY" in cl_alert[1]
+
+
 def test_related_kinks_are_batched_into_one_alert_per_product(service, clock, alerts):
     state = feed(service, clock, kinks={"COG27": 0.4})
     brn_kinks = [k for k in state.kinks if k["product"] == "BRN"]
@@ -139,6 +162,23 @@ def test_related_kinks_are_batched_into_one_alert_per_product(service, clock, al
     assert len(brn_alerts) == 1
     title, body = brn_alerts[0]
     assert f"+{len(brn_kinks) - 1} related" in title and "Also:" in body
+
+
+def test_alerts_can_be_limited_to_chosen_products_and_curve_types(service, clock, alerts, repo):
+    keep = [k for k in ALERT_KEYS if k not in ("BRN:outright", "CL:outright")]  # not trading outrights
+    save_params(repo, CurveParams(alert_structures=keep))
+    state = feed(service, clock, kinks={"COG27": 0.4, "CLH27": -0.35})
+    assert any(k["family"] == OUTRIGHT for k in state.kinks)  # still detected and shown
+    assert alerts.sent  # spreads, flies and dflies still alert
+    for _, title, body in alerts.sent:
+        assert " outright " not in title and "outright" not in body.split("Also:")[-1]
+    assert any(e["family"] == OUTRIGHT for e in repo.get_kink_events())  # and still logged
+
+
+def test_one_product_can_be_silenced_while_the_other_alerts(service, clock, alerts, repo):
+    save_params(repo, CurveParams(alert_structures=[k for k in ALERT_KEYS if not k.startswith("CL:")]))
+    feed(service, clock, kinks={"COG27": 0.4, "CLH27": -0.35})
+    assert alerts.sent and all("BRN" in title for _, title, _ in alerts.sent)
 
 
 def test_alerts_can_be_switched_off_but_kinks_still_show(service, clock, alerts, repo):
@@ -230,12 +270,12 @@ def test_jobs_do_nothing_without_a_token(service, clock, api):
 def test_history_and_settlements_load_once_when_a_token_is_set(service, clock, api, repo):
     repo.set_setting("api_access_token", "tok")
     feed(service, clock)
-    assert len(api.generic_calls) == 6 and len(api.settlement_calls) == 1  # 2 products x 3 chunks, one settlement call
+    assert len(api.generic_calls) == 10 and len(api.settlement_calls) == 1  # 2 products x 5 calls of 5-year depth, one settlement call
     assert service.history.matrix("BRN", OUTRIGHT) is not None
     assert service.settlements.fetched_on == "2026-10-06"
     assert "refreshed" in service.job_messages["history"]
     feed(service, clock)
-    assert len(api.generic_calls) == 6 and len(api.settlement_calls) == 1  # not again the same day
+    assert len(api.generic_calls) == 10 and len(api.settlement_calls) == 1  # not again the same day
 
     state = service.state()
     prev = state.families[("BRN", OUTRIGHT)].positions[0].prev_settle
@@ -259,7 +299,7 @@ def test_a_failed_history_refresh_is_retried_later_not_marked_done(service, cloc
     repo.set_setting("api_access_token", "tok")
     api.fail_generic = True
     feed(service, clock)
-    assert "incomplete" in service.job_messages["history"]
+    assert "incomplete" in service.job_messages["history"] and "generic endpoint down" in service.job_messages["history"]
     assert repo.get_setting("curve_history_refreshed_on") is None
     calls = len(api.generic_calls)
     clock.advance(minutes=5)

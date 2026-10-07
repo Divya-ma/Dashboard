@@ -9,6 +9,9 @@ from the curve implied by its neighbours - is compared with the residual on the 
   reverted   the residual shrank to less than half its flag-day size within h days
   reduction  how many points the residual shrank by (negative = it widened)
 
+`reversion` is the median share of the flag-day residual that had closed after h days, over
+every flagged kink (the trade plan uses it to place the target).
+
 Reversion is partly mechanical: a large residual tends to shrink even by chance, so read the
 figures across groups (1 vs 2 vs 3+ agreeing methods) rather than as absolute proof. Seasonality
 is not applied here (it needs the delivery-month history of each past day); the backtest answers
@@ -37,6 +40,8 @@ class BacktestResult:
     family: str
     days_tested: int = 0
     rows: list[dict] = field(default_factory=list)  # one row per (group, horizon)
+    reversion: dict[int, float | None] = field(default_factory=dict)  # horizon -> median share of the residual closed
+    reversion_events: dict[int, int] = field(default_factory=dict)  # horizon -> kinks it is based on
     error: str | None = None
 
 
@@ -64,6 +69,7 @@ def run_backtest(
     first = max(MIN_TRAIN_ROWS, history.rows - longest - test_days)
     last = history.rows - longest  # exclusive: every flag needs `longest` days of follow-up
     groups: dict[str, dict[int, list[tuple[float, float]]]] = {}
+    everything: dict[int, list[tuple[float, float]]] = {}
 
     def add(group: str, horizon: int, before: float, after: float) -> None:
         groups.setdefault(group, {}).setdefault(horizon, []).append((before, after))
@@ -88,8 +94,15 @@ def run_backtest(
                 after = abs(residuals[t + horizon, j]) if j is not None else np.nan
                 if not np.isfinite(after):
                     continue
+                everything.setdefault(horizon, []).append((before, after))
                 for label in labels:
                     add(label, horizon, before, after)
+
+    for horizon in horizons:
+        pairs = everything.get(horizon, [])
+        result.reversion_events[horizon] = len(pairs)
+        shares = [(b - a) / b for b, a in pairs if b > 0]
+        result.reversion[horizon] = float(np.median(shares)) if shares else None
 
     order = ["1 method", "2 methods", "3+ methods"] + [f"{METHOD_LABELS[m]} flagged" for m in METHODS]
     for label in order:

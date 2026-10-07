@@ -112,6 +112,54 @@ def _defaults_section() -> dbc.AccordionItem:
     )
 
 
+# (field, label, hint, step) for the trade-plan settings, in the order shown
+CURVE_TRADE_FIELDS = [
+    ("risk_per_trade", "Risk per trade ($)", "Most you will lose at the stop on the whole entry; sets the number of lots", 100),
+    ("risk_per_lot", "Risk per lot ($)", "Most you will lose per lot at the stop; caps how far the stop can be", 50),
+    ("point_value", "Point value ($ per point per lot)", "1,000 for CL and Brent (1,000 barrels)", 1),
+    ("max_lots", "Max lots", "Never suggest more than this, however tight the stop", 1),
+    ("vol_stop_mult", "Volatility stop (x daily move)", "Stop distance is this many daily moves, but never beyond the per-lot cap", 0.1),
+    ("vol_window", "Volatility window (days)", "Days of daily moves behind that volatility", 5),
+    ("reversion_horizon", "Reversion horizon (days)", "How long a kink is given to close when estimating the target", 1),
+    ("min_reversion_fraction", "Minimum share of the gap in the target", "The target takes at least this share of the gap to fair value (0.05 to 1)", 0.05),
+    ("min_reward_risk", "Minimum reward:risk for an alert", "0 = off. Otherwise no alert unless the plan reaches this", 0.1),
+    ("hedge_count", "Hedge alternatives shown", "Ranked best first; at least one is always shown", 1),
+    ("hedge_min_corr", "Minimum hedge correlation", "A hedge should reach this |correlation| to be listed (0 to 0.99)", 0.05),
+    ("hedge_lookback", "Hedge lookback (days)", "Days of daily changes for correlation and the VaR ratio", 10),
+]
+CURVE_HEDGE_FAMILIES = [("outright", "Outright"), ("spread", "Spread"), ("fly", "Fly"), ("dfly", "Dfly")]
+
+
+def _curve_trade_fields() -> list:
+    """Risk appetite, sizing and hedge rules for the Curve Kinks trade plan."""
+    fields = [
+        html.Hr(style={"borderColor": COLORS["BORDER_COLOR"]}),
+        html.Div("Trade plan: risk, sizing and hedges", style={**_LABEL_STYLE, "fontWeight": "bold", "marginBottom": "10px"}),
+    ]
+    fields += [
+        _field(label, dbc.Input(id=f"settings-curve-{name}", type="number", step=step), hint)
+        for name, label, hint, step in CURVE_TRADE_FIELDS
+    ]
+    fields.append(dbc.Switch(
+        id="settings-curve-hedge_exclude_overlap", label="Hedges must not share a contract with the kinked structure",
+        value=True, className="mb-3",
+    ))
+    fields.append(html.Div("Which curve types may hedge each kind of kink (same product only)", style=_LABEL_STYLE))
+    for family, label in CURVE_HEDGE_FAMILIES:
+        fields.append(dbc.Row([
+            dbc.Col(html.Div(f"{label} kink", style={"color": COLORS["TEXT_PRIMARY"], "paddingTop": "4px"}), md=4),
+            dbc.Col(dbc.Checklist(
+                id=f"settings-curve-hedge-{family}", options=[{"label": n, "value": f} for f, n in CURVE_HEDGE_FAMILIES],
+                value=[], inline=True,
+            ), md=8),
+        ], className="mb-1"))
+    fields += [
+        dbc.Button("Save Trade Plan Settings", id="settings-save-curve-trade", color="primary", className="mt-3"),
+        html.Div("", id="settings-curve-trade-feedback", style=_STATUS_STYLE),
+    ]
+    return fields
+
+
 def _curve_section() -> dbc.AccordionItem:
     return dbc.AccordionItem(
         [
@@ -132,6 +180,7 @@ def _curve_section() -> dbc.AccordionItem:
             ),
             dbc.Button("Save Curve Settings", id="settings-save-curve", color="primary"),
             html.Div("", id="settings-curve-feedback", style=_STATUS_STYLE),
+            *_curve_trade_fields(),
         ],
         title="🎯 Curve Kinks",
         item_id="curve",
