@@ -26,11 +26,13 @@ from adapters.live.fairvalue import FairValueLiveAdapter  # noqa: E402
 from adapters.qh_api import make_api  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
+from core.curve_compare import CurveCompare  # noqa: E402
 from core.curve_history import CurveHistoryStore  # noqa: E402
 from core.curve_service import CurveService  # noqa: E402
 from core.curve_store import PrevSettlementStore, SnapshotStore  # noqa: E402
 from core.data_loader import DataLoader  # noqa: E402
 from core.excel_correlation import ExcelCorrelationStore  # noqa: E402
+from core.quote_store import FairValueStore, QuoteStore  # noqa: E402
 from core.structure_builder import active_composite_symbols  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_STALENESS  # noqa: E402
 from db.repository import Repository  # noqa: E402
@@ -42,6 +44,7 @@ from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
 from ui.callbacks.structure_detail_callbacks import register_structure_detail_callbacks  # noqa: E402
 from ui.callbacks.var_callbacks import register_var_callbacks  # noqa: E402
 from ui.callbacks.curve_callbacks import register_curve_callbacks  # noqa: E402
+from ui.callbacks.curve_compare_callbacks import register_curve_compare_callbacks  # noqa: E402
 from ui.callbacks.archive_callbacks import register_archive_callbacks  # noqa: E402
 from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
@@ -113,6 +116,12 @@ container.curve_service = CurveService(
 # The curve ladder (outrights, spreads, flies of CL and BRN) is priced in the same /fairvalue/
 # request as the position prices, so it costs no extra call.
 live_adapter.set_curve_symbols_provider(container.curve_service.symbols_to_poll)
+# Curve Compare polls /taq/ quotes only while its page is open; /fairvalue/ prices from the poll above
+# fill in any symbol that has no quote.
+container.curve_compare = CurveCompare(
+    QuoteStore(qh_api), PrevSettlementStore(Path(_curve_dir) / "compare_prev_settlement.json"), qh_api,
+    fallback_prices=live_adapter.curve_prices, fair_values=FairValueStore(qh_api),
+)
 
 
 def _run_morning_sync() -> None:
@@ -215,6 +224,7 @@ register_correlation_callbacks(app)
 register_exposure_callbacks(app)
 register_var_callbacks(app)
 register_curve_callbacks(app)
+register_curve_compare_callbacks(app)
 register_archive_callbacks(app)
 
 

@@ -42,6 +42,7 @@ NAV_ITEMS = [
     ("/exposure", "📈 Exposure Map"),
     ("/var-scenario", "⚠️ VaR & Scenarios"),
     ("/trade-analyzer", "🎯 Trade Analyzer"),
+    ("/curve-compare", "📉 Curve Compare"),
     ("/archive", "📁 Archive"),
     ("/settings", "⚙️ Settings"),
 ]

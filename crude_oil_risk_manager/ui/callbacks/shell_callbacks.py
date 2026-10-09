@@ -61,6 +61,7 @@ _ROUTES = {
     "/exposure": ("exposure_tab", "exposure_layout"),
     "/var-scenario": ("var_tab", "var_scenario_layout"),
     "/trade-analyzer": ("curve_tab", "trade_analyzer_layout"),
+    "/curve-compare": ("curve_compare_tab", "curve_compare_layout"),
     "/archive": ("archive_tab", "archive_layout"),
     "/settings": ("settings", "settings_layout"),
 }
