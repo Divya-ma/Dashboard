@@ -9,6 +9,9 @@ from dash import dcc, html
 
 from config.settings import settings
 from core.curve_settings import DEFAULT_OPEN_TIME, DEFAULT_OPEN_TZ, TIMEZONE_CHOICES
+from core.oi_settings import (
+    DEFAULT_ATR_HISTORY_DAYS, DEFAULT_OI_HISTORY_DAYS, MAX_ATR_HISTORY_DAYS, MAX_OI_HISTORY_DAYS, MIN_ATR_HISTORY_DAYS, MIN_OI_HISTORY_DAYS,
+)
 from core.user_settings import KEY_API_TOKEN
 from ui.container import container
 from ui.layouts.shell import COLORS
@@ -188,6 +191,30 @@ def _curve_section() -> dbc.AccordionItem:
     )
 
 
+def _oi_section() -> dbc.AccordionItem:
+    return dbc.AccordionItem(
+        [
+            _field(
+                "OI history (calendar days before expiry)",
+                _number_input("settings-oi-history-days", DEFAULT_OI_HISTORY_DAYS),
+                f"Between {MIN_OI_HISTORY_DAYS} and {MAX_OI_HISTORY_DAYS}. How far back from each contract's expiry the "
+                "OI / Volume / ATR page downloads and analyses daily data (about 1,850 days is all a contract has). "
+                "Raising it downloads the extra days on the next visit to the page.",
+            ),
+            _field(
+                "ATR history (calendar days before expiry)",
+                _number_input("settings-atr-history-days", DEFAULT_ATR_HISTORY_DAYS),
+                f"Between {MIN_ATR_HISTORY_DAYS} and {MAX_ATR_HISTORY_DAYS}. How far back from each contract's expiry the ATR views download daily OHLC "
+                "(400 covers a year of life plus the average's warm-up).",
+            ),
+            dbc.Button("Save OI Settings", id="settings-save-oi", color="primary"),
+            html.Div("", id="settings-oi-feedback", style=_STATUS_STYLE),
+        ],
+        title="📈 OI / Volume / ATR",
+        item_id="oi",
+    )
+
+
 def _teams_section() -> dbc.AccordionItem:
     return dbc.AccordionItem(
         [
@@ -257,7 +284,7 @@ def settings_layout() -> html.Div:
         [
             html.H4("⚙️ Settings", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "20px"}),
             dbc.Accordion(
-                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _teams_section(), _account_reset_section(), _data_section()],
+                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _oi_section(), _teams_section(), _account_reset_section(), _data_section()],
                 id="settings-accordion",
                 always_open=True,
                 active_item=["thresholds"] if token_configured else ["api"],

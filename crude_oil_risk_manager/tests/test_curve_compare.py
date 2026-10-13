@@ -7,7 +7,7 @@ import pytest
 from adapters.base import RateLimitError
 from core.curve_calendar import DFLY, FLY, OUTRIGHT, SPREAD, generic_contracts
 from core.curve_compare import (
-    DFLY_FLIES, DFLY_SPREAD3, DFLY_SPREADS, SOURCE_DERIVED, SOURCE_FAIR, SOURCE_QUOTE, CurveCompare, Quote,
+    build_curve_views, DFLY_FLIES, DFLY_SPREAD3, DFLY_SPREADS, SOURCE_DERIVED, SOURCE_FAIR, SOURCE_QUOTE, CurveCompare, Quote,
     build_curve, build_price_book, settlement_curve, symbol_tiers, symbols_needed, vwap,
 )
 from core.quote_store import FairValueStore, QuoteStore, parse_quotes
@@ -49,8 +49,8 @@ def test_vwap_without_sizes_is_the_plain_mid_and_without_a_two_sided_quote_is_no
 
 
 def test_quote_price_and_book_prefers_quotes_over_fair_value():
-    book = build_price_book({"A": Quote(1.0, 2.0, 1, 1, 100.0)}, {"A": (9.0, 90.0), "B": (5.0, 90.0)})
-    assert book["A"] == (1.5, 100.0, SOURCE_QUOTE)
+    book = build_price_book({"A": Quote(1.0, 1.1, 1, 1, 100.0)}, {"A": (9.0, 90.0), "B": (5.0, 90.0)})
+    assert book["A"] == (pytest.approx(1.05), 100.0, SOURCE_QUOTE)
     assert book["B"] == (5.0, 90.0, SOURCE_FAIR)
 
 
@@ -126,9 +126,9 @@ def test_a_price_over_a_day_old_loses_to_a_build_from_fresh_pieces_but_beats_not
 
 
 def test_the_newer_of_quote_and_fair_value_wins():
-    book = build_price_book({"A": Quote(1.0, 2.0, 1, 1, 100.0)}, {"A": (9.0, 500.0)})
+    book = build_price_book({"A": Quote(1.0, 1.1, 1, 1, 100.0)}, {"A": (9.0, 500.0)})
     assert book["A"] == (9.0, 500.0, SOURCE_FAIR)
-    book = build_price_book({"A": Quote(1.0, 2.0, 1, 1, 500.0)}, {"A": (9.0, 500.0)})
+    book = build_price_book({"A": Quote(1.0, 1.1, 1, 1, 500.0)}, {"A": (9.0, 500.0)})
     assert book["A"][2] == SOURCE_QUOTE
 
 
@@ -175,15 +175,22 @@ def taq_row(symbol, ts_seconds, bid, ask, bid_size=1, ask_size=1):
 
 
 class FakeTaq:
-    def __init__(self, rows=None, total_pages=1, error=None):
-        self.rows, self.total_pages, self.error, self.calls = rows or [], total_pages, error, []
+    """Answers /taq/ like the real API: rows sorted oldest first, `pages` of them (page 1 = the oldest)."""
 
-    def taq(self, products):
+    def __init__(self, rows=None, total_pages=1, error=None, pages=None):
+        self.rows, self.total_pages, self.error, self.calls, self.pages = rows or [], total_pages, error, [], pages
+        self.page_calls: list[int] = []
+
+    def taq(self, products, page=None):
         self.calls.append(products)
+        self.page_calls.append(page or 1)
         if self.error:
             raise self.error
         wanted = {p["id"] for p in products}
-        return {"status": "SUCCESS", "page": 1, "total_pages": self.total_pages,
+        if self.pages is not None:  # explicit pages, oldest first
+            data = self.pages[(page or 1) - 1]
+            return {"status": "SUCCESS", "page": page or 1, "total_pages": len(self.pages), "data": [r for r in data if r["instrument"] in wanted]}
+        return {"status": "SUCCESS", "page": page or 1, "total_pages": self.total_pages,
                 "data": [r for r in self.rows if r["instrument"] in wanted]}
 
 
@@ -231,7 +238,7 @@ def test_errors_are_reported_not_raised_and_extra_pages_shrink_the_chunk():
     store = QuoteStore(FakeTaq(error=RateLimitError("slow down")), clock=lambda: NOW, autostart=False)
     store.request(("k",), ["CLZ26"])
     assert store.refresh_once() == 0 and "rate limit" in store.last_error.lower()
-    paged = QuoteStore(FakeTaq(total_pages=3), clock=lambda: NOW, autostart=False, chunk_size=20)
+    paged = QuoteStore(FakeTaq([taq_row("CLZ26", NOW - 5, 1.0, 1.2)], total_pages=3), clock=lambda: NOW, autostart=False, chunk_size=20)
     paged.request(("k",), ["CLZ26"])
     paged.refresh_once()
     assert paged._chunk == 10
@@ -422,3 +429,212 @@ class FakeFairStore:
 
     def prices(self, symbols=None):
         return {s: v for s, v in self._prices.items() if symbols is None or s in symbols}
+
+
+# ----------------------------------------------------------------------
+# /taq/ pages: oldest first, so the newest quotes are on the LAST page
+# ----------------------------------------------------------------------
+
+
+def test_a_multi_page_reply_is_read_from_the_newest_page_backwards():
+    pages = [
+        [taq_row("CLZ26", NOW - 3000, 10.0, 10.2), taq_row("CLF27", NOW - 2900, 20.0, 20.2)],  # page 1: the oldest rows
+        [taq_row("CLZ26", NOW - 1500, 11.0, 11.2)],
+        [taq_row("CLZ26", NOW - 10, 12.0, 12.2), taq_row("CLF27", NOW - 8, 21.0, 21.2)],  # last page: the newest
+    ]
+    api = FakeTaq(pages=pages)
+    store = QuoteStore(api, clock=lambda: NOW, autostart=False)
+    store.request(("k",), ["CLZ26", "CLF27"])
+    store.refresh_once()
+    assert store.quotes()["CLZ26"].bid == 12.0 and store.quotes()["CLF27"].bid == 21.0  # not page 1's old quotes
+    assert api.page_calls == [1, 3]  # page 1, then the last page; both symbols seen, so page 2 is not read
+
+
+def test_older_pages_are_read_only_while_a_symbol_is_still_unseen():
+    pages = [
+        [taq_row("CLF27", NOW - 3000, 20.0, 20.2)],  # CLF27 only quoted early in the window
+        [taq_row("CLZ26", NOW - 1500, 11.0, 11.2)],
+        [taq_row("CLZ26", NOW - 10, 12.0, 12.2)],
+    ]
+    api = FakeTaq(pages=pages)
+    store = QuoteStore(api, clock=lambda: NOW, autostart=False)
+    store.request(("k",), ["CLZ26", "CLF27", "CLG27"])  # CLG27 has no rows at all
+    store.refresh_once()
+    assert api.page_calls == [1, 3, 2]  # newest first, then back; never more than MAX_EXTRA_PAGES
+    assert store.quotes()["CLZ26"].bid == 12.0 and store.quotes()["CLF27"].bid == 20.0 and "CLG27" not in store.quotes()
+
+
+def test_at_most_a_few_extra_pages_are_read():
+    from core import quote_store
+
+    pages = [[taq_row("OTHER", NOW - i, 1.0, 1.2)] for i in range(20)]
+    api = FakeTaq(pages=pages)
+    store = QuoteStore(api, clock=lambda: NOW, autostart=False)
+    store.request(("k",), ["CLZ26"])
+    store.refresh_once()
+    assert len(api.page_calls) == 1 + quote_store.MAX_EXTRA_PAGES
+
+
+def test_the_api_wrapper_sends_the_page_number():
+    from adapters.qh_api import make_api
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+            self.calls.append({"method": method, "url": url, "params": params, "json": json})
+
+            class Response:
+                status_code, headers, text = 200, {}, ""
+
+                @staticmethod
+                def json():
+                    return {"data": []}
+
+            return Response()
+
+    from adapters.qh_api.client import QHClient
+    from adapters.qh_api import QHApi
+
+    session = Session()
+    api = QHApi(QHClient(token_provider=lambda: "t", session=session, sleep=lambda s: None))
+    api.taq([{"id": "CLZ26", "dates": ["2026-10-01"]}])
+    api.taq([{"id": "CLZ26", "dates": ["2026-10-01"]}], page=3)
+    assert session.calls[0]["params"] is None and session.calls[1]["params"] == {"page": "3"}
+
+
+# ----------------------------------------------------------------------
+# Derived values must combine prices from the same moment
+# ----------------------------------------------------------------------
+
+
+def test_a_spread_is_not_built_from_outrights_priced_hours_apart():
+    out = outright_prices()
+    contracts = generic_contracts("CL", AS_OF, 8)
+    book = {s: (p, NOW - 4 * 3600, SOURCE_FAIR) for s, p in out.items()}  # the fair-value batch, 4 hours old
+    book[contracts[0].symbol] = (out[contracts[0].symbol] + 1.5, NOW - 5, SOURCE_QUOTE)  # one outright quoted just now, the market moved
+    spread = build_curve("CL", AS_OF, 8, SPREAD, book, NOW)
+    assert spread[0].value is None  # the mix is rejected: it would be off by the 1.5 move
+    assert spread[1].value == pytest.approx(out[contracts[1].symbol] - out[contracts[2].symbol])  # a consistent pair is fine
+
+
+def test_the_mixed_point_is_rebuilt_from_a_single_consistent_basis():
+    out = outright_prices()
+    contracts = generic_contracts("CL", AS_OF, 8)
+    fair = {s: (p, NOW - 4 * 3600) for s, p in out.items()}
+    quotes = {contracts[0].symbol: Quote(out[contracts[0].symbol] + 1.4, out[contracts[0].symbol] + 1.6, 1, 1, NOW - 5)}
+    mixed = build_price_book(quotes, fair)
+    views = [mixed, build_price_book({}, fair), build_price_book(quotes, {})]
+    spread = build_curve_views("CL", AS_OF, 8, SPREAD, views, NOW)
+    expected = out[contracts[0].symbol] - out[contracts[1].symbol]  # the fair-value batch alone, not the mix
+    assert spread[0].value == pytest.approx(expected) and spread[0].source == SOURCE_DERIVED
+    assert build_curve("CL", AS_OF, 8, SPREAD, mixed, NOW)[0].value is None  # the mixed book alone cannot
+
+
+def test_a_proper_value_from_a_later_book_beats_an_old_price_from_the_first():
+    out = outright_prices()
+    contracts = generic_contracts("CL", AS_OF, 8)
+    spread_symbol = f"{contracts[0].symbol}-{contracts[1].symbol[-3:]}"
+    old = {spread_symbol: (50.0, NOW - 3 * 86400, SOURCE_FAIR)}
+    fresh = {s: (p, NOW - 60, SOURCE_QUOTE) for s, p in out.items()}
+    spread = build_curve_views("CL", AS_OF, 8, SPREAD, [old, fresh], NOW)
+    assert spread[0].value == pytest.approx(out[contracts[0].symbol] - out[contracts[1].symbol])
+
+
+def test_a_clearly_fresher_built_price_replaces_a_stale_own_price_but_not_a_similar_one():
+    out = outright_prices()
+    contracts = generic_contracts("CL", AS_OF, 8)
+    spread_symbol = f"{contracts[0].symbol}-{contracts[1].symbol[-3:]}"
+    built = out[contracts[0].symbol] - out[contracts[1].symbol]
+    fresh_outrights = {s: (p, NOW - 30, SOURCE_QUOTE) for s, p in out.items()}
+    stale_own = {**fresh_outrights, spread_symbol: (built + 0.5, NOW - 4 * 3600, SOURCE_FAIR)}
+    assert build_curve("CL", AS_OF, 8, SPREAD, stale_own, NOW)[0].value == pytest.approx(built)
+    similar_own = {**fresh_outrights, spread_symbol: (built + 0.5, NOW - 60, SOURCE_QUOTE)}
+    assert build_curve("CL", AS_OF, 8, SPREAD, similar_own, NOW)[0].value == pytest.approx(built + 0.5)
+
+
+def test_the_page_warns_when_taq_runs_behind():
+    out = outright_prices()
+    old = NOW - 15 * 3600  # yesterday evening's quotes
+    service, store, _ = make_service([taq_row(s, old, p, p + 0.02) for s, p in out.items()])
+    service.view("CL", 8, OUTRIGHT)
+    store.refresh_once()
+    view = service.view("CL", 8, OUTRIGHT)
+    assert view.quote_lag_seconds == pytest.approx(15 * 3600, abs=1)
+    assert "The newest TAQ quote is 15.0h old" in str(tab.build_status(view))
+    no_quotes_service, _, _ = make_service([])
+    empty = no_quotes_service.view("CL", 8, OUTRIGHT)
+    assert empty.quote_lag_seconds is None and "No TAQ quote yet" in str(tab.build_status(empty))
+    fresh_service, fresh_store, _ = make_service([taq_row(s, NOW - 5, p, p + 0.02) for s, p in out.items()])
+    fresh_service.view("CL", 8, OUTRIGHT)
+    fresh_store.refresh_once()
+    status = str(tab.build_status(fresh_service.view("CL", 8, OUTRIGHT)))
+    assert "TAQ can run behind" not in status and "No TAQ quote yet" not in status
+
+
+# ----------------------------------------------------------------------
+# Quote quality: junk-wide quotes are ignored
+# ----------------------------------------------------------------------
+
+
+def test_a_junk_wide_outright_quote_is_ignored_and_the_fair_value_is_used():
+    wide = Quote(87.05, 93.45, 1, 1, 100.0)  # COU27 on a real day: midpoint 1.9 away from the fair value
+    book = build_price_book({"COU27": wide}, {"COU27": (88.37, 90.0)})
+    assert book["COU27"] == (88.37, 90.0, SOURCE_FAIR)  # the quote is newer but not trustworthy
+    assert "COU27" not in build_price_book({"COU27": wide}, {})  # and with no fair value, nothing rather than junk
+
+
+def test_the_width_limit_depends_on_the_kind_of_symbol():
+    from core.curve_compare import MAX_QUOTE_WIDTH, symbol_kind, usable_quote
+
+    assert [symbol_kind(s) for s in ("CLZ26", "CLZ26-F27", "CLZ26-F27-G27")] == ["outright", "spread", "fly"]
+    assert usable_quote("CLZ26", Quote(80.0, 80.0 + MAX_QUOTE_WIDTH["outright"], 1, 1, 1.0))
+    assert not usable_quote("CLZ26", Quote(80.0, 80.5, 1, 1, 1.0))
+    assert usable_quote("CLZ26-F27", Quote(1.0, 1.05, 1, 1, 1.0)) and not usable_quote("CLZ26-F27", Quote(1.0, 1.2, 1, 1, 1.0))
+    assert not usable_quote("CLZ26-F27-G27", Quote(0.0, 0.3, 1, 1, 1.0))
+    assert not usable_quote("CLZ26", Quote(80.1, 80.0, 1, 1, 1.0))  # crossed
+
+
+def test_a_spread_is_not_derived_from_a_junk_wide_outright_quote():
+    out = outright_prices()
+    contracts = generic_contracts("CL", AS_OF, 8)
+    quotes = {contracts[1].symbol: Quote(out[contracts[1].symbol] - 3.0, out[contracts[1].symbol] + 3.0 + 0.4, 1, 1, NOW - 5)}  # wide, lopsided
+    fair = {s: (p, NOW - 60) for s, p in out.items()}
+    views = [build_price_book(quotes, fair), build_price_book({}, fair), build_price_book(quotes, {})]
+    spread = build_curve_views("CL", AS_OF, 8, SPREAD, views, NOW)
+    assert spread[0].value == pytest.approx(out[contracts[0].symbol] - out[contracts[1].symbol])  # from the fair values
+
+
+def test_the_status_counts_the_quotes_it_ignored():
+    out = outright_prices()
+    service, store, _ = make_service([taq_row(s, NOW - 5, p - 2.0, p + 2.0) for s, p in out.items()])
+    service.view("CL", 8, OUTRIGHT)
+    store.refresh_once()
+    view = service.view("CL", 8, OUTRIGHT)
+    assert view.symbols_wide == 8 and view.symbols_quoted == 8 and view.count(SOURCE_QUOTE) == 0
+    assert "8 quote(s) ignored as too wide" in str(tab.build_status(view))
+
+
+def test_default_months_is_32_and_zoom_is_kept_across_refreshes():
+    layout = tab.curve_compare_layout()
+    months = next(x for x in _walk(layout) if getattr(x, "id", None) == "compare-months")
+    assert months.value == 32 and tab.DEFAULT_MONTHS == 32
+    out = outright_prices()
+    service, store, _ = make_service([taq_row(s, NOW - 5, p, p + 0.02) for s, p in out.items()])
+    service.view("CL", 8, OUTRIGHT)
+    store.refresh_once()
+    first = tab.build_compare_figure(service.view("CL", 8, OUTRIGHT))
+    store.refresh_once()
+    again = tab.build_compare_figure(service.view("CL", 8, OUTRIGHT))
+    assert first.layout.uirevision == again.layout.uirevision  # same selection: the zoom survives the refresh
+    other = tab.build_compare_figure(service.view("CL", 8, SPREAD))
+    assert other.layout.uirevision != first.layout.uirevision  # a different curve starts unzoomed
+
+
+def _walk(node):
+    yield node
+    children = getattr(node, "children", None)
+    for child in children if isinstance(children, (list, tuple)) else [children]:
+        if child is not None and not isinstance(child, str):
+            yield from _walk(child)

@@ -32,6 +32,9 @@ from core.curve_service import CurveService  # noqa: E402
 from core.curve_store import PrevSettlementStore, SnapshotStore  # noqa: E402
 from core.data_loader import DataLoader  # noqa: E402
 from core.excel_correlation import ExcelCorrelationStore  # noqa: E402
+from core.atr_data import AtrStore  # noqa: E402
+from core.oi_data import OiStore  # noqa: E402
+from core.oi_service import OiService  # noqa: E402
 from core.quote_store import FairValueStore, QuoteStore  # noqa: E402
 from core.structure_builder import active_composite_symbols  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_STALENESS  # noqa: E402
@@ -45,6 +48,7 @@ from ui.callbacks.structure_detail_callbacks import register_structure_detail_ca
 from ui.callbacks.var_callbacks import register_var_callbacks  # noqa: E402
 from ui.callbacks.curve_callbacks import register_curve_callbacks  # noqa: E402
 from ui.callbacks.curve_compare_callbacks import register_curve_compare_callbacks  # noqa: E402
+from ui.callbacks.oi_callbacks import register_oi_callbacks  # noqa: E402
 from ui.callbacks.archive_callbacks import register_archive_callbacks  # noqa: E402
 from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
@@ -121,6 +125,11 @@ live_adapter.set_curve_symbols_provider(container.curve_service.symbols_to_poll)
 container.curve_compare = CurveCompare(
     QuoteStore(qh_api), PrevSettlementStore(Path(_curve_dir) / "compare_prev_settlement.json"), qh_api,
     fallback_prices=live_adapter.curve_prices, fair_values=FairValueStore(qh_api),
+)
+# OI / Volume / ATR page: daily OI of every outright; downloads only while that page is open.
+container.oi_service = OiService(
+    repository, qh_api, OiStore(_resolve_path(settings.OI_DATA_DIR)),
+    alert_manager=alert_manager, atr_store=AtrStore(_resolve_path(settings.ATR_DATA_DIR)),
 )
 
 
@@ -225,6 +234,7 @@ register_exposure_callbacks(app)
 register_var_callbacks(app)
 register_curve_callbacks(app)
 register_curve_compare_callbacks(app)
+register_oi_callbacks(app)
 register_archive_callbacks(app)
 
 

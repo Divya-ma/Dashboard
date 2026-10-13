@@ -16,6 +16,7 @@ from core.curve_compare import CurveCompare
 from core.curve_service import CurveService
 from core.data_loader import DataLoader
 from core.excel_correlation import ExcelCorrelationStore
+from core.oi_service import OiService
 from db.repository import Repository
 
 NO_UPDATE_LABEL = "Last: --:--:--"
@@ -41,6 +42,7 @@ class Container:
     excel_store: ExcelCorrelationStore | None = None
     curve_service: CurveService | None = None  # Curve Kinks engine (fed by the live poll)
     curve_compare: CurveCompare | None = None  # Curve Compare page (quote VWAP vs previous settlement)
+    oi_service: OiService | None = None  # OI / Volume / ATR page (daily OI download + research)
     qh_api: QHApi | None = None  # rate-limited wrappers for every QH API endpoint
     live_cache: LivePriceCache = field(default_factory=LivePriceCache)
     pnl_stop_alert_active: bool = False

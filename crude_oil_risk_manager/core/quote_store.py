@@ -20,8 +20,10 @@ page last asked, so nothing is polled while the page is closed. /taq/ allows 7 r
 token and the loop keeps to ~5; /fairvalue/ shares its 7/minute with the live price poll, so it is
 called only every FAIR_REFRESH_SECONDS.
 
-The /taq/ reply is paged (page_size 10,000) but the request has no page argument, so when a reply
-has more than one page the chunk sizes are halved for the next request.
+The /taq/ reply is paged (10,000 rows) and sorted OLDEST FIRST, so page 1 holds the oldest quotes of
+the window and the newest are on the LAST page. Reading only page 1 would keep an old quote for any busy
+symbol, so a multi-page reply is read from the last page backwards until every symbol asked for has been
+seen (at most MAX_EXTRA_PAGES more requests), and the chunk size is halved for the next request.
 """
 
 import logging
@@ -43,6 +45,7 @@ DEMAND_TTL_SECONDS = 300
 CHUNK_SIZE = 25
 LONG_CHUNK = 5
 MIN_CHUNK_SIZE = 3
+MAX_EXTRA_PAGES = 4  # further /taq/ pages read when a reply spans several, newest first
 POLL_INTERVAL_SECONDS = 12.5  # ~4.8 requests/minute, under the 7/minute limit
 PRIMARY_BONUS_SECONDS = 40  # the curve's own symbols are re-polled sooner than its fallbacks
 
@@ -193,11 +196,13 @@ class QuoteStore:
             return 0
         self.requests_made += 1
         self.last_error = None
-        rows = reply.get("data", []) if isinstance(reply, dict) else []
-        if isinstance(reply, dict) and (reply.get("total_pages") or 1) > 1:
+        rows = list(reply.get("data", [])) if isinstance(reply, dict) else []
+        total_pages = int(reply.get("total_pages") or 1) if isinstance(reply, dict) else 1
+        if total_pages > 1:
             self._chunk = max(MIN_CHUNK_SIZE, self._chunk // 2)
             self._long_chunk = max(1, self._long_chunk // 2)
-            logger.warning("/taq/ reply has %s pages; asking for %d symbols per request from now on", reply["total_pages"], self._chunk)
+            logger.info("/taq/ reply has %d pages; reading the newest, asking for %d symbols per request from now on", total_pages, self._chunk)
+            rows += self._newest_pages(products, total_pages, {symbol for symbol, _ in chunk})
         fresh = parse_quotes(rows)
         updated = 0
         with self._lock:
@@ -207,6 +212,26 @@ class QuoteStore:
                     self._quotes[symbol] = quote
                     updated += 1
         return updated
+
+    def _newest_pages(self, products: list[dict], total_pages: int, wanted: set[str]) -> list[dict]:
+        """Rows of the last pages of a multi-page reply, newest page first, until every wanted symbol has
+        been seen on them. Page 1 (already read) holds the OLDEST rows, so a symbol seen only there is not
+        done: its newer quotes, if any, are on a later page."""
+        rows: list[dict] = []
+        seen: set = set()
+        for page in range(total_pages, 1, -1):
+            if wanted <= seen or total_pages - page >= MAX_EXTRA_PAGES:
+                break
+            try:
+                reply = self._api.taq(products, page=page)
+            except APIError as exc:  # the first page's rows are still used
+                self.last_error = f"Quote request failed: {exc}"
+                break
+            self.requests_made += 1
+            batch = reply.get("data", []) if isinstance(reply, dict) else []
+            rows += batch
+            seen = seen | {r.get("instrument") for r in batch}
+        return rows
 
     # -- thread ---------------------------------------------------------
 

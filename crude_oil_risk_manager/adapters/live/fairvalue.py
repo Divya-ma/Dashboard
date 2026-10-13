@@ -25,6 +25,13 @@ combined set is empty, a poll is a silent no-op (no HTTP request, nothing to log
 get_live_prices logs a one-time warning the first time this happens so it is not
 mistaken for a working-but-quiet feed.
 
+A composite symbol /fairvalue/ does not return (a far-month fly such as BRNV28-X28-Z28 is the usual
+case) is DERIVED from the spreads or outrights it is made of (core.derived_prices), so a position in it
+still gets a live price. The components ride in the same request, so it costs no extra call: on the
+first poll for every composite, afterwards only for the ones that were missing the poll before.
+LivePrice.derived marks such a price. A symbol that cannot be derived either is reported once, not on
+every poll.
+
 KNOWN GAP: nothing in this codebase currently writes `WATCHLIST_SETTING_KEY`. The
 correlation watchlist today lives only in a client-side session dcc.Store
 (ui/layouts/correlation_tab.py, storage_type="session") with no server-side
@@ -41,6 +48,7 @@ from typing import Callable
 
 from adapters.base import LiveDataAdapter, LivePrice, SymbolTranslator
 from adapters.qh_api import QHApi, make_api
+from core.derived_prices import components_needed, derive_price
 from core.models import StructureStatus
 from db.repository import Repository
 
@@ -75,6 +83,9 @@ class FairValueLiveAdapter(LiveDataAdapter):
         # request as the position prices, so they cost no extra call from the 7/min budget.
         self._curve_symbols: Callable[[], list[str]] | None = None
         self._curve_prices: dict[str, tuple[float, float]] = {}
+        # Composite API symbols /fairvalue/ did not return on the previous poll; None until the first poll.
+        self._missing_last: frozenset[str] | None = None
+        self._reported: set[str] = set()  # symbols already logged as derived / unavailable
 
     def set_curve_symbols_provider(self, provider: Callable[[], list[str]] | None) -> None:
         """Register the function returning the extra API symbols to price on every poll."""
@@ -180,18 +191,38 @@ class FairValueLiveAdapter(LiveDataAdapter):
         if not internal_by_api and not extras:
             return {}
 
+        components = self._component_codes(internal_by_api, extras)
         token = self.get_access_token()
-        return self._fetch([*internal_by_api, *extras], internal_by_api, token)
+        return self._fetch([*internal_by_api, *extras, *components], internal_by_api, token, components)
+
+    def _component_codes(self, internal_by_api: dict[str, str], extras: list[str]) -> list[str]:
+        """API codes of the contracts that composites might be built from (see the module docstring)."""
+        already = set(internal_by_api) | set(extras)
+        codes: list[str] = []
+        for api_code, internal in internal_by_api.items():
+            if "-" not in api_code or (self._missing_last is not None and api_code not in self._missing_last):
+                continue
+            for component in components_needed(internal):
+                try:
+                    code = SymbolTranslator.internal_to_api(component)
+                except ValueError:
+                    continue
+                if code not in already and code not in codes:
+                    codes.append(code)
+        return codes
 
     def _fetch(
-        self, api_codes: list[str], internal_by_api: dict[str, str], token: str
+        self, api_codes: list[str], internal_by_api: dict[str, str], token: str, component_codes: list[str] | None = None,
     ) -> dict[str, LivePrice]:
         payload = self._api.fairvalue(api_codes, token=token, max_attempts=_POLL_MAX_ATTEMPTS)
         rows = payload.get("data", []) if isinstance(payload, dict) else payload
         now = datetime.now(timezone.utc)
         results: dict[str, LivePrice] = {}
-        extra_codes = set(api_codes) - set(internal_by_api)
+        extra_codes = set(api_codes) - set(internal_by_api) - set(component_codes or ())
         extra_prices: dict[str, tuple[float, float]] = {}
+        returned: dict[str, tuple[float, float]] = {}  # every contract in the reply: API code -> (price, unix seconds)
+        for row in rows:
+            returned[row["Contract"]] = (row["Price"], row["Timestamp"] / 1000)
         for row in rows:
             api_code = row["Contract"]
             internal_symbol = internal_by_api.get(api_code)
@@ -221,7 +252,43 @@ class FairValueLiveAdapter(LiveDataAdapter):
 
         if extra_codes:
             self._curve_prices = extra_prices
-        for symbol in internal_by_api.values():
-            if symbol not in results:
-                logger.warning("No fair value data returned for %s", symbol)
+        missing: set[str] = set()
+        for api_code, symbol in internal_by_api.items():
+            if symbol in results:
+                self._reported.discard(symbol)
+                continue
+            if "-" in api_code:
+                missing.add(api_code)
+            derived = self._derive(symbol, returned, now)
+            if derived is not None:
+                results[symbol] = derived
+            elif symbol not in self._reported:
+                self._reported.add(symbol)
+                logger.warning("No fair value data returned for %s, and it could not be derived", symbol)
+        if component_codes is not None:  # a real poll, not a connection test
+            self._missing_last = frozenset(missing)
         return results
+
+    def _derive(self, symbol: str, returned: dict[str, tuple[float, float]], now: datetime) -> LivePrice | None:
+        """A price for `symbol` built from the contracts in the reply, or None (see core.derived_prices)."""
+        by_symbol: dict[str, tuple[float, float]] = {}
+        for component in components_needed(symbol):
+            try:
+                code = SymbolTranslator.internal_to_api(component)
+            except ValueError:
+                continue
+            if code in returned:
+                by_symbol[component] = returned[code]
+        built = derive_price(symbol, by_symbol)
+        if built is None:
+            return None
+        price, seconds, how = built
+        if symbol not in self._reported:
+            self._reported.add(symbol)
+            logger.info("%s has no fair value; using a price derived from %s", symbol, how)
+        price_time = datetime.fromtimestamp(seconds, tz=timezone.utc)
+        return LivePrice(
+            symbol=symbol, price=price, timestamp=price_time,
+            is_stale=(now - price_time).total_seconds() > self._staleness_threshold_seconds,
+            raw_open=price, raw_high=price, raw_low=price, raw_volume=0.0, derived=True,
+        )

@@ -185,7 +185,7 @@ def test_fetch_returns_serializable_prices(env, repo, with_token):
 
     assert token_ok is True
     assert set(prices) == {"CLZ26"}
-    assert set(prices["CLZ26"]) == {"price", "timestamp_iso", "is_stale", "open", "high", "low", "volume"}
+    assert set(prices["CLZ26"]) == {"price", "timestamp_iso", "is_stale", "derived", "open", "high", "low", "volume"}
     json.dumps(prices)
     assert last.startswith("Last: ") and "--" not in last
     assert "Data Live" in str(indicator)

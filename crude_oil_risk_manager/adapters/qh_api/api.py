@@ -158,8 +158,8 @@ class QHApi:
             raise ValueError(f"{name}: unknown parameter(s) {sorted(unknown)}")
         return self.client.request_all(spec, params, page_size=page_size, max_pages=max_pages)
 
-    def _post(self, name: str, body: dict) -> Any:
-        return self.client.request(ENDPOINTS[name], json_body=body)
+    def _post(self, name: str, body: dict, **params: Any) -> Any:
+        return self.client.request(ENDPOINTS[name], params=params or None, json_body=body)
 
     def get_all(self, name: str, page_size: int = 1000, max_pages: int = 10, **params: Any) -> list:
         """Fetch all pages of any paginated endpoint by registry name, e.g.
@@ -409,14 +409,18 @@ class QHApi:
         datatype (settlement default, or close), limit, offset."""
         return self._get("seasonality", **filters)
 
-    def taq(self, products: list[dict]) -> Any:
+    def taq(self, products: list[dict], page: int | None = None) -> Any:
         """POST /taq/ - trade and quote data. products: [{"id": product, "dates": ["YYYY-MM-DD", ...],
         "start": "HH:MM:SS", "end": "HH:MM:SS"}]. Trade side codes (U,B,S,M,P,T,E,D,X,C,F,G) and
-        trade type codes (R,O,L,B,I,S) are documented in the Swagger."""
+        trade type codes (R,O,L,B,I,S) are documented in the Swagger.
+
+        The reply is paged (10,000 rows, sorted OLDEST FIRST across all products), so page 1 holds the
+        oldest rows of the window and the newest quotes are on the last page (`total_pages`).
+        `page` (the `?page=N` query parameter, 1-based) asks for another page; each page is a request."""
         for product in products:
             if not product.get("id") or not product.get("dates"):
                 raise ValueError("each TAQ product needs 'id' and a non-empty 'dates' list")
-        return self._post("taq", {"products": products})
+        return self._post("taq", {"products": products}, page=page)
 
     def taq_products(self) -> Any:
         """GET /taq/products/ (public) - available TAQ products."""

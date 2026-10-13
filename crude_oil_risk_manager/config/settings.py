@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # Curve Kinks page: generic-contract history, previous settlements and daily snapshots
     CURVE_DATA_DIR: str = "data/curves"
 
+    # OI / Volume / ATR page: daily OI of every outright, cached as Parquet
+    OI_DATA_DIR: str = "data/oi"
+    ATR_DATA_DIR: str = "data/atr"
+
     # Manual Excel fallback source for the Correlation tab (used when the API can't
     # provide a series for a symbol)
     CORRELATION_UPLOADS_DIR: str = "data/correlation_uploads"

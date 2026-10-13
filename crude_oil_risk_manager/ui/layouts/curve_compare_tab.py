@@ -14,14 +14,15 @@ from dash import dcc, html
 
 from core.curve_calendar import FAMILIES, FAMILY_LABELS, OUTRIGHT, PRODUCTS
 from core.curve_compare import (
-    DEFAULT_DFLY_METHOD, DFLY_METHODS, MAX_MONTHS, SOURCE_DERIVED, SOURCE_FAIR, SOURCE_QUOTE, CompareView,
+    DEFAULT_DFLY_METHOD, DFLY_METHODS, MAX_MONTHS, QUOTE_LAG_WARNING_SECONDS, SOURCE_DERIVED, SOURCE_FAIR, SOURCE_QUOTE,
+    CompareView,
 )
 from ui.layouts.curve_tab import _CARD, _LABEL, _MUTED, _dropdown, _fmt, _layout, _table, empty_figure
 from ui.layouts.shell import COLORS
 
 REFRESH_MS = 10_000
 OLD_SECONDS = 3600
-DEFAULT_MONTHS = 12
+DEFAULT_MONTHS = 32
 PLACEHOLDER = "Waiting for quotes..."
 
 LIVE_COLOR, PREV_COLOR = "#4da3ff", "#9aa0a6"
@@ -91,6 +92,7 @@ def build_compare_figure(view: CompareView | None) -> go.Figure:
         xaxis={"tickangle": -45, "gridcolor": COLORS["BORDER_COLOR"]},
         yaxis={"title": "Price", "gridcolor": COLORS["BORDER_COLOR"], "zerolinecolor": COLORS["BORDER_COLOR"]},
         hovermode="closest",
+        uirevision=f"{view.product}|{view.family}|{view.months}|{view.method}",  # keep the zoom across refreshes
     ))
     return figure
 
@@ -109,6 +111,7 @@ def build_change_figure(view: CompareView | None) -> go.Figure:
         title={"text": "Live minus previous settlement", "font": {"size": 13}},
         margin={"l": 70, "r": 30, "t": 40, "b": 80},
         xaxis={"tickangle": -45}, yaxis={"gridcolor": COLORS["BORDER_COLOR"], "zerolinecolor": COLORS["TEXT_SECONDARY"]},
+        uirevision=f"{view.product}|{view.family}|{view.months}|{view.method}",
     ))
     return figure
 
@@ -122,12 +125,26 @@ def build_status(view: CompareView | None) -> html.Div:
     parts.append(f"{view.symbols_priced} of {view.symbols_requested} symbols priced ({view.symbols_quoted} with a quote)")
     parts.append(f"points: {view.count(SOURCE_QUOTE)} quote, {view.count(SOURCE_FAIR)} fair value, "
                  f"{view.count(SOURCE_DERIVED)} derived, {view.count(None)} empty")
+    if view.symbols_wide:
+        parts.append(f"{view.symbols_wide} quote(s) ignored as too wide to trust (fair value used instead)")
     old = view.count_older_than(OLD_SECONDS)
     if old:
         parts.append(f"{old} point(s) rest on prices over an hour old (faded)")
     if view.settlement_date is not None:
         parts.append(f"Prev settlement of {view.settlement_date.isoformat()}")
     children = [html.Span(" · ".join(parts))]
+    lag = view.quote_lag_seconds
+    if lag is not None and lag > QUOTE_LAG_WARNING_SECONDS:
+        children.append(html.Div(
+            f"⚠️ The newest TAQ quote is {_age(lag)} old (TAQ can run behind). Prices that rest on older quotes are not "
+            "mixed with newer fair values; those points use a fair-value basis or stay empty until fresher quotes arrive.",
+            style={"color": COLORS["ACCENT_YELLOW"], "marginTop": "4px"},
+        ))
+    elif lag is None and view.symbols_requested:
+        children.append(html.Div(
+            "⚠️ No TAQ quote yet for these contracts (TAQ can run behind); the curve uses fair values for now.",
+            style={"color": COLORS["ACCENT_YELLOW"], "marginTop": "4px"},
+        ))
     for message, colour in (
         (view.quote_error, "ACCENT_RED"), (view.fair_error, "ACCENT_RED"), (view.settlement_message, "ACCENT_YELLOW"),
     ):

@@ -243,6 +243,7 @@ class LivePrice:
     raw_high: float
     raw_low: float
     raw_volume: float
+    derived: bool = False  # built from other contracts because /fairvalue/ did not return this one
 
 
 # ----------------------------------------------------------------------

@@ -4,18 +4,32 @@ For one product, one curve type (outright / spread / fly / dfly) and the first N
 module works out which exchange symbols to price, turns raw quotes into prices, and builds the
 curve. It does no I/O: quotes, fair values and settlements are handed in.
 
+QUOTE QUALITY. A quote is only used if its bid-ask gap is at most MAX_QUOTE_WIDTH for its kind. Measured
+on live data, spread and fly quotes are tight (median gap 0.01, never over 0.06) and agree with the
+fair value to a few thousandths, but back-month OUTRIGHT quotes are often junk (median gap 0.17,
+a tenth of them over 1.5, one 6.4 wide, with the midpoint 1.9 away from the fair value). A spread or
+fly built from such an outright is wildly off, so a quote that wide is ignored and that contract is
+priced from its fair value instead.
+
 LIVE PRICE of a symbol = VWAP of its best bid and best ask, weighted by the opposite side's size
 (the size-weighted mid):  (bid * ask_size + ask * bid_size) / (bid_size + ask_size).
 The side with less size is the one likely to trade next, so the price leans towards it. With no
 sizes it is the plain mid. Where there is no usable quote the /fairvalue/ price is used if the
 caller has one.
 
-WHERE A POINT'S PRICE COMES FROM, in order (a quiet back month often has no recent quote, but
-TAQ still holds its standing bid/ask and /fairvalue/ prices almost the whole ladder):
-  1. its own price - the newer of its quote VWAP and its fair value - if at most FRESH_SECONDS old
-  2. built from other points (source "derived"), as below
-  3. its own price again if at most STALE_LIMIT_SECONDS old (marked "old price")
-  4. empty
+WHERE A POINT'S PRICE COMES FROM (a quiet back month often has no recent quote, but TAQ still
+holds its standing bid/ask and /fairvalue/ prices almost the whole ladder):
+  - its own price (the newer of its quote VWAP and its fair value), or
+  - a price built from other points (source "derived"), as below. The pieces of one built value must
+    have been priced within CONSISTENT_SECONDS of each other: subtracting an outright priced now from
+    one priced hours ago gives a spread that is wrong by the market's move in between (a fraction of a
+    dollar against a spread of cents), which is what showed up as abnormal values just after a start,
+    when quotes were still arriving for some contracts and only an older fair value existed for others.
+    A built value that mixes times is rejected, and the same point is then tried from a single
+    consistent basis (the /fairvalue/ batch alone, the quotes alone).
+  The fresher of the own price and the built price is used (the own price unless the built one is
+  more than PREFER_DERIVED_SECONDS newer). An own price older than FRESH_SECONDS is only used when
+  nothing can be built (marked "old price"); older than STALE_LIMIT_SECONDS it is not used at all.
 Every value carries its age so a stale back-month price is visible, not hidden.
 
     spread k = outright k - outright k+1
@@ -42,6 +56,10 @@ from core.curve_calendar import (
 MAX_MONTHS = 36
 FRESH_SECONDS = 86_400.0  # a direct price this young is used as it stands
 STALE_LIMIT_SECONDS = 7 * 86_400.0  # an older one is only a last resort, when nothing can be built from newer pieces
+CONSISTENT_SECONDS = 1_800.0  # the pieces of one built value must be priced within this of each other
+PREFER_DERIVED_SECONDS = 300.0  # a built price replaces an own price only if it is this much newer
+MAX_QUOTE_WIDTH = {"outright": 0.25, "spread": 0.10, "fly": 0.10}  # widest usable bid-ask gap, in price points
+QUOTE_LAG_WARNING_SECONDS = 1_800.0  # the page warns when the newest TAQ quote is older than this
 
 SOURCE_QUOTE, SOURCE_FAIR, SOURCE_DERIVED = "quote", "fair value", "derived"
 
@@ -95,6 +113,18 @@ class Quote:
         return vwap(self.bid, self.ask, self.bid_size, self.ask_size)
 
 
+def symbol_kind(symbol: str) -> str:
+    """'outright', 'spread' or 'fly' (anything with more legs counts as a fly) from the symbol's dashes."""
+    legs = symbol.count("-")
+    return "outright" if legs == 0 else "spread" if legs == 1 else "fly"
+
+
+def usable_quote(symbol: str, quote: "Quote") -> bool:
+    """False for a crossed quote or one wider than MAX_QUOTE_WIDTH for its kind (see the module docstring)."""
+    width = quote.ask - quote.bid
+    return 0.0 <= width <= MAX_QUOTE_WIDTH[symbol_kind(symbol)]
+
+
 # symbol -> (price, unix seconds, source)
 PriceBook = dict[str, tuple[float, float, str]]
 
@@ -108,7 +138,7 @@ def build_price_book(
         book[symbol] = (float(price), float(ts), SOURCE_FAIR)
     for symbol, quote in quotes.items():
         price = quote.price
-        if price is not None and (symbol not in book or quote.ts >= book[symbol][1]):
+        if price is not None and usable_quote(symbol, quote) and (symbol not in book or quote.ts >= book[symbol][1]):
             book[symbol] = (price, quote.ts, SOURCE_QUOTE)
     return book
 
@@ -188,30 +218,42 @@ def _label(contracts: list[CurveContract], start: int, length: int) -> tuple[str
 def build_curve(
     product: str, as_of: date, n: int, family: str, book: PriceBook, now: float,
     method: str = DEFAULT_DFLY_METHOD, fresh_age: float = FRESH_SECONDS, stale_age: float = STALE_LIMIT_SECONDS,
+    consistent: float = CONSISTENT_SECONDS, prefer_derived: float = PREFER_DERIVED_SECONDS,
 ) -> list[CurvePoint]:
-    """The curve's points in contract order, each with its value, source and (if derived) how."""
+    """The curve's points in contract order from ONE price book, each with its value, source and
+    (if built) how. See the module docstring for which price a point takes."""
     contracts = generic_contracts(product, as_of, n)
-    memo: dict[tuple[str, int], tuple[float, str, float, str] | None] = {}
+    # piece = (value, source, oldest price time, how, newest price time)
+    memo: dict[tuple[str, int], tuple[float, str, float, str, float] | None] = {}
+
+    def own(symbol: str):
+        entry = book.get(symbol)
+        if entry is None or now - entry[1] > stale_age:
+            return None
+        return (entry[0], entry[2], entry[1], "", entry[1])
 
     def pick(symbol: str, derive=None):
-        """Own price if fresh, else what `derive()` builds, else an old own price, else None."""
-        entry = book.get(symbol)
-        age = None if entry is None else now - entry[1]
-        if entry is not None and age <= fresh_age:
-            return (entry[0], entry[2], entry[1], "")
+        """The fresher of the own price and what `derive()` builds; an old own price only as a last resort."""
+        mine = own(symbol)
         built = derive() if derive is not None else None
-        if built is not None:
+        if built is not None and (mine is None or built[2] > mine[2] + prefer_derived):
             return built
-        if entry is not None and age <= stale_age:
-            return (entry[0], entry[2], entry[1], "old price")
-        return None
+        if mine is None:
+            return None
+        if now - mine[2] > fresh_age:
+            return (mine[0], mine[1], mine[2], "old price", mine[4])
+        return mine
 
     def _sum(parts, how):
-        """Weighted sum of already-built pieces; None if any is missing. The oldest piece sets the age."""
+        """Weighted sum of already-built pieces. None if a piece is missing or the pieces were priced
+        more than `consistent` seconds apart. The oldest piece sets the age."""
         if any(piece is None for _, piece in parts):
             return None
-        total = sum(weight * piece[0] for weight, piece in parts)
-        return total, SOURCE_DERIVED, min(piece[2] for _, piece in parts), how
+        oldest = min(piece[2] for _, piece in parts)
+        newest = max(piece[4] for _, piece in parts)
+        if newest - oldest > consistent:
+            return None
+        return sum(weight * piece[0] for weight, piece in parts), SOURCE_DERIVED, oldest, how, newest
 
     def outright(i: int):
         key = (OUTRIGHT, i)
@@ -265,10 +307,29 @@ def build_curve(
         )
         result = build(i)
         if result is not None:
-            value, source, ts, how = result
+            value, source, ts, how, _ = result
             point.value, point.source, point.age_seconds, point.how = value, source, max(now - ts, 0.0), how
         points.append(point)
     return points
+
+
+def build_curve_views(
+    product: str, as_of: date, n: int, family: str, books: list[PriceBook], now: float,
+    method: str = DEFAULT_DFLY_METHOD, **kwargs,
+) -> list[CurvePoint]:
+    """The curve from several price books (the first is the preferred, usually the mix of everything;
+    the others are single consistent bases such as the fair-value batch or the quotes alone).
+
+    Each point takes the first book that gives it a proper value; a value marked "old price" is
+    used only if no book can do better. A mix of times that one book rejects is thereby rebuilt
+    from a book in which every piece was priced together."""
+    views = [build_curve(product, as_of, n, family, book, now, method, **kwargs) for book in books]
+    merged = []
+    for candidates in zip(*views):
+        valued = [p for p in candidates if p.value is not None]
+        proper = [p for p in valued if p.how != "old price"]
+        merged.append((proper or valued or [candidates[0]])[0])
+    return merged
 
 
 def settlement_curve(
@@ -317,8 +378,15 @@ class CompareView:
     symbols_requested: int = 0
     symbols_quoted: int = 0
     symbols_priced: int = 0  # symbols with a quote or a fair value
+    symbols_wide: int = 0  # quotes ignored as too wide to trust
     fair_error: str | None = None
     last_quote_at: float | None = None
+    as_of: float = 0.0  # when the view was built (unix seconds)
+
+    @property
+    def quote_lag_seconds(self) -> float | None:
+        """How old the newest TAQ quote is (None: there is none). TAQ can run hours behind."""
+        return None if self.last_quote_at is None else max(self.as_of - self.last_quote_at, 0.0)
 
     def count(self, source: str | None) -> int:
         return sum(1 for r in self.rows if r.point.source == source)
@@ -407,7 +475,12 @@ class CurveCompare:
             except Exception:  # noqa: BLE001
                 pass
         book = build_price_book(quotes, fair)
-        points = build_curve(product, as_of, n, family, book, now, method, self._fresh_age, self._stale_age)
+        # Consistent single bases, tried when the mix of everything cannot be combined (see the docstring)
+        fair_batch = self._fair_store.prices(needed) if self._fair_store is not None else fair
+        books = [book, build_price_book({}, fair_batch), build_price_book(quotes, {})]
+        points = build_curve_views(
+            product, as_of, n, family, books, now, method, fresh_age=self._fresh_age, stale_age=self._stale_age,
+        )
         prev = settlement_curve(product, as_of, n, family, self.settlements.prices())
         view = CompareView(product, family, method, n, [CompareRow(p, v) for p, v in zip(points, prev)])
         view.quote_error = self.quotes.last_error
@@ -416,7 +489,9 @@ class CurveCompare:
         view.symbols_requested = len(needed)
         view.symbols_quoted = sum(1 for s in needed if s in quotes and quotes[s].price is not None)
         view.symbols_priced = sum(1 for s in needed if s in book)
+        view.symbols_wide = sum(1 for s, q in quotes.items() if not usable_quote(s, q))
         view.last_quote_at = max((q.ts for q in quotes.values()), default=None)
+        view.as_of = now
         view.fair_error = getattr(self._fair_store, "last_error", None)
         return view
 

@@ -27,6 +27,9 @@ from core.curve_settings import (
 )
 from core.models import StructureStatus
 from core.pnl import calculate_portfolio_pnl
+from core.oi_settings import (
+    KEY_ATR_HISTORY_DAYS, KEY_OI_HISTORY_DAYS, load_atr_history_days, load_history_days, validate_atr_history_days, validate_history_days,
+)
 from core.user_settings import (
     KEY_API_TOKEN,
     KEY_CORRELATION_LOOKBACK,
@@ -251,6 +254,28 @@ def save_defaults(n_clicks, var_confidence, rolling_window, lookback):
     for key, value in values.items():
         container.repository.set_setting(key, value)
     return "✅ Saved", ""
+
+
+def load_oi_settings(pathname):
+    """Saved OI history length (only when the Settings tab is open)."""
+    if pathname != "/settings":
+        raise PreventUpdate
+    return load_history_days(container.repository), load_atr_history_days(container.repository)
+
+
+def save_oi_settings(n_clicks, history_days, atr_days=None):
+    """Validate and store the OI and ATR history lengths."""
+    if not n_clicks:
+        raise PreventUpdate
+    try:
+        days = validate_history_days(history_days)
+        atr = validate_atr_history_days(atr_days) if atr_days is not None else None
+    except ValueError as exc:
+        return f"❌ Not saved: {exc}"
+    container.repository.set_setting(KEY_OI_HISTORY_DAYS, days)
+    if atr is not None:
+        container.repository.set_setting(KEY_ATR_HISTORY_DAYS, atr)
+    return f"✅ Saved: {days} days of OI" + (f" and {atr} days of ATR data" if atr is not None else "") + ". Any extra days download the next time you open the page."
 
 
 def _reset_label(label: str):
@@ -530,6 +555,18 @@ def register_settings_callbacks(app) -> None:
         *[State(field, "value") for field in _THRESHOLD_FIELDS],
         prevent_initial_call=True,
     )(save_thresholds)
+
+    app.callback(
+        Output("settings-oi-history-days", "value"), Output("settings-atr-history-days", "value"), Input("url", "pathname"),
+    )(load_oi_settings)
+
+    app.callback(
+        Output("settings-oi-feedback", "children"),
+        Input("settings-save-oi", "n_clicks"),
+        State("settings-oi-history-days", "value"),
+        State("settings-atr-history-days", "value"),
+        prevent_initial_call=True,
+    )(save_oi_settings)
 
     app.callback(
         Output("settings-save-defaults", "children"),
