@@ -93,16 +93,17 @@ def _defaults_section() -> dbc.AccordionItem:
                 ),
             ),
             _field(
-                "Correlation Window (days)",
-                _number_input("settings-correlation-window", settings.DEFAULT_CORRELATION_WINDOW),
-                "Between 20 and 500. A single point-in-time correlation: the Structure Builder's "
-                "correlation check and the Correlation tab's Heatmap lookback.",
+                "Rolling Window (days)",
+                _number_input("settings-correlation-rolling", settings.DEFAULT_CORRELATION_ROLLING_WINDOW),
+                "Between 2 and 5000. A day's correlation value is the Pearson correlation of the last "
+                "this-many days of price changes (it needs at least 2 days).",
             ),
             _field(
-                "Rolling Correlation Window (days)",
-                _number_input("settings-rolling-correlation-window", settings.DEFAULT_ROLLING_CORRELATION_WINDOW),
-                "Between 20 and 500. A different calculation: the trailing window for the "
-                "Correlation tab's Time Series, Year Overlay and Summary Table views.",
+                "Lookback Period (days)",
+                _number_input("settings-correlation-lookback", settings.DEFAULT_CORRELATION_LOOKBACK),
+                "Between 1 and 5000. The correlation shown is the average of those daily values over the "
+                "last this-many days. Used by the Structure Builder check, the Heatmap, the Summary table "
+                "and Monte Carlo VaR.",
             ),
             dbc.Button("Save Defaults", id="settings-save-defaults", color="primary"),
             html.Div("", id="settings-defaults-feedback", style=_STATUS_STYLE),

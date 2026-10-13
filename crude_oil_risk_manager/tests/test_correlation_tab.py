@@ -106,7 +106,7 @@ def test_normalize_instrument_symbol(raw, expected):
 def test_matrix_from_series_perfect_and_negative_correlation():
     base = np.random.default_rng(1).normal(size=40)
     matrix, n = build_correlation_matrix_from_series(
-        {"A": diff_series(base), "B": diff_series(2 * base), "C": diff_series(-base)}, window=30
+        {"A": diff_series(base), "B": diff_series(2 * base), "C": diff_series(-base)}, rolling=5, lookback=30
     )
     assert n == 30
     assert list(matrix.index) == ["A", "B", "C"]
@@ -117,34 +117,49 @@ def test_matrix_from_series_perfect_and_negative_correlation():
 
 def test_matrix_uses_all_common_days_when_lookback_is_longer():
     a, b = diff_series(np.random.default_rng(1).normal(size=12)), diff_series(np.random.default_rng(2).normal(size=12))
-    _, n = build_correlation_matrix_from_series({"A": a, "B": b}, window=90)
-    assert n == 12
+    _, n = build_correlation_matrix_from_series({"A": a, "B": b}, rolling=5, lookback=90)
+    assert n == 8  # 12 common days, a 5-day window: 8 daily values exist
 
 
 def test_matrix_aligns_on_common_dates_and_takes_the_latest_window():
     long = diff_series(np.arange(50.0) % 7)
     short = diff_series(np.arange(50.0) % 5).iloc[20:]  # starts later
-    _, n = build_correlation_matrix_from_series({"A": long, "B": short}, window=90)
-    assert n == 30
+    _, n = build_correlation_matrix_from_series({"A": long, "B": short}, rolling=5, lookback=90)
+    assert n == 26  # 30 common days -> 26 daily 5-day values
 
 
 def test_matrix_zero_variance_series_is_nan_not_an_error():
     flat = diff_series(np.zeros(20))
     moving = diff_series(np.random.default_rng(3).normal(size=20))
-    matrix, _ = build_correlation_matrix_from_series({"flat": flat, "moving": moving}, window=20)
+    matrix, _ = build_correlation_matrix_from_series({"flat": flat, "moving": moving}, rolling=5, lookback=20)
     assert np.isnan(matrix.loc["flat", "moving"]) and np.isnan(matrix.loc["flat", "flat"])
     assert matrix.loc["moving", "moving"] == 1.0
 
 
 def test_matrix_needs_two_series_and_enough_common_days():
     with pytest.raises(InsufficientDataError, match="at least 2"):
-        build_correlation_matrix_from_series({"A": diff_series(range(30))}, window=30)
+        build_correlation_matrix_from_series({"A": diff_series(range(30))}, rolling=5, lookback=30)
     with pytest.raises(InsufficientDataError, match="common days"):
         build_correlation_matrix_from_series(
-            {"A": diff_series(range(MIN_OBSERVATIONS - 1)), "B": diff_series(range(MIN_OBSERVATIONS - 1))}, window=30
+            {"A": diff_series(range(MIN_OBSERVATIONS - 1)), "B": diff_series(range(MIN_OBSERVATIONS - 1))}, rolling=5, lookback=30
         )
+    with pytest.raises(ValueError):  # a one-day window has no correlation
+        build_correlation_matrix_from_series({"A": diff_series(range(9)), "B": diff_series(range(9))}, rolling=1, lookback=5)
     with pytest.raises(ValueError):
-        build_correlation_matrix_from_series({"A": diff_series(range(9)), "B": diff_series(range(9))}, window=1)
+        build_correlation_matrix_from_series({"A": diff_series(range(9)), "B": diff_series(range(9))}, rolling=3, lookback=0)
+    with pytest.raises(InsufficientDataError, match="rolling window needs at least 8"):
+        build_correlation_matrix_from_series({"A": diff_series(range(7)), "B": diff_series(range(7))}, rolling=8, lookback=2)
+
+
+def test_matrix_cell_is_the_average_of_daily_rolling_correlations():
+    rng = np.random.default_rng(11)
+    a = diff_series(rng.normal(size=80))
+    b = diff_series(0.4 * a.to_numpy() + rng.normal(size=80))
+    matrix, n = build_correlation_matrix_from_series({"A": a, "B": b}, rolling=5, lookback=20)
+    expected = a.rolling(5).corr(b).iloc[-20:].mean()
+    assert n == 20
+    assert matrix.loc["A", "B"] == pytest.approx(expected)
+    assert matrix.loc["A", "B"] != pytest.approx(float(np.corrcoef(a.iloc[-24:], b.iloc[-24:])[0, 1]))
 
 
 # ---------- structure series ----------
@@ -213,14 +228,14 @@ def instrument(symbol):
 
 
 def test_compute_requires_two_items(loader):
-    assert compute_watchlist_correlation([instrument("CLZ26")], {}, 30, loader).error == "Add at least 2 items to compute"
+    assert compute_watchlist_correlation([instrument("CLZ26")], {}, 5, 30, loader).error == "Add at least 2 items to compute"
 
 
 def test_compute_all_missing_and_single_valid_errors(make_data, loader):
-    result = compute_watchlist_correlation([instrument("CLZ26"), instrument("CLF27")], {}, 30, loader)
+    result = compute_watchlist_correlation([instrument("CLZ26"), instrument("CLF27")], {}, 5, 30, loader)
     assert result.error == "No valid data to compute — check symbols" and set(result.skipped) == {"CLZ26", "CLF27"}
     make_data(CLZ26=random_closes(40, 1))
-    result = compute_watchlist_correlation([instrument("CLZ26"), instrument("CLF27")], {}, 30, loader)
+    result = compute_watchlist_correlation([instrument("CLZ26"), instrument("CLF27")], {}, 5, 30, loader)
     assert result.error == "Need at least 2 valid series" and list(result.skipped) == ["CLF27"]
 
 
@@ -234,27 +249,28 @@ def test_compute_mixed_instruments_and_structures_skips_invalid(make_data, loade
              {"type": "structure", "key": broken.structure_id, "label": "Broken"},
              instrument("MISSING26")]
     result = compute_watchlist_correlation(
-        items, {spread.structure_id: spread, broken.structure_id: broken}, 30, loader
+        items, {spread.structure_id: spread, broken.structure_id: broken}, 5, 30, loader
     )
     assert result.error is None and result.observations == 30
     assert list(result.matrix.index) == ["CLG27", "CLZ26", "Z-F spread"]
     assert set(result.skipped) == {"Broken", "MISSING26"}
-    expected = np.corrcoef(np.diff(a)[-30:], np.diff(a)[-30:] - np.diff(b)[-30:])[0, 1]
+    da, db = pd.Series(np.diff(a)), pd.Series(np.diff(b))
+    expected = da.rolling(5).corr(da - db).iloc[-30:].mean()  # average of 30 daily 5-day correlations
     assert result.matrix.loc["CLZ26", "Z-F spread"] == pytest.approx(expected)
 
 
 def test_compute_reports_short_history(make_data, loader):
     make_data(CLZ26=random_closes(15, 1), CLF27=random_closes(15, 2))
-    result = compute_watchlist_correlation([instrument("CLZ26"), instrument("CLF27")], {}, 90, loader)
-    assert result.error is None and result.observations == 14 and result.requested == 90
+    result = compute_watchlist_correlation([instrument("CLZ26"), instrument("CLF27")], {}, 5, 90, loader)
+    assert result.error is None and result.observations == 10 and result.requested == 90 and result.rolling == 5
 
 
 def test_compute_watchlist_correlation_as_of_restricts_to_that_date(make_data, loader):
     a = random_closes(80, 1)
     make_data(CLZ26=a, CLF27=a + 5)  # perfectly correlated
     items = [instrument("CLZ26"), instrument("CLF27")]
-    full = compute_watchlist_correlation(items, {}, 30, loader)
-    early = compute_watchlist_correlation(items, {}, 30, loader, as_of=date(2000, 1, 1))
+    full = compute_watchlist_correlation(items, {}, 5, 30, loader)
+    early = compute_watchlist_correlation(items, {}, 5, 30, loader, as_of=date(2000, 1, 1))
     assert full.error is None
     assert early.error is not None  # no data that far back
 
@@ -305,12 +321,12 @@ def test_watchlist_pair_summary_covers_every_pair_once(make_data, loader):
     series, _ = build_watchlist_series(
         [instrument("CLZ26"), instrument("CLF27"), instrument("CLG27")], {}, loader
     )
-    rows = watchlist_pair_summary(series, 20)
+    rows = watchlist_pair_summary(series, 5, 20)
     pairs = {(r["base"], r["target"]) for r in rows}
     assert pairs == {("CLZ26", "CLF27"), ("CLZ26", "CLG27"), ("CLF27", "CLG27")}
     for row in rows:
-        assert row["min"] <= row["mean"] <= row["max"]
-        assert row["n_obs"] > 0
+        assert row["min"] <= row["avg"] <= row["max"]
+        assert row["n_obs"] == 20  # the last 20 daily values
 
 
 def test_watchlist_pair_summary_skips_pairs_with_no_shared_history(make_data, loader):
@@ -318,7 +334,7 @@ def test_watchlist_pair_summary_skips_pairs_with_no_shared_history(make_data, lo
     series, _ = build_watchlist_series([instrument("CLZ26")], {}, loader)
     disjoint = series["CLZ26"].copy()
     disjoint.index = disjoint.index + pd.Timedelta(days=10_000)
-    rows = watchlist_pair_summary({"CLZ26": series["CLZ26"], "Disjoint": disjoint}, 20)
+    rows = watchlist_pair_summary({"CLZ26": series["CLZ26"], "Disjoint": disjoint}, 5, 20)
     assert rows == []
 
 
@@ -343,39 +359,40 @@ def test_layout_controls_and_defaults():
                          "corr-watchlist-list", "corr-lookback", "corr-compute-btn", "corr-status",
                          "corr-heatmap", "corr-watchlist", "corr-instrument-group", "corr-structure-group"]:
         assert find(layout, component_id) is not None, component_id
-    assert find(layout, "corr-lookback").value == "60"  # from settings.DEFAULT_CORRELATION_WINDOW
-    assert [o["value"] for o in find(layout, "corr-lookback").options] == ["10", "20", "30", "60", "90"]
+    assert find(layout, "corr-rolling").value == 5  # settings.DEFAULT_CORRELATION_ROLLING_WINDOW
+    assert find(layout, "corr-lookback").value == 20  # settings.DEFAULT_CORRELATION_LOOKBACK
+    assert find(layout, "corr-sum-window").value == 5 and find(layout, "corr-sum-lookback").value == 20
+    assert find(layout, "corr-ts-windows").value == [5]
     assert find(layout, "corr-mode").value == "instrument"
     assert find(layout, "corr-structure-group").style == {"display": "none"}
     assert find(layout, "corr-heatmap").figure.layout.annotations[0].text == PLACEHOLDER_TEXT
 
 
 def test_layout_defaults_come_from_settings(tmp_path, monkeypatch):
-    """The Heatmap lookback (point-in-time) and the rolling-window views each read their
-    OWN setting — these are two different calculations (calculate_correlation vs
-    calculate_rolling_correlation) and must not share one default."""
+    """The rolling window and the lookback period each read their own setting, in every view."""
     from db.repository import Repository
     from ui.container import Container
     import ui.layouts.correlation_tab as ct
 
     repo = Repository(str(tmp_path / "test.db"))
-    repo.set_setting("correlation_window", 45)  # not one of the 10/20/30/60/90 presets
-    repo.set_setting("rolling_correlation_window", 15)
+    repo.set_setting("correlation_rolling_window", 7)  # not one of the time-series presets
+    repo.set_setting("correlation_lookback", 45)
     monkeypatch.setattr(ct, "container", Container(repository=repo))
 
     layout = correlation_layout()
-    assert find(layout, "corr-lookback").value == "45"
-    assert [o["value"] for o in find(layout, "corr-lookback").options] == ["10", "20", "30", "45", "60", "90"]
-    assert find(layout, "corr-yr-window").value == 15
-    assert find(layout, "corr-sum-window").value == 15
+    assert find(layout, "corr-rolling").value == 7 and find(layout, "corr-lookback").value == 45
+    assert find(layout, "corr-yr-window").value == 7
+    assert find(layout, "corr-sum-window").value == 7 and find(layout, "corr-sum-lookback").value == 45
+    assert find(layout, "corr-ts-windows").value == [7]
+    assert 7 in [o["value"] for o in find(layout, "corr-ts-windows").options]
 
 
 def test_heatmap_figure_scale_annotations_and_title():
     matrix = pd.DataFrame([[1.0, 0.5, np.nan], [0.5, 1.0, -0.25], [np.nan, -0.25, 1.0]],
                           index=["A", "B", "C"], columns=["A", "B", "C"])
-    figure = build_heatmap_figure(matrix, 30)
+    figure = build_heatmap_figure(matrix, 5, 30)
     trace = figure.data[0]
-    assert figure.layout.title.text == "Correlation Matrix — 30d"
+    assert figure.layout.title.text == "Correlation Matrix — 5d rolling, 30d lookback average"
     assert (trace.zmin, trace.zmax) == (-1, 1)
     assert [c[1] for c in trace.colorscale] == [COLORS["ACCENT_RED"], COLORS["TEXT_PRIMARY"], COLORS["ACCENT_GREEN"]]
     assert trace.text[0][1] == "0.50" and trace.text[0][2] == "n/a" and trace.text[1][2] == "-0.25"
@@ -539,36 +556,48 @@ def test_backfill_missing_is_async_and_never_blocks_compute(env, monkeypatch):
 
 def test_compute_heatmap_success_status_and_figure(env, make_data):
     make_data(CLZ26=random_closes(80, 1), CLF27=random_closes(80, 2))
-    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27")], "30", None)
-    assert figure.layout.title.text == "Correlation Matrix — 30d"
-    assert "Last computed" in status.children and "30 days" in status.children and "Only" not in status.children
+    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27")], 5, 30, None)
+    assert figure.layout.title.text == "Correlation Matrix — 5d rolling, 30d lookback average"
+    assert "Last computed" in status.children and "5d rolling, average of the last 30 days" in status.children
+    assert "Only" not in status.children
 
 
 def test_compute_heatmap_notes_short_history_and_skipped_items(env, make_data):
     make_data(CLZ26=random_closes(20, 1), CLF27=random_closes(20, 2))
-    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27"), instrument("NOPE26")], "90", None)
-    assert "Only 19 common days available (requested 90d)" in status.children
+    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27"), instrument("NOPE26")], 5, 90, None)
+    assert "Only 15 days of history available (requested 90d)" in status.children
     assert "Skipped: NOPE26" in status.children
 
 
 def test_compute_heatmap_inline_errors(env, make_data):
-    figure, status = cc.compute_heatmap(1, [instrument("CLZ26")], "30", None)
+    figure, status = cc.compute_heatmap(1, [instrument("CLZ26")], 5, 30, None)
     assert figure.layout.annotations[0].text == "Add at least 2 items to compute"
     assert status.style["color"] == COLORS["ACCENT_RED"] and "Add at least 2 items to compute" in status.children
-    figure, status = cc.compute_heatmap(1, [instrument("A26"), instrument("B26")], "30", None)
+    figure, status = cc.compute_heatmap(1, [instrument("A26"), instrument("B26")], 5, 30, None)
     assert "No valid data to compute — check symbols" in status.children
     make_data(CLZ26=random_closes(40, 1))
-    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("B26")], "30", None)
+    figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("B26")], 5, 30, None)
     assert "Need at least 2 valid series" in status.children
     with pytest.raises(PreventUpdate):
-        cc.compute_heatmap(None, [], "30", None)
+        cc.compute_heatmap(None, [], 5, 30, None)
+
+
+def test_compute_heatmap_validates_the_two_windows(env, make_data):
+    make_data(CLZ26=random_closes(80, 1), CLF27=random_closes(80, 2))
+    items = [instrument("CLZ26"), instrument("CLF27")]
+    for rolling, lookback, message in ((1, 20, "between 2 and 5000"), (5, 0, "Lookback period must be between 1 and 5000"),
+                                       (5, 9999, "Lookback period"), ("x", 20, "whole numbers")):
+        figure, status = cc.compute_heatmap(1, items, rolling, lookback, None)
+        assert message in status.children and status.style["color"] == COLORS["ACCENT_RED"], (rolling, lookback)
+    figure, status = cc.compute_heatmap(1, items, None, "", None)  # blank -> the Settings defaults (5 and 20)
+    assert "5d rolling, average of the last 20 days" in status.children
 
 
 def test_compute_heatmap_as_of_restricts_the_window(env, make_data):
     a, b = random_closes(80, 1), random_closes(80, 2)
     make_data(CLZ26=a, CLF27=b)
     items = [instrument("CLZ26"), instrument("CLF27")]
-    figure, status = cc.compute_heatmap(1, items, "30", "2000-01-01")
+    figure, status = cc.compute_heatmap(1, items, 5, 30, "2000-01-01")
     assert "Add at least 2 items to compute" not in str(figure)  # a real (error) figure, not the placeholder
     assert status.style["color"] == COLORS["ACCENT_RED"]  # too little data that far back
 
@@ -619,15 +648,18 @@ def test_compute_summary_covers_every_pair(env, make_data):
     a, b, c = random_closes(60, 1), random_closes(60, 2), random_closes(60, 3)
     make_data(CLZ26=a, CLF27=b, CLG27=c)
     watchlist = [instrument("CLZ26"), instrument("CLF27"), instrument("CLG27")]
-    table, status = cc.compute_summary(1, watchlist, 20)
+    table, status = cc.compute_summary(1, watchlist, 5, 20)
     assert table.data is not None and len(table.data) == 3
-    assert "3 pair(s) at 20d" in status.children
+    assert "3 pair(s): 5d rolling, average of the last 20 days" in status.children
+    assert all("avg" in row for row in table.data)
+    table, status = cc.compute_summary(1, watchlist, 1, 20)
+    assert "between 2 and 5000" in status.children
 
 
 def test_compute_summary_needs_two_items(env):
     with pytest.raises(PreventUpdate):
-        cc.compute_summary(None, [], 20)
-    table, status = cc.compute_summary(1, [instrument("CLZ26")], 20)
+        cc.compute_summary(None, [], 5, 20)
+    table, status = cc.compute_summary(1, [instrument("CLZ26")], 5, 20)
     assert MIN_ITEMS_TEXT in status.children
 
 

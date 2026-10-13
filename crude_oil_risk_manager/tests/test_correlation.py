@@ -12,7 +12,9 @@ from core.correlation import (
     calculate_correlation,
     calculate_rolling_correlation,
     classify_correlation,
+    beta_window,
     correlate_structures,
+    lookback_average_correlation,
     outright_weights,
     structure_return_series,
 )
@@ -44,34 +46,100 @@ def test_correlation_perfectly_correlated(tmp_path, loader, create_synthetic_par
     base = random_closes(100, seed=1)
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
     create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
-    assert calculate_correlation("CLZ26", "CLF27", 60, loader) == pytest.approx(1.0)
+    assert calculate_correlation("CLZ26", "CLF27", 5, 20, loader) == pytest.approx(1.0)
 
 
 def test_correlation_perfectly_anticorrelated(tmp_path, loader, create_synthetic_parquet):
     base = random_closes(100, seed=1)
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
     create_synthetic_parquet(tmp_path, "CLF27", closes=200 - base)
-    assert calculate_correlation("CLZ26", "CLF27", 60, loader) == pytest.approx(-1.0)
+    assert calculate_correlation("CLZ26", "CLF27", 5, 20, loader) == pytest.approx(-1.0)
 
 
 def test_correlation_unrelated_series_near_zero(tmp_path, loader, create_synthetic_parquet):
     create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(500, seed=1))
     create_synthetic_parquet(tmp_path, "CLF27", closes=random_closes(500, seed=2))
-    assert abs(calculate_correlation("CLZ26", "CLF27", 400, loader)) < 0.2
+    assert abs(calculate_correlation("CLZ26", "CLF27", 10, 300, loader)) < 0.2
 
 
 def test_correlation_insufficient_data_raises(tmp_path, loader, create_synthetic_parquet):
     create_synthetic_parquet(tmp_path, "CLZ26", n_days=30, seed=1)
     create_synthetic_parquet(tmp_path, "CLF27", n_days=30, seed=2)
-    with pytest.raises(InsufficientDataError):
-        calculate_correlation("CLZ26", "CLF27", 60, loader)
+    with pytest.raises(InsufficientDataError):  # 29 days of changes, but 5 + 60 - 1 = 64 are needed
+        calculate_correlation("CLZ26", "CLF27", 5, 60, loader)
 
 
 def test_correlation_zero_variance_raises_instead_of_nan(tmp_path, loader, create_synthetic_parquet):
     create_synthetic_parquet(tmp_path, "CLZ26", closes=np.full(60, 75.0))
     create_synthetic_parquet(tmp_path, "CLF27", closes=random_closes(60, seed=2))
     with pytest.raises(InsufficientDataError):
-        calculate_correlation("CLZ26", "CLF27", 30, loader)
+        calculate_correlation("CLZ26", "CLF27", 5, 20, loader)
+
+
+# ---------- the two-step measure: rolling window, then lookback average ----------
+
+
+def _pair(n: int, seed: int) -> tuple[pd.Series, pd.Series]:
+    rng = np.random.default_rng(seed)
+    index = pd.date_range("2026-01-01", periods=n, freq="D", tz="UTC")
+    a = pd.Series(rng.normal(size=n), index=index, name="A")
+    b = pd.Series(0.5 * a.to_numpy() + rng.normal(size=n), index=index, name="B")
+    return a, b
+
+
+def test_lookback_average_is_the_mean_of_the_last_L_daily_rolling_R_day_correlations():
+    a, b = _pair(120, seed=3)
+    value, used = lookback_average_correlation(a, b, rolling=5, lookback=20)
+    daily = [np.corrcoef(a.iloc[i - 4:i + 1], b.iloc[i - 4:i + 1])[0, 1] for i in range(100, 120)]  # 20 days, 5 each
+    assert used == 20
+    assert value == pytest.approx(float(np.mean(daily)))
+
+
+def test_changing_either_window_changes_the_result():
+    a, b = _pair(200, seed=4)
+    base = lookback_average_correlation(a, b, 5, 20)[0]
+    assert lookback_average_correlation(a, b, 10, 20)[0] != pytest.approx(base)
+    assert lookback_average_correlation(a, b, 5, 60)[0] != pytest.approx(base)
+
+
+def test_it_is_not_a_single_pearson_over_the_last_R_plus_L_days():
+    a, b = _pair(200, seed=5)
+    averaged = lookback_average_correlation(a, b, 5, 20)[0]
+    one_big_window = float(np.corrcoef(a.iloc[-24:], b.iloc[-24:])[0, 1])
+    assert averaged != pytest.approx(one_big_window)
+
+
+def test_defaults_5_and_20_need_24_common_days(tmp_path, loader, create_synthetic_parquet):
+    base = random_closes(24, seed=1)  # 23 diffs: one short
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
+    with pytest.raises(InsufficientDataError):
+        calculate_correlation("CLZ26", "CLF27", 5, 20, loader)
+    base = random_closes(25, seed=1)  # 24 diffs: exactly enough
+    create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
+    create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
+    assert calculate_correlation("CLZ26", "CLF27", 5, 20, loader) == pytest.approx(1.0)
+
+
+def test_a_rolling_window_below_two_and_a_lookback_below_one_are_rejected():
+    a, b = _pair(50, seed=6)
+    with pytest.raises(ValueError, match="rolling window"):
+        lookback_average_correlation(a, b, 1, 20)
+    with pytest.raises(ValueError, match="lookback"):
+        lookback_average_correlation(a, b, 5, 0)
+    assert lookback_average_correlation(a, b, 2, 1)[1] == 1  # the smallest legal pair works
+
+
+def test_a_flat_stretch_is_left_out_of_the_average_not_counted_as_zero():
+    a, b = _pair(60, seed=7)
+    a.iloc[-12:-4] = 1.0  # a flat run: windows wholly inside it have no variance
+    value, used = lookback_average_correlation(a, b, 5, 20)
+    assert 0 < used < 20 and np.isfinite(value)
+
+
+def test_beta_window_is_the_correlation_span_but_at_least_30():
+    assert beta_window(5, 20) == 30
+    assert beta_window(10, 100) == 109
 
 
 # ---------- calculate_rolling_correlation ----------
@@ -100,7 +168,7 @@ def test_matrix_diagonal_is_one(tmp_path, loader, create_synthetic_parquet):
     symbols = ["CLZ26", "CLF27", "BRNZ26"]
     for i, symbol in enumerate(symbols):
         create_synthetic_parquet(tmp_path, symbol, closes=random_closes(100, seed=i))
-    matrix = build_correlation_matrix(symbols, 30, loader)
+    matrix = build_correlation_matrix(symbols, 5, 20, loader)
     assert list(matrix.index) == symbols
     assert list(matrix.columns) == symbols
     assert all(matrix.loc[s, s] == 1.0 for s in symbols)
@@ -110,7 +178,7 @@ def test_matrix_is_symmetric(tmp_path, loader, create_synthetic_parquet):
     symbols = ["CLZ26", "CLF27", "BRNZ26"]
     for i, symbol in enumerate(symbols):
         create_synthetic_parquet(tmp_path, symbol, closes=random_closes(100, seed=i))
-    matrix = build_correlation_matrix(symbols, 30, loader)
+    matrix = build_correlation_matrix(symbols, 5, 20, loader)
     pd.testing.assert_frame_equal(matrix, matrix.T)
 
 
@@ -118,7 +186,7 @@ def test_matrix_failed_pair_is_nan_and_does_not_raise(tmp_path, loader, create_s
     create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(100, seed=1))
     create_synthetic_parquet(tmp_path, "CLF27", closes=random_closes(100, seed=2))
     # BRNZ26 has no Parquet file and the mock adapter cannot backfill.
-    matrix = build_correlation_matrix(["CLZ26", "CLF27", "BRNZ26"], 30, loader)
+    matrix = build_correlation_matrix(["CLZ26", "CLF27", "BRNZ26"], 5, 20, loader)
     assert np.isnan(matrix.loc["CLZ26", "BRNZ26"])
     assert np.isnan(matrix.loc["BRNZ26", "CLF27"])
     assert matrix.loc["BRNZ26", "BRNZ26"] == 1.0
@@ -200,15 +268,15 @@ def test_correlate_structures_perfectly_correlated_outrights(tmp_path, loader, c
     base = random_closes(100, seed=1)
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
     create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
-    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 60, loader)
+    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 5, 20, loader)
     assert result["correlation"] == pytest.approx(1.0)
     assert result["classification"] == "highly_correlated"
-    assert result["window_used"] == 60
+    assert result["window_used"] == 20 and result["rolling"] == 5 and result["error"] is None
 
 
-def test_correlate_structures_agrees_with_pairwise_pearson_for_spreads(tmp_path, loader, create_synthetic_parquet):
-    """A spread-vs-spread correlation via each structure's own derived series must match
-    plain Pearson correlation computed directly on those same two derived series."""
+def test_correlate_structures_is_the_average_of_daily_rolling_correlations_for_spreads(tmp_path, loader, create_synthetic_parquet):
+    """A spread-vs-spread correlation via each structure's own derived series must equal the mean of
+    the last 20 daily 5-day Pearson correlations of those same two derived series."""
     a, b, c = (random_closes(200, seed=i) for i in (1, 2, 3))
     create_synthetic_parquet(tmp_path, "CLZ26", closes=a)
     create_synthetic_parquet(tmp_path, "CLF27", closes=b)
@@ -216,26 +284,28 @@ def test_correlate_structures_agrees_with_pairwise_pearson_for_spreads(tmp_path,
 
     weights_a = outright_weights([{"symbol": "CLZ26", "ratio": 1}, {"symbol": "CLF27", "ratio": -1}])
     weights_b = outright_weights([{"symbol": "CLF27", "ratio": 1}, {"symbol": "CLG27", "ratio": -1}])
-    result = correlate_structures(weights_a, weights_b, 150, loader)
+    result = correlate_structures(weights_a, weights_b, 5, 20, loader)
 
     da, db, dc = (pd.Series(x).diff().dropna() for x in (a, b, c))
-    spread_a, spread_b = (da - db).iloc[-result["window_used"]:], (db - dc).iloc[-result["window_used"]:]
-    assert result["correlation"] == pytest.approx(spread_a.corr(spread_b))
+    spread_a, spread_b = da - db, db - dc
+    expected = spread_a.rolling(5).corr(spread_b).iloc[-20:].mean()
+    assert result["window_used"] == 20
+    assert result["correlation"] == pytest.approx(expected)
 
 
 def test_correlate_structures_missing_data_never_raises(loader):
-    result = correlate_structures({"BRNZ26": 1.0}, {"CLZ26": 1.0}, 30, loader)
+    result = correlate_structures({"BRNZ26": 1.0}, {"CLZ26": 1.0}, 5, 20, loader)
     assert result["correlation"] is None and result["error"]
 
 
-def test_correlate_structures_falls_back_to_available_window(tmp_path, loader, create_synthetic_parquet):
-    base = random_closes(30, seed=1)  # 29 diffs, fewer than the 60-day window requested
+def test_correlate_structures_falls_back_to_available_lookback(tmp_path, loader, create_synthetic_parquet):
+    base = random_closes(30, seed=1)  # 29 diffs -> 25 daily 5-day values, fewer than the 60-day lookback requested
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
     create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
-    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 60, loader)
+    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 5, 60, loader)
     assert result["correlation"] == pytest.approx(1.0)
-    assert result["window_used"] == 29
-    assert "Only 29" in result["error"]
+    assert result["window_used"] == 25
+    assert "Only 25 of the requested 60-day lookback" in result["error"]
 
 
 def test_correlate_structures_illiquid_unrelated_leg_does_not_starve_this_pair(tmp_path, loader, create_synthetic_parquet):
@@ -248,8 +318,8 @@ def test_correlate_structures_illiquid_unrelated_leg_does_not_starve_this_pair(t
     # An illiquid, unrelated leg with almost no date overlap with the above two.
     create_synthetic_parquet(tmp_path, "BRNZ26", n_days=5, seed=9, end_date=date(2020, 1, 5))
 
-    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 60, loader)
-    assert result["window_used"] == 60  # unaffected by BRNZ26 existing elsewhere in the portfolio
+    result = correlate_structures({"CLZ26": 1.0}, {"CLF27": 1.0}, 5, 20, loader)
+    assert result["window_used"] == 20  # unaffected by BRNZ26 existing elsewhere in the portfolio
 
 
 # ---------- DataLoader ----------

@@ -23,19 +23,18 @@ KEY_STALENESS = "staleness_threshold_seconds"
 KEY_MARGIN_LIMIT = "margin_limit"
 KEY_ROLL_WARNING_DAYS = "roll_warning_days"
 KEY_VAR_CONFIDENCE = "var_confidence"
-KEY_CORRELATION_WINDOW = "correlation_window"
-# The rolling-correlation window (Time Series / Year Overlay / Summary Table) is a
-# different calculation from the point-in-time one KEY_CORRELATION_WINDOW drives
-# (core.correlation.calculate_rolling_correlation vs calculate_correlation) and needs its
-# own default.
-KEY_ROLLING_CORRELATION_WINDOW = "rolling_correlation_window"
+# Correlation = average over the last LOOKBACK days of the daily ROLLING-day correlation
+# (core.correlation). New keys, so values saved under the old single-window settings
+# ("correlation_window", "rolling_correlation_window") are not misread as these.
+KEY_CORRELATION_ROLLING = "correlation_rolling_window"
+KEY_CORRELATION_LOOKBACK = "correlation_lookback"
 KEY_TEAMS_WEBHOOK = WEBHOOK_SETTING_KEY
 KEY_TEAMS_ENABLED = ENABLED_SETTING_KEY
 
 VAR_CONFIDENCE_CHOICES = (0.95, 0.99)
-# DataLoader.align_series needs at least 20 common dates, so a smaller window can never work.
-MIN_CORRELATION_WINDOW = 20
-MAX_CORRELATION_WINDOW = 500
+MIN_ROLLING_WINDOW = 2  # a correlation needs at least two days
+MIN_CORRELATION_LOOKBACK = 1
+MAX_CORRELATION_WINDOW = 5000
 
 _MAX_TOKEN_LENGTH = 4096
 _MAX_URL_LENGTH = 2048
@@ -110,28 +109,44 @@ def validate_thresholds(
     }
 
 
-def validate_defaults(var_confidence, correlation_window, rolling_correlation_window) -> dict[str, float | int]:
+def validate_defaults(var_confidence, rolling_window, lookback) -> dict[str, float | int]:
     """Validate the analysis defaults and return {settings_key: value}."""
     confidence = parse_number(var_confidence, "VaR Confidence Level")
     if confidence not in VAR_CONFIDENCE_CHOICES:
         raise ValueError("VaR Confidence Level must be 95% or 99%")
     return {
         KEY_VAR_CONFIDENCE: confidence,
-        KEY_CORRELATION_WINDOW: parse_number(
-            correlation_window,
-            "Correlation Window",
-            minimum=MIN_CORRELATION_WINDOW,
+        KEY_CORRELATION_ROLLING: parse_number(
+            rolling_window,
+            "Rolling Window",
+            minimum=MIN_ROLLING_WINDOW,
             maximum=MAX_CORRELATION_WINDOW,
             integer=True,
         ),
-        KEY_ROLLING_CORRELATION_WINDOW: parse_number(
-            rolling_correlation_window,
-            "Rolling Correlation Window",
-            minimum=MIN_CORRELATION_WINDOW,
+        KEY_CORRELATION_LOOKBACK: parse_number(
+            lookback,
+            "Lookback Period",
+            minimum=MIN_CORRELATION_LOOKBACK,
             maximum=MAX_CORRELATION_WINDOW,
             integer=True,
         ),
     }
+
+
+def correlation_windows(repository) -> tuple[int, int]:
+    """(rolling window, lookback) in days from the settings table, falling back to the defaults."""
+    from config.settings import settings  # local: keeps this module's import list unchanged for its other users
+
+    def read(key, default, minimum):
+        try:
+            return max(minimum, int(repository.get_setting(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return (
+        read(KEY_CORRELATION_ROLLING, settings.DEFAULT_CORRELATION_ROLLING_WINDOW, MIN_ROLLING_WINDOW),
+        read(KEY_CORRELATION_LOOKBACK, settings.DEFAULT_CORRELATION_LOOKBACK, MIN_CORRELATION_LOOKBACK),
+    )
 
 
 def validate_webhook_url(raw) -> str:

@@ -8,6 +8,19 @@ misleading for them. Every series here is an exchange-quoted symbol with its
 own price history — spreads/flies are never derived from their legs.
 
 All data access goes through DataLoader; this module does no file I/O.
+
+HOW "THE" CORRELATION OF TWO SERIES IS MEASURED (everywhere a single number is shown: the
+Structure Builder check, the Heatmap, the Summary table, Monte Carlo VaR's matrix):
+
+  1. ROLLING WINDOW (R days). For each day, the Pearson correlation of the two series' price
+     differences over the R days ending that day. That gives one correlation value per day.
+  2. LOOKBACK PERIOD (L days). The plain average of those daily values over the last L days.
+
+Defaults are R = 5 and L = 20 (Settings > Analysis Defaults), so with the defaults a pair needs
+R + L - 1 = 24 common days. R must be at least 2 (a correlation needs two points). A day whose
+window has no variance in a series has no value and is left out of the average. If fewer than L
+days of values exist, the average uses what there is and reports how many days that was.
+The Time Series and Year Overlay views plot the daily values of step 1 themselves.
 """
 
 import logging
@@ -17,7 +30,6 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
-from scipy.stats import pearsonr
 
 from adapters.base import PRODUCT_TO_API_CODE, SymbolTranslator
 from core.data_loader import DataLoader
@@ -41,6 +53,51 @@ def _validate_window(window: int) -> None:
         raise ValueError(f"window must be >= 2, got {window}")
 
 
+def _validate_rolling(rolling: int) -> None:
+    if rolling < 2:
+        raise ValueError(f"rolling window must be >= 2 (a correlation needs at least two days), got {rolling}")
+
+
+def _validate_lookback(lookback: int) -> None:
+    if lookback < 1:
+        raise ValueError(f"lookback must be >= 1, got {lookback}")
+
+
+def beta_window(rolling: int, lookback: int) -> int:
+    """Observations the beta panels regress over: the span the correlation uses, but never fewer
+    than the 30 a reliable OLS fit needs (core.regression)."""
+    return max(30, rolling + lookback - 1)
+
+
+def _daily_correlations(a: pd.Series, b: pd.Series, rolling: int) -> pd.Series:
+    """Step 1: per-day Pearson correlation over the last `rolling` days; NaN where undefined."""
+    return a.rolling(rolling).corr(b).replace([np.inf, -np.inf], np.nan).clip(-1.0, 1.0)
+
+
+def lookback_average_correlation(
+    series_a: pd.Series, series_b: pd.Series, rolling: int, lookback: int
+) -> tuple[float, int]:
+    """Step 2: average of the daily `rolling`-day correlations over the last `lookback` days.
+
+    Series are inner-joined on date first (no forward-fill). Returns (average, days_used):
+    days_used is how many of the last `lookback` days had a defined value (fewer than `lookback`
+    if the history is short or a window had no variance). Raises InsufficientDataError if the
+    series share no days or no day has a defined value.
+    """
+    _validate_rolling(rolling)
+    _validate_lookback(lookback)
+    aligned = pd.concat([series_a, series_b], axis=1, join="inner").dropna().sort_index()
+    if aligned.empty:
+        raise InsufficientDataError(f"{series_a.name} and {series_b.name} share no common trading days.")
+    daily = _daily_correlations(aligned.iloc[:, 0], aligned.iloc[:, 1], rolling).iloc[-lookback:].dropna()
+    if daily.empty:
+        raise InsufficientDataError(
+            f"No {rolling}-day correlation is defined for {series_a.name} vs {series_b.name} "
+            f"({len(aligned)} common days; a window needs variance in both series)."
+        )
+    return float(daily.mean()), int(len(daily))
+
+
 def _load_aligned(
     symbol_a: str,
     symbol_b: str,
@@ -54,47 +111,33 @@ def _load_aligned(
     return data_loader.align_series(diffs_a, diffs_b)
 
 
-def _pearson_last_window(
-    aligned_a: pd.Series, aligned_b: pd.Series, window: int, symbol_a: str, symbol_b: str
-) -> float:
-    """Pearson correlation over the most recent `window` aligned observations."""
-    if len(aligned_a) < window:
-        raise InsufficientDataError(
-            f"Insufficient data for correlation of {symbol_a} and {symbol_b}: "
-            f"{len(aligned_a)} aligned observations available, window requires {window}."
-        )
-    a = aligned_a.iloc[-window:].to_numpy(dtype=float)
-    b = aligned_b.iloc[-window:].to_numpy(dtype=float)
-    if np.std(a) == 0 or np.std(b) == 0:
-        raise InsufficientDataError(
-            f"Correlation of {symbol_a} and {symbol_b} is undefined: "
-            f"a series has zero variance over the last {window} observations."
-        )
-    r, _ = pearsonr(a, b)
-    if not np.isfinite(r):
-        raise InsufficientDataError(
-            f"Correlation of {symbol_a} and {symbol_b} is not finite over the last {window} observations."
-        )
-    return float(min(1.0, max(-1.0, r)))
-
-
 def calculate_correlation(
     symbol_a: str,
     symbol_b: str,
-    window: int,
+    rolling: int,
+    lookback: int,
     data_loader: DataLoader,
     start: date | None = None,
     end: date | None = None,
 ) -> float:
-    """Pearson correlation of daily price differences over the latest `window` common days.
+    """Correlation of two symbols: the average over the last `lookback` days of the daily
+    `rolling`-day Pearson correlation of their price differences (see the module docstring).
 
-    Raises InsufficientDataError if fewer than `window` observations are
-    available after alignment (or the correlation is undefined). Never
-    returns NaN. Result is in [-1.0, 1.0].
+    Needs rolling + lookback - 1 common days. Raises InsufficientDataError if fewer are
+    available (or no day has a defined value). Never returns NaN. Result is in [-1.0, 1.0].
     """
-    _validate_window(window)
-    aligned_a, aligned_b = _load_aligned(symbol_a, symbol_b, window, data_loader, start, end)
-    return _pearson_last_window(aligned_a, aligned_b, window, symbol_a, symbol_b)
+    _validate_rolling(rolling)
+    _validate_lookback(lookback)
+    needed = rolling + lookback - 1
+    aligned_a, aligned_b = _load_aligned(symbol_a, symbol_b, needed, data_loader, start, end)
+    if len(aligned_a) < needed:
+        raise InsufficientDataError(
+            f"Insufficient data for correlation of {symbol_a} and {symbol_b}: "
+            f"{len(aligned_a)} aligned observations available, a {rolling}-day rolling window over a "
+            f"{lookback}-day lookback requires {needed}."
+        )
+    value, _ = lookback_average_correlation(aligned_a, aligned_b, rolling, lookback)
+    return value
 
 
 def calculate_rolling_correlation(
@@ -126,12 +169,13 @@ def calculate_rolling_correlation(
 
 def build_correlation_matrix(
     symbols: list[str],
-    window: int,
+    rolling: int,
+    lookback: int,
     data_loader: DataLoader,
     start: date | None = None,
     end: date | None = None,
 ) -> pd.DataFrame:
-    """N x N correlation matrix (diagonal 1.0, symmetric) for the Correlation Heatmap.
+    """N x N correlation matrix (diagonal 1.0, symmetric), each cell calculate_correlation().
 
     Best-effort: if a pair fails (missing/insufficient data), that cell and
     its mirror are NaN and a warning is logged; individual pair failures
@@ -143,7 +187,7 @@ def build_correlation_matrix(
         values[i, i] = 1.0
         for j in range(i + 1, n):
             try:
-                corr = calculate_correlation(symbols[i], symbols[j], window, data_loader, start, end)
+                corr = calculate_correlation(symbols[i], symbols[j], rolling, lookback, data_loader, start, end)
             except (CrudeOilRiskError, ValueError) as exc:
                 logger.warning("Correlation failed for %s / %s: %s", symbols[i], symbols[j], exc)
                 continue
@@ -233,17 +277,18 @@ def structure_return_series(weights: dict[str, float], data_loader: DataLoader) 
 
 
 def correlate_structures(
-    weights_a: dict[str, float], weights_b: dict[str, float], window: int, data_loader: DataLoader
+    weights_a: dict[str, float], weights_b: dict[str, float], rolling: int, lookback: int, data_loader: DataLoader
 ) -> dict:
-    """Best-effort Pearson correlation between two structures via their own derived
-    difference series (see structure_return_series). Never raises.
+    """Best-effort correlation between two structures via their own derived difference series
+    (see structure_return_series), measured as in the module docstring. Never raises.
 
     Returns {"correlation": float | None, "classification": str, "window_used": int,
-    "error": str | None}. Falls back to min(window, observations available) instead of
-    requiring the full window up front (align_series' own floor of 20 common dates still
-    applies below that); "error" then carries a caveat, not a failure.
+    "rolling": int, "error": str | None}. `window_used` is how many days of the lookback were
+    averaged. Falls back to the days available instead of requiring the full lookback up front
+    (align_series' own floor of 20 common dates still applies); "error" then carries a caveat,
+    not a failure.
     """
-    entry = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "error": None}
+    entry = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "rolling": rolling, "error": None}
     series_a = structure_return_series(weights_a, data_loader)
     series_b = structure_return_series(weights_b, data_loader)
     if series_a is None or series_b is None:
@@ -252,17 +297,16 @@ def correlate_structures(
 
     try:
         aligned_a, aligned_b = data_loader.align_series(series_a, series_b)
-        effective_window = min(window, len(aligned_a))
-        corr = _pearson_last_window(aligned_a, aligned_b, effective_window, "candidate", "structure")
+        corr, used = lookback_average_correlation(aligned_a, aligned_b, rolling, lookback)
     except (CrudeOilRiskError, ValueError) as exc:
         entry["error"] = str(exc)
         return entry
 
     entry["correlation"] = corr
     entry["classification"] = classify_correlation(corr)
-    entry["window_used"] = effective_window
-    if effective_window < window:
-        entry["error"] = f"Only {effective_window} of the requested {window}-day window available."
+    entry["window_used"] = used
+    if used < lookback:
+        entry["error"] = f"Only {used} of the requested {lookback}-day lookback available."
     return entry
 
 
@@ -297,19 +341,19 @@ def normalize_instrument_symbol(symbol: str | None) -> str:
 
 
 def build_correlation_matrix_from_series(
-    series_by_label: dict[str, pd.Series], window: int, as_of: date | None = None
+    series_by_label: dict[str, pd.Series], rolling: int, lookback: int, as_of: date | None = None
 ) -> tuple[pd.DataFrame, int]:
-    """Pearson correlation matrix of pre-built price-difference series.
+    """Correlation matrix of pre-built price-difference series (see the module docstring).
 
-    Series are inner-joined on date; if `as_of` is given, dates after it are dropped
-    first (so the matrix reflects the portfolio as it stood on that date), then the
-    most recent `window` common days are used (fewer if that is all there is). Returns
-    (matrix, observations_used). A pair whose series has zero variance over the window
-    is NaN, like the symbol-based matrix. Raises InsufficientDataError if there are
-    fewer than 2 series or fewer than MIN_OBSERVATIONS common days (at or before
-    `as_of`, when given).
+    Series are inner-joined on date; if `as_of` is given, dates after it are dropped first (so
+    the matrix reflects the portfolio as it stood on that date). Each cell is the average over
+    the last `lookback` days of the daily `rolling`-day correlation. Returns (matrix,
+    lookback_days_used): fewer than `lookback` if the history is short. A pair with no defined
+    value is NaN, as is a series with no variance. Raises InsufficientDataError if there are
+    fewer than 2 series, fewer than MIN_OBSERVATIONS common days, or fewer than `rolling` days.
     """
-    _validate_window(window)
+    _validate_rolling(rolling)
+    _validate_lookback(lookback)
     if len(series_by_label) < 2:
         raise InsufficientDataError("Need at least 2 valid series to compute a correlation matrix.")
     aligned = pd.concat(list(series_by_label.values()), axis=1, join="inner", keys=list(series_by_label))
@@ -322,22 +366,24 @@ def build_correlation_matrix_from_series(
             f"Only {len(aligned)} common days across the selected series{as_of_desc}; "
             f"at least {MIN_OBSERVATIONS} are needed."
         )
-    used = aligned.iloc[-window:]
-    n = len(used)
+    if len(aligned) < rolling:
+        raise InsufficientDataError(
+            f"Only {len(aligned)} common days across the selected series; a {rolling}-day rolling window needs at least {rolling}."
+        )
     labels = list(series_by_label)
+    span = aligned.iloc[-(rolling + lookback - 1):]
     values = np.full((len(labels), len(labels)), np.nan)
     for i, a in enumerate(labels):
         for j, b in enumerate(labels):
             if j < i:
                 values[i, j] = values[j, i]
             elif i == j:
-                values[i, j] = 1.0 if np.std(used[a].to_numpy(dtype=float)) > 0 else np.nan
+                values[i, j] = 1.0 if np.std(span[a].to_numpy(dtype=float)) > 0 else np.nan
             else:
-                try:
-                    values[i, j] = _pearson_last_window(used[a], used[b], n, a, b)
-                except InsufficientDataError:
-                    pass  # zero variance: leave NaN
-    return pd.DataFrame(values, index=labels, columns=labels), n
+                daily = _daily_correlations(aligned[a], aligned[b], rolling).iloc[-lookback:].dropna()
+                if not daily.empty:
+                    values[i, j] = float(daily.mean())
+    return pd.DataFrame(values, index=labels, columns=labels), min(lookback, len(aligned) - rolling + 1)
 
 
 def structure_difference_series(structure: Structure, data_loader: DataLoader) -> pd.Series:
@@ -474,8 +520,9 @@ class WatchlistResult:
     """Outcome of a watchlist correlation run: a matrix, or an error message."""
 
     matrix: pd.DataFrame | None = None
-    observations: int = 0
-    requested: int = 0
+    observations: int = 0  # lookback days actually averaged
+    requested: int = 0  # the lookback asked for
+    rolling: int = 0
     skipped: dict[str, str] = field(default_factory=dict)
     error: str | None = None
 
@@ -483,6 +530,7 @@ class WatchlistResult:
 def compute_watchlist_correlation(
     items: list[dict],
     structures_by_id: dict[str, Structure],
+    rolling: int,
     lookback_days: int,
     data_loader: DataLoader,
     as_of: date | None = None,
@@ -493,7 +541,7 @@ def compute_watchlist_correlation(
     `as_of` restricts the matrix to data at or before that date (the Heatmap tab's as-of
     slider); omit it for "as of the latest available date" (the default).
     """
-    result = WatchlistResult(requested=lookback_days)
+    result = WatchlistResult(requested=lookback_days, rolling=rolling)
     if len(items) < 2:
         result.error = "Add at least 2 items to compute"
         return result
@@ -506,7 +554,7 @@ def compute_watchlist_correlation(
         result.error = "Need at least 2 valid series"
     else:
         try:
-            result.matrix, result.observations = build_correlation_matrix_from_series(series, lookback_days, as_of)
+            result.matrix, result.observations = build_correlation_matrix_from_series(series, rolling, lookback_days, as_of)
         except InsufficientDataError as exc:
             result.error = str(exc)
     return result
@@ -548,31 +596,34 @@ def year_overlay_frame(rolling: pd.Series) -> pd.DataFrame:
     return frame
 
 
-def watchlist_pair_summary(series_by_label: dict[str, pd.Series], window: int) -> list[dict]:
-    """Mean/std/min/max/last rolling correlation, at `window`, plus target-on-base beta, for
-    every pair in the watchlist.
+def watchlist_pair_summary(series_by_label: dict[str, pd.Series], rolling: int, lookback: int) -> list[dict]:
+    """Per pair: the lookback-average correlation (`avg`) and the std/min/max/last of the daily
+    `rolling`-day correlations over that lookback, plus target-on-base beta.
 
     Base/target pairing mirrors the heatmap: every label paired with every label after it
-    (so each pair appears once). A pair with no usable rolling correlation (e.g. no shared
-    history) is left out rather than raising. Beta (target = alpha + beta * base) is best
-    effort: if the regression is underdetermined (see core.regression.beta_from_series), beta
-    and r_squared are None but the row is still included — a pair can have a usable
-    correlation without a reliable beta (or vice versa via a different, non-rolling window).
+    (so each pair appears once). A pair with no usable correlation (e.g. no shared history) is
+    left out rather than raising. Beta (target = alpha + beta * base, over beta_window days) is
+    best effort: if the regression is underdetermined (see core.regression.beta_from_series),
+    beta and r_squared are None but the row is still included.
     """
     from core.regression import beta_from_series  # local import: avoids a cycle at module load
 
-    _validate_window(window)
+    _validate_rolling(rolling)
+    _validate_lookback(lookback)
     labels = list(series_by_label)
     rows = []
     for i, base in enumerate(labels):
         for target in labels[i + 1:]:
             try:
-                s = rolling_correlation_from_series(series_by_label[base], series_by_label[target], window)
+                daily = rolling_correlation_from_series(series_by_label[base], series_by_label[target], rolling)
             except InsufficientDataError:
                 continue
+            s = daily.iloc[-lookback:]
             beta = r_squared = None
             try:
-                beta_result = beta_from_series(series_by_label[target], series_by_label[base], window)
+                beta_result = beta_from_series(
+                    series_by_label[target], series_by_label[base], beta_window(rolling, lookback)
+                )
                 beta, r_squared = beta_result["beta"], beta_result["r_squared"]
             except InsufficientDataError:
                 pass
@@ -580,7 +631,7 @@ def watchlist_pair_summary(series_by_label: dict[str, pd.Series], window: int) -
                 {
                     "base": base,
                     "target": target,
-                    "mean": float(s.mean()),
+                    "avg": float(s.mean()),
                     "std": float(s.std()) if len(s) > 1 else 0.0,
                     "min": float(s.min()),
                     "max": float(s.max()),

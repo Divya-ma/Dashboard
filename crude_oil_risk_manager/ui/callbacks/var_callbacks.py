@@ -13,7 +13,8 @@ from core.exceptions import CrudeOilRiskError
 from core.exposure import filter_open_structures
 from core.scenarios import build_scenarios, load_previous_day_atr
 from core.structure_view import statuses_for_filter
-from core.user_settings import KEY_CORRELATION_WINDOW
+from core.correlation import beta_window
+from core.user_settings import correlation_windows
 from core.var import (
     DISTRIBUTION_NORMAL,
     MonteCarloVarResult,
@@ -72,11 +73,11 @@ def update_var_section(pathname, lookback, method, distribution, mean, std, low,
             if distribution == DISTRIBUTION_NORMAL
             else {"low": float(low or 0.0), "high": float(high or 0.0)}
         )
-        window = int(container.repository.get_setting(KEY_CORRELATION_WINDOW, lookback_days))
+        rolling, corr_lookback = correlation_windows(container.repository)
         try:
             result = monte_carlo_var(
                 weights, container.data_loader, distribution, dist_params,
-                correlation_window=window, n_simulations=n_sims,
+                rolling=rolling, lookback=corr_lookback, n_simulations=n_sims,
             )
         except ValueError as exc:
             result = MonteCarloVarResult(error=str(exc))
@@ -115,7 +116,7 @@ def update_beta_panel(pathname):
     if not structures:
         return [], BETA_HINT
 
-    window = int(container.repository.get_setting(KEY_CORRELATION_WINDOW, 60))
+    window = beta_window(*correlation_windows(container.repository))
     rows = []
     for structure in structures:
         try:

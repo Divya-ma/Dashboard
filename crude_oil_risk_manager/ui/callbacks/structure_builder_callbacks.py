@@ -36,7 +36,8 @@ from core.structure_utils import (
     validate_structure_legs,
 )
 from core.correlation import structure_return_series
-from core.user_settings import KEY_CORRELATION_WINDOW
+from core.correlation import beta_window
+from core.user_settings import correlation_windows
 from core.var import DISTRIBUTION_NORMAL, beta_vs_portfolio, monte_carlo_var
 from ui.callbacks.structures_callbacks import update_active_structures
 from ui.container import container
@@ -209,7 +210,7 @@ def _candidate_dollar_weights(net_outright_weights: dict[str, float]) -> dict[st
     return dollar_weights
 
 
-def _candidate_var(dollar_weights: dict[str, float], window: int) -> dict:
+def _candidate_var(dollar_weights: dict[str, float], rolling: int, lookback: int) -> dict:
     """Monte Carlo VaR (1 lot of the candidate structure) from its outright decomposition.
 
     Normal(mean=0, std=1 point) draws, correlated via the same outright symbols' correlation
@@ -219,7 +220,7 @@ def _candidate_var(dollar_weights: dict[str, float], window: int) -> dict:
     """
     result = monte_carlo_var(
         dollar_weights, container.data_loader, DISTRIBUTION_NORMAL,
-        {"mean": 0.0, "std": 1.0}, correlation_window=window,
+        {"mean": 0.0, "std": 1.0}, rolling=rolling, lookback=lookback,
     )
     if result.error:
         return {"error": result.error}
@@ -228,7 +229,8 @@ def _candidate_var(dollar_weights: dict[str, float], window: int) -> dict:
         "var_99": result.var[0.99],
         "distribution": result.distribution,
         "n_simulations": result.n_simulations,
-        "window": window,
+        "rolling": rolling,
+        "lookback": lookback,
         "warnings": result.warnings,
     }
 
@@ -253,13 +255,13 @@ def check_correlation(n_clicks, symbols, ratios, template):
         placeholder = html.Div("Enter at least one valid leg symbol first.", style=_MUTED)
         return placeholder, [], placeholder, placeholder
 
-    window = int(repository.get_setting(KEY_CORRELATION_WINDOW, settings.DEFAULT_CORRELATION_WINDOW))
+    rolling, lookback = correlation_windows(repository)
     portfolio = repository.get_all_structures(status_filter=ACTIVE_STRUCTURE_STATUSES)
-    rows = check_portfolio_correlation(legs, portfolio, window, container.data_loader)
+    rows = check_portfolio_correlation(legs, portfolio, rolling, lookback, container.data_loader)
 
     dollar_weights = _candidate_dollar_weights(net)
-    var_result = _candidate_var(dollar_weights, window)
-    beta_result = _candidate_beta(dollar_weights, portfolio, window)
+    var_result = _candidate_var(dollar_weights, rolling, lookback)
+    beta_result = _candidate_beta(dollar_weights, portfolio, beta_window(rolling, lookback))
     return render_correlation_table(rows), rows, render_structure_var(var_result), render_structure_beta(beta_result)
 
 

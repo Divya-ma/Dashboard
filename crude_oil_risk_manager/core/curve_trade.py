@@ -31,9 +31,12 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
+from config.settings import settings
+from core.correlation import lookback_average_correlation
 from core.curve_calendar import FAMILIES, FLY, CurveStructure, parse_contract
 from core.curve_history import CurveHistoryStore, generic_code
 from core.curve_settings import CurveParams
+from core.exceptions import InsufficientDataError
 
 MIN_TICK = 0.01
 MIN_HEDGE_ROWS = 30
@@ -168,9 +171,16 @@ def _var(pnl: np.ndarray) -> np.ndarray:
 
 def rank_hedges(
     frame: pd.DataFrame, family: str, k0: int, side: str, product: str, candidates: list[HedgeCandidate],
-    params: CurveParams,
+    params: CurveParams, corr_windows: tuple[int, int] | None = None,
 ) -> tuple[list[HedgeOption], list[str]]:
-    """Hedge alternatives ranked by VaR reduction, with ratios from the VaR search. See module docstring."""
+    """Hedge alternatives ranked by VaR reduction, with ratios from the VaR search. See module docstring.
+
+    The correlation shown and tested against hedge_min_corr is the app-wide one (core.correlation):
+    the average over the last L days of the daily R-day correlation, `corr_windows` = (R, L) from
+    Settings. The ratio and the VaR still come from the whole `hedge_lookback` window."""
+    rolling, corr_lookback = corr_windows or (
+        settings.DEFAULT_CORRELATION_ROLLING_WINDOW, settings.DEFAULT_CORRELATION_LOOKBACK
+    )
     warnings: list[str] = []
     if (family, k0) not in frame.columns:
         return [], ["No history for this curve, so no hedge could be computed"]
@@ -188,7 +198,12 @@ def rank_hedges(
         b = pair.iloc[:, 1].to_numpy()  # P&L per unit BOUGHT of the candidate
         if np.std(b) < 1e-9 or np.std(x) < 1e-9:
             continue
-        correlation = float(np.corrcoef(x, b)[0, 1])
+        try:
+            correlation, _ = lookback_average_correlation(
+                pd.Series(x, index=pair.index), pd.Series(b, index=pair.index), rolling, corr_lookback
+            )
+        except InsufficientDataError:
+            continue
         base_var = float(_var(x))
         portfolio = x[None, :] + _RATIO_GRID[:, None] * b[None, :]
         var_curve = _var(portfolio) + 1e-9 * np.abs(_RATIO_GRID)  # ties go to the smaller hedge
@@ -237,6 +252,7 @@ def build_plan(
     *, product: str, structure: CurveStructure, side: str, live: float, fair: dict, flags: dict,
     frame: pd.DataFrame, half_life_days: float | None, reversion_share: float | None, reversion_events: int,
     candidates: list[HedgeCandidate], params: CurveParams, hedge_cache: dict | None = None,
+    corr_windows: tuple[int, int] | None = None,
 ) -> TradePlan:
     """Entry, lots, stop, target, time stop and hedges for fading one kink. See module docstring.
 
@@ -297,13 +313,13 @@ def build_plan(
 
     cache_key = (
         product, family, k0, side, tuple((c.family, c.structure.position) for c in candidates),
-        params.hedge_lookback, params.hedge_min_corr, params.hedge_count,
+        params.hedge_lookback, params.hedge_min_corr, params.hedge_count, corr_windows,
         len(frame), None if frame.empty else frame.index[-1],
     )
     if hedge_cache is not None and cache_key in hedge_cache:
         ranked, hedge_warnings = hedge_cache[cache_key]
     else:
-        ranked, hedge_warnings = rank_hedges(frame, family, k0, side, product, candidates, params)
+        ranked, hedge_warnings = rank_hedges(frame, family, k0, side, product, candidates, params, corr_windows)
         if hedge_cache is not None:
             hedge_cache.clear() if len(hedge_cache) > 500 else None
             hedge_cache[cache_key] = (ranked, hedge_warnings)

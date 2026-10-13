@@ -532,14 +532,15 @@ def monte_carlo_var(
     distribution: str,
     dist_params: dict,
     confidence_levels: tuple[float, ...] = (0.95, 0.99),
-    correlation_window: int = 60,
+    rolling: int = 5,
+    lookback: int = 20,
     n_simulations: int = DEFAULT_MC_SIMULATIONS,
     seed: int | None = None,
 ) -> MonteCarloVarResult:
     """Correlation-matrix Monte Carlo VaR for a book of dollar-weighted positions.
 
-    Builds the symbols' pairwise correlation matrix (core.correlation.build_correlation_matrix,
-    best-effort: a pair with no usable history is left uncorrelated rather than failing the
+    Builds the symbols' pairwise correlation matrix (core.correlation.build_correlation_matrix: the
+    average over the last `lookback` days of the daily `rolling`-day correlation; best-effort: a pair with no usable history is left uncorrelated rather than failing the
     whole run), then delegates to simulate_correlated_pnl. Symbols with no correlation data at
     all still simulate as uncorrelated with everything else (a data_warning is added), since a
     Monte Carlo run should never silently drop a position the way historical-simulation VaR
@@ -559,7 +560,7 @@ def monte_carlo_var(
     if len(symbols) == 1:
         matrix = pd.DataFrame([[1.0]], index=symbols, columns=symbols)
     else:
-        matrix = build_correlation_matrix(symbols, correlation_window, data_loader)
+        matrix = build_correlation_matrix(symbols, rolling, lookback, data_loader)
         if matrix.isna().to_numpy().any():
             result.warnings.append(
                 "Some symbol pairs had insufficient shared history; those pairs are treated as "

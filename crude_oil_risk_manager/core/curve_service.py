@@ -45,7 +45,7 @@ from core.curve_store import PrevSettlementStore, SnapshotStore
 from core.curve_trade import HedgeCandidate, TradePlan, build_plan, change_frame, half_life, plan_summary, structure_generic, trade_legs
 from core.curve_backtest import run_backtest
 from core.models import AlertLevel
-from core.user_settings import KEY_API_TOKEN
+from core.user_settings import KEY_API_TOKEN, correlation_windows
 
 logger = logging.getLogger(__name__)
 
@@ -542,7 +542,7 @@ class CurveService:
             flags=row["flags"], frame=self._change_frame(product),
             half_life_days=self._half_life(product, family, prepared, params),
             reversion_share=share, reversion_events=events, candidates=candidates, params=params,
-            hedge_cache=self._hedge_cache,
+            hedge_cache=self._hedge_cache, corr_windows=correlation_windows(self._repository),
         )
 
     def _update_event_log(self, state: CurveState, params: CurveParams) -> None:

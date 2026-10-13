@@ -3,8 +3,9 @@
 import pytest
 
 from core.user_settings import (
-    KEY_CORRELATION_WINDOW,
-    KEY_ROLLING_CORRELATION_WINDOW,
+    KEY_CORRELATION_LOOKBACK,
+    KEY_CORRELATION_ROLLING,
+    correlation_windows,
     KEY_MARGIN_LIMIT,
     KEY_PNL_STOP,
     KEY_ROLL_WARNING_DAYS,
@@ -131,27 +132,54 @@ def test_thresholds_zero_stop_allowed():
 
 
 def test_defaults_valid():
-    assert validate_defaults(0.99, 60, 45) == {
-        KEY_VAR_CONFIDENCE: 0.99, KEY_CORRELATION_WINDOW: 60, KEY_ROLLING_CORRELATION_WINDOW: 45,
+    assert validate_defaults(0.99, 5, 20) == {
+        KEY_VAR_CONFIDENCE: 0.99, KEY_CORRELATION_ROLLING: 5, KEY_CORRELATION_LOOKBACK: 20,
+    }
+
+
+def test_defaults_accept_the_extremes():
+    assert validate_defaults(0.95, 2, 1)[KEY_CORRELATION_ROLLING] == 2
+    assert validate_defaults(0.95, 2, 1)[KEY_CORRELATION_LOOKBACK] == 1
+    assert validate_defaults(0.95, 5000, 5000)[KEY_CORRELATION_ROLLING] == 5000
+    assert validate_defaults(0.95, "7", "30") == {
+        KEY_VAR_CONFIDENCE: 0.95, KEY_CORRELATION_ROLLING: 7, KEY_CORRELATION_LOOKBACK: 30,
     }
 
 
 @pytest.mark.parametrize("confidence", [0.9, 1.0, None, "high"])
 def test_defaults_confidence_must_be_95_or_99(confidence):
     with pytest.raises(ValueError):
-        validate_defaults(confidence, 60, 60)
+        validate_defaults(confidence, 5, 20)
 
 
-@pytest.mark.parametrize("window", [19, 501, 60.5, None, "x"])
-def test_defaults_window_bounds(window):
-    with pytest.raises(ValueError):
-        validate_defaults(0.95, window, 60)
-
-
-@pytest.mark.parametrize("window", [19, 501, 60.5, None, "x"])
+@pytest.mark.parametrize("window", [1, 0, 5001, 5.5, None, "x"])
 def test_defaults_rolling_window_bounds(window):
+    """1 is rejected: a correlation needs at least two days."""
     with pytest.raises(ValueError):
-        validate_defaults(0.95, 60, window)
+        validate_defaults(0.95, window, 20)
+
+
+@pytest.mark.parametrize("lookback", [0, -3, 5001, 20.5, None, "x"])
+def test_defaults_lookback_bounds(lookback):
+    with pytest.raises(ValueError):
+        validate_defaults(0.95, 5, lookback)
+
+
+def test_correlation_windows_default_to_5_and_20_and_follow_saved_values(tmp_path):
+    from db.repository import Repository
+
+    repo = Repository(str(tmp_path / "t.db"))
+    assert correlation_windows(repo) == (5, 20)
+    repo.set_setting(KEY_CORRELATION_ROLLING, 8)
+    repo.set_setting(KEY_CORRELATION_LOOKBACK, 40)
+    assert correlation_windows(repo) == (8, 40)
+    repo.set_setting(KEY_CORRELATION_ROLLING, "junk")
+    assert correlation_windows(repo) == (5, 40)  # a bad stored value falls back, never crashes
+    # values saved by the old single-window settings are not read as these
+    repo2 = Repository(str(tmp_path / "t2.db"))
+    repo2.set_setting("correlation_window", 60)
+    repo2.set_setting("rolling_correlation_window", 20)
+    assert correlation_windows(repo2) == (5, 20)
 
 
 # ---------- validate_webhook_url ----------

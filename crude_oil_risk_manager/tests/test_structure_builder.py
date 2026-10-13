@@ -219,8 +219,8 @@ def candidate_legs(*pairs) -> list[dict]:
 
 
 def test_check_portfolio_correlation_empty_candidate_or_portfolio():
-    assert sb.check_portfolio_correlation([], [structure("a", ["CLZ26"], [1])], 60, object()) == []
-    assert sb.check_portfolio_correlation(candidate_legs(("CLG27", 1)), [], 60, object()) == []
+    assert sb.check_portfolio_correlation([], [structure("a", ["CLZ26"], [1])], 5, 20, object()) == []
+    assert sb.check_portfolio_correlation(candidate_legs(("CLG27", 1)), [], 5, 20, object()) == []
 
 
 def test_check_portfolio_correlation_computes_via_outright_decomposition(tmp_path, create_synthetic_parquet):
@@ -237,7 +237,7 @@ def test_check_portfolio_correlation_computes_via_outright_decomposition(tmp_pat
     loader = DataLoader(str(tmp_path), MockHistoricalAdapter())
 
     portfolio = [structure("outright", ["CLZ26"], [1]), structure("odd", ["CLZ26", "CLF27"], [1, -3])]
-    rows = sb.check_portfolio_correlation(candidate_legs(("CLZ26", 1)), portfolio, 60, loader)
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLZ26", 1)), portfolio, 5, 20, loader)
 
     names = {r["existing_structure"] for r in rows}
     assert names == {"outright", "odd", "Whole Portfolio (avg. of 2 structure(s))"}
@@ -254,7 +254,7 @@ def test_check_portfolio_correlation_reports_a_reason_when_data_is_missing(tmp_p
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
     loader = DataLoader(str(tmp_path), MockHistoricalAdapter())  # CLF27 has no local data and no adapter backfill
 
-    rows = sb.check_portfolio_correlation(candidate_legs(("CLZ26", 1)), [structure("a", ["CLF27"], [1])], 60, loader)
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLZ26", 1)), [structure("a", ["CLF27"], [1])], 5, 20, loader)
 
     assert rows[0]["correlation"] is None and rows[0]["classification"] == "insufficient_data"
     assert rows[0]["error"]
@@ -300,7 +300,7 @@ def test_check_portfolio_correlation_prewarms_missing_symbols_before_computing(t
 
     loader = RecordingLoader(str(tmp_path), MockHistoricalAdapter())
     portfolio = [structure("A", ["CLZ26"], [1])]
-    sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), portfolio, 60, loader)
+    sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), portfolio, 5, 20, loader)
 
     assert loader.ensure_cached_calls == [["CLF27", "CLZ26"]]
 
@@ -318,14 +318,14 @@ def test_check_portfolio_correlation_prewarm_failure_does_not_block_the_check(tm
     create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
     loader = BrokenEnsureCacheLoader(str(tmp_path), MockHistoricalAdapter())
 
-    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 30, loader)
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 5, 20, loader)
     assert rows[0]["correlation"] == pytest.approx(1.0)
 
 
 def test_check_portfolio_correlation_bare_data_loader_never_crashes():
     """A data_loader with no ensure_cached/load_price_differences at all (e.g. a bare test
     stub) is tolerated: the check degrades to 'insufficient data' rather than raising."""
-    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 60, object())
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 5, 20, object())
     assert rows[0]["correlation"] is None and rows[0]["classification"] == "insufficient_data"
 
 
@@ -338,7 +338,7 @@ def test_check_portfolio_correlation_adds_a_whole_portfolio_row(tmp_path, create
     create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 5)
     loader = DataLoader(str(tmp_path), MockHistoricalAdapter())
 
-    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 30, loader)
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [structure("A", ["CLZ26"], [1])], 5, 20, loader)
 
     portfolio_rows = [r for r in rows if r["existing_symbol"] == "PORTFOLIO"]
     assert len(portfolio_rows) == 1
@@ -347,7 +347,7 @@ def test_check_portfolio_correlation_adds_a_whole_portfolio_row(tmp_path, create
 
 
 def test_check_portfolio_correlation_no_portfolio_row_when_nothing_computed():
-    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [], 30, object())
+    rows = sb.check_portfolio_correlation(candidate_legs(("CLF27", 1)), [], 5, 20, object())
     assert rows == []
 
 

@@ -62,11 +62,10 @@ class Settings(BaseSettings):
 
     # Risk defaults
     DEFAULT_VAR_CONFIDENCE: float = 0.95
-    # Point-in-time correlation (Structure Builder check, Heatmap lookback).
-    DEFAULT_CORRELATION_WINDOW: int = 60
-    # Rolling correlation (Time Series / Year Overlay / Summary Table) — a different
-    # calculation (core.correlation.calculate_rolling_correlation) with its own window.
-    DEFAULT_ROLLING_CORRELATION_WINDOW: int = 60
+    # Correlation is the average, over the last LOOKBACK days, of the daily ROLLING-day Pearson
+    # correlation (see core.correlation).
+    DEFAULT_CORRELATION_ROLLING_WINDOW: int = 5
+    DEFAULT_CORRELATION_LOOKBACK: int = 20
     DEFAULT_MARGIN_LIMIT: float = 1000000.0
 
     # Contract roll warning

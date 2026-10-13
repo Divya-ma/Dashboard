@@ -262,7 +262,8 @@ def _leg_dicts(structure: Structure) -> list[dict]:
 def check_portfolio_correlation(
     candidate_legs: list[dict],
     portfolio: list[Structure],
-    window: int,
+    rolling: int,
+    lookback: int,
     data_loader: DataLoader,
 ) -> list[dict]:
     """One row per existing active structure, plus a 'vs Whole Portfolio' summary row,
@@ -307,10 +308,10 @@ def check_portfolio_correlation(
     rows = []
     for structure, weights in entries:
         try:
-            result = correlate_structures(candidate_weights, weights, window, data_loader)
+            result = correlate_structures(candidate_weights, weights, rolling, lookback, data_loader)
         except Exception:  # noqa: BLE001 - a data/adapter failure on one structure must never crash the whole check
             logger.exception("Correlation check failed for %s", structure.name)
-            result = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "error": "Could not compute this correlation; see the server log."}
+            result = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "rolling": rolling, "error": "Could not compute this correlation; see the server log."}
         rows.append(
             {
                 "candidate": "New structure",
@@ -319,6 +320,7 @@ def check_portfolio_correlation(
                 "correlation": result["correlation"],
                 "classification": result["classification"],
                 "window_used": result["window_used"],
+                "rolling": result["rolling"],
                 "error": result["error"],
             }
         )
@@ -334,6 +336,7 @@ def check_portfolio_correlation(
                 "correlation": average,
                 "classification": classify_correlation(average),
                 "window_used": min(r["window_used"] for r in rows if r["correlation"] is not None),
+                "rolling": rolling,
                 "error": None,
             }
         )

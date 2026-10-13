@@ -98,7 +98,7 @@ def render_correlation_table(rows: list[dict]):
             chip = html.Span(label, style={"color": color})
         else:
             window_used = row.get("window_used")
-            suffix = f" ({window_used}d)" if window_used else ""
+            suffix = f" ({row.get('rolling')}d rolling, {window_used}d avg)" if window_used else ""
             correlation = html.Span(f"{row['correlation']:+.2f}{suffix}", style={"fontWeight": "bold", "fontSize": "15px"})
             hedge = row["classification"] == "negatively_correlated"
             chip = html.Span(
@@ -144,7 +144,7 @@ def render_structure_var(var_result: dict | None) -> html.Div:
         ),
         html.Div(
             f"Monte Carlo, {var_result['distribution'].title()} draws, {var_result['n_simulations']:,} simulations, "
-            f"correlation from the last {var_result['window']}d.",
+            f"correlation: average over the last {var_result['lookback']}d of the {var_result['rolling']}d rolling value.",
             style={**_MUTED, "fontSize": "13px"},
         ),
     ]

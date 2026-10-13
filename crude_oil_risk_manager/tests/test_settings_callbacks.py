@@ -85,7 +85,7 @@ def test_load_settings_other_path_does_nothing(env):
 def test_load_settings_returns_config_defaults_when_nothing_saved(env):
     result = sc.load_settings("/settings")
     assert len(result) == 13
-    (token, pnl_stop, max_loss, staleness, margin, roll, confidence, window, rolling_window,
+    (token, pnl_stop, max_loss, staleness, margin, roll, confidence, rolling_window, lookback,
      webhook, enabled, status, baseline_status) = result
     assert token == "" and webhook == ""
     assert baseline_status == "No reset active — Total PnL shows the true account total."
@@ -95,8 +95,8 @@ def test_load_settings_returns_config_defaults_when_nothing_saved(env):
     assert margin == settings.DEFAULT_MARGIN_LIMIT
     assert roll == settings.ROLL_WARNING_DAYS_BEFORE_EXPIRY
     assert confidence == settings.DEFAULT_VAR_CONFIDENCE
-    assert window == settings.DEFAULT_CORRELATION_WINDOW
-    assert rolling_window == settings.DEFAULT_ROLLING_CORRELATION_WINDOW
+    assert rolling_window == settings.DEFAULT_CORRELATION_ROLLING_WINDOW == 5
+    assert lookback == settings.DEFAULT_CORRELATION_LOOKBACK == 20
     assert status == "❌ Not configured"
 
 
@@ -104,13 +104,13 @@ def test_load_settings_returns_saved_values(env, repo):
     repo.set_setting("api_access_token", "tok")
     repo.set_setting("alert_portfolio_pnl_stop", -1234.0)
     repo.set_setting("var_confidence", 0.99)
-    repo.set_setting("rolling_correlation_window", 45)
+    repo.set_setting("correlation_lookback", 45)
     repo.set_setting("teams_webhook_url", "https://x.example/hook")
     result = sc.load_settings("/settings")
     assert result[0] == "tok"
     assert result[1] == -1234.0
     assert result[6] == 0.99
-    assert result[8] == 45
+    assert result[7] == 5 and result[8] == 45
     assert result[9] == "https://x.example/hook"
     assert result[11] == "✅ Token configured"
 
@@ -217,14 +217,20 @@ def test_save_thresholds_invalid_saves_nothing(env, repo):
 
 
 def test_save_defaults(env, repo):
-    assert sc.save_defaults(1, 0.99, 90, 45) == ("✅ Saved", "")
+    assert sc.save_defaults(1, 0.99, 7, 45) == ("✅ Saved", "")
     assert repo.get_setting("var_confidence") == 0.99
-    assert repo.get_setting("correlation_window") == 90
-    assert repo.get_setting("rolling_correlation_window") == 45
+    assert repo.get_setting("correlation_rolling_window") == 7
+    assert repo.get_setting("correlation_lookback") == 45
+
+
+def test_save_defaults_rejects_a_rolling_window_of_one(env, repo):
+    button, feedback = sc.save_defaults(1, 0.95, 1, 20)
+    assert button == "❌ Not saved" and "Rolling Window" in feedback
+    assert repo.get_all_settings() == {}
 
 
 def test_save_defaults_invalid(env, repo):
-    button, feedback = sc.save_defaults(1, 0.5, 90, 45)
+    button, feedback = sc.save_defaults(1, 0.5, 5, 20)
     assert button == "❌ Not saved" and feedback.startswith("❌")
     assert repo.get_all_settings() == {}
 
@@ -356,7 +362,7 @@ def test_settings_layout_contains_all_component_ids(env):
         "settings-api-token", "settings-token-show", "settings-save-token", "settings-test-connection",
         "settings-token-status", "settings-portfolio-pnl-stop", "settings-structure-max-loss",
         "settings-staleness-threshold", "settings-margin-limit", "settings-roll-warning-days",
-        "settings-save-thresholds", "settings-var-confidence", "settings-correlation-window",
+        "settings-save-thresholds", "settings-var-confidence", "settings-correlation-rolling", "settings-correlation-lookback",
         "settings-save-defaults", "settings-teams-webhook", "settings-teams-enabled",
         "settings-test-teams", "settings-teams-status", "settings-save-teams", "settings-sync-status",
         "settings-run-sync", "settings-data-summary",

@@ -28,13 +28,14 @@ from core.structure_builder import backfill_symbols_async
 from core.structure_view import statuses_for_filter
 from ui.container import container
 from ui.layouts.correlation_tab import (
-    DEFAULT_TS_WINDOWS,
     MIN_ITEMS_TEXT,
     build_heatmap_figure,
     build_summary_table,
     build_time_series_figure,
     build_year_overlay_figure,
+    default_lookback,
     default_rolling_window,
+    default_ts_windows,
     empty_figure,
     render_watchlist,
 )
@@ -328,16 +329,35 @@ def _status(text: str, is_error: bool = False) -> html.Div:
     return html.Div(text, style={"color": COLORS["ACCENT_RED"] if is_error else COLORS["TEXT_SECONDARY"]})
 
 
-def compute_heatmap(n_clicks, watchlist, lookback, as_of_str):
+def _read_windows(rolling, lookback) -> tuple[int, int]:
+    """The rolling window and lookback period typed on a view; blank falls back to Settings.
+
+    Raises ValueError with a readable message for anything that is not a whole number in range."""
+    try:
+        rolling_days = int(rolling) if rolling not in (None, "") else default_rolling_window()
+        lookback_days = int(lookback) if lookback not in (None, "") else default_lookback()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Rolling window and lookback period must be whole numbers of days") from exc
+    if not 2 <= rolling_days <= 5000:
+        raise ValueError("Rolling window must be between 2 and 5000 days (a correlation needs at least two days)")
+    if not 1 <= lookback_days <= 5000:
+        raise ValueError("Lookback period must be between 1 and 5000 days")
+    return rolling_days, lookback_days
+
+
+def compute_heatmap(n_clicks, watchlist, rolling, lookback, as_of_str):
     """Build the watchlist series, correlate them and render the heatmap and status line."""
     if not n_clicks:
         raise PreventUpdate
-    lookback_days = int(lookback)
+    try:
+        rolling_days, lookback_days = _read_windows(rolling, lookback)
+    except ValueError as exc:
+        return empty_figure(str(exc), is_error=True), _status(f"⚠️ {exc}", is_error=True)
     as_of = date.fromisoformat(as_of_str) if as_of_str else None
     items = watchlist or []
     structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
     result = compute_watchlist_correlation(
-        items, structures, lookback_days, container.data_loader, as_of, container.excel_store
+        items, structures, rolling_days, lookback_days, container.data_loader, as_of, container.excel_store
     )
 
     skipped = f" Skipped: {', '.join(result.skipped)}." if result.skipped else ""
@@ -346,10 +366,10 @@ def compute_heatmap(n_clicks, watchlist, lookback, as_of_str):
 
     now = datetime.now(timezone.utc).strftime("%H:%M:%S")
     as_of_desc = f" (as of {as_of})" if as_of else ""
-    text = f"Last computed {now} UTC{as_of_desc} · {result.observations} days."
+    text = f"Last computed {now} UTC{as_of_desc} · {rolling_days}d rolling, average of the last {result.observations} days."
     if result.observations < lookback_days:
-        text += f" Only {result.observations} common days available (requested {lookback_days}d)."
-    return build_heatmap_figure(result.matrix, lookback_days), _status(text + skipped)
+        text += f" Only {result.observations} days of history available (requested {lookback_days}d)."
+    return build_heatmap_figure(result.matrix, rolling_days, lookback_days), _status(text + skipped)
 
 
 # ----------------------------------------------------------------------
@@ -393,7 +413,7 @@ def compute_time_series(n_clicks, watchlist, base, target, windows_checked, cust
     if not base or not target:
         return _no_pair_selected()
 
-    windows = _parse_windows(windows_checked, custom_windows, DEFAULT_TS_WINDOWS)
+    windows = _parse_windows(windows_checked, custom_windows, default_ts_windows())
     series, skipped = _series_for_pair(watchlist, base, target)
     if base not in series or target not in series:
         reason = "; ".join(f"{label}: {msg}" for label, msg in skipped.items()) or "no local data"
@@ -415,7 +435,12 @@ def compute_time_series(n_clicks, watchlist, base, target, windows_checked, cust
         series_by_window, base, target, highlight_flips="flip" in options, show_avg="avg" in options
     )
     now = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    text = f"Last computed {now} UTC · windows: {', '.join(f'{w}d' for w in series_by_window)}."
+    lookback = default_lookback()
+    averages = ", ".join(f"{w}d: {s.iloc[-lookback:].mean():+.2f}" for w, s in series_by_window.items())
+    text = (
+        f"Last computed {now} UTC · rolling windows: {', '.join(f'{w}d' for w in series_by_window)} · "
+        f"average of the last {lookback} days ({averages})."
+    )
     if errors:
         text += " Skipped: " + "; ".join(errors)
     return figure, _status(text)
@@ -445,26 +470,31 @@ def compute_year_overlay(n_clicks, watchlist, base, target, window, options):
     return figure, _status(f"{len(years)} year(s) of data: {', '.join(str(y) for y in years)}.")
 
 
-def compute_summary(n_clicks, watchlist, window):
-    """Mean/std/min/max/last rolling correlation across every valid watchlist pair."""
+def compute_summary(n_clicks, watchlist, rolling, lookback):
+    """Lookback-average (and std/min/max/last) of the daily rolling correlation for every valid watchlist pair."""
     if not n_clicks:
         raise PreventUpdate
     items = watchlist or []
     if len(items) < 2:
         return html.Div(), _status(MIN_ITEMS_TEXT, is_error=True)
 
-    window = int(window or default_rolling_window())
+    try:
+        rolling_days, lookback_days = _read_windows(rolling, lookback)
+    except ValueError as exc:
+        return html.Div(), _status(f"⚠️ {exc}", is_error=True)
     structures = _open_structures() if any(i["type"] == "structure" for i in items) else {}
     series, skipped = build_watchlist_series(items, structures, container.data_loader, container.excel_store)
     if len(series) < 2:
         return html.Div(), _status("Need at least 2 valid series", is_error=True)
 
-    rows = watchlist_pair_summary(series, window)
+    rows = watchlist_pair_summary(series, rolling_days, lookback_days)
     if not rows:
-        return html.Div(), _status("No pair had enough shared history for this window.", is_error=True)
+        return html.Div(), _status("No pair had enough shared history for this rolling window.", is_error=True)
 
     skip_text = f" Skipped: {', '.join(skipped)}." if skipped else ""
-    return build_summary_table(rows), _status(f"{len(rows)} pair(s) at {window}d.{skip_text}")
+    return build_summary_table(rows), _status(
+        f"{len(rows)} pair(s): {rolling_days}d rolling, average of the last {lookback_days} days.{skip_text}"
+    )
 
 
 # ----------------------------------------------------------------------
@@ -576,6 +606,7 @@ def register_correlation_callbacks(app) -> None:
         Output("corr-status", "children"),
         Input("corr-compute-btn", "n_clicks"),
         State("corr-watchlist", "data"),
+        State("corr-rolling", "value"),
         State("corr-lookback", "value"),
         State("corr-asof-date", "date"),
         prevent_initial_call=True,
@@ -638,5 +669,6 @@ def register_correlation_callbacks(app) -> None:
         Input("corr-sum-compute-btn", "n_clicks"),
         State("corr-watchlist", "data"),
         State("corr-sum-window", "value"),
+        State("corr-sum-lookback", "value"),
         prevent_initial_call=True,
     )(compute_summary)

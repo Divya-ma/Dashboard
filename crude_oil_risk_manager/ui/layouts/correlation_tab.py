@@ -17,36 +17,32 @@ import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 
 from config.settings import settings
-from core.user_settings import KEY_CORRELATION_WINDOW, KEY_ROLLING_CORRELATION_WINDOW
+from core.user_settings import correlation_windows
 from ui.container import container
 from ui.layouts.shell import COLORS
 
-LOOKBACK_OPTIONS = [{"label": f"{days}d", "value": str(days)} for days in (10, 20, 30, 60, 90)]
 PLACEHOLDER_TEXT = "Add instruments or structures and click Compute"
 MIN_ITEMS_TEXT = "Add at least 2 items to compute"
 
-TS_WINDOW_PRESETS = [10, 20, 30, 60, 90]
-DEFAULT_TS_WINDOWS = [20, 60]
-
-
-def default_correlation_window() -> int:
-    """Point-in-time correlation window (Heatmap lookback), from Settings > Analysis Defaults."""
-    if container.repository is None:
-        return settings.DEFAULT_CORRELATION_WINDOW
-    return int(container.repository.get_setting(KEY_CORRELATION_WINDOW, settings.DEFAULT_CORRELATION_WINDOW))
+TS_WINDOW_PRESETS = [5, 10, 20, 30, 60]
 
 
 def default_rolling_window() -> int:
-    """Rolling correlation window (Time Series / Year Overlay / Summary Table), from Settings.
-
-    A different calculation from default_correlation_window (core.correlation.
-    calculate_rolling_correlation vs calculate_correlation), so it has its own setting.
-    """
+    """Rolling window in days (the day's correlation value), from Settings > Analysis Defaults."""
     if container.repository is None:
-        return settings.DEFAULT_ROLLING_CORRELATION_WINDOW
-    return int(
-        container.repository.get_setting(KEY_ROLLING_CORRELATION_WINDOW, settings.DEFAULT_ROLLING_CORRELATION_WINDOW)
-    )
+        return settings.DEFAULT_CORRELATION_ROLLING_WINDOW
+    return correlation_windows(container.repository)[0]
+
+
+def default_lookback() -> int:
+    """Lookback period in days (how many daily values are averaged), from Settings > Analysis Defaults."""
+    if container.repository is None:
+        return settings.DEFAULT_CORRELATION_LOOKBACK
+    return correlation_windows(container.repository)[1]
+
+
+def default_ts_windows() -> list[int]:
+    return [default_rolling_window()]
 
 MONTH_TICKVALS = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
 MONTH_TICKTEXT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -57,7 +53,7 @@ _LABEL = {**_MUTED, "textTransform": "uppercase", "letterSpacing": "0.05em", "ma
 _SUMMARY_COLUMNS = [
     {"id": "base", "name": "Base"},
     {"id": "target", "name": "Target"},
-    {"id": "mean", "name": "Mean", "type": "numeric"},
+    {"id": "avg", "name": "Lookback avg", "type": "numeric"},
     {"id": "std", "name": "Std", "type": "numeric"},
     {"id": "min", "name": "Min", "type": "numeric"},
     {"id": "max", "name": "Max", "type": "numeric"},
@@ -96,7 +92,7 @@ def empty_figure(message: str, is_error: bool = False) -> go.Figure:
     return figure
 
 
-def build_heatmap_figure(matrix, lookback_days: int) -> go.Figure:
+def build_heatmap_figure(matrix, rolling: int, lookback_days: int) -> go.Figure:
     """Correlation heatmap: red (-1) -> white (0) -> green (+1), value printed in each cell."""
     labels = list(matrix.index)
     values = matrix.to_numpy(dtype=float)
@@ -121,7 +117,7 @@ def build_heatmap_figure(matrix, lookback_days: int) -> go.Figure:
     )
     figure.update_layout(
         **_base_layout(
-            title={"text": f"Correlation Matrix — {lookback_days}d", "font": {"size": 18}},
+            title={"text": f"Correlation Matrix — {rolling}d rolling, {lookback_days}d lookback average", "font": {"size": 18}},
             xaxis={"tickangle": -35, "automargin": True},
             yaxis={"autorange": "reversed", "automargin": True},
         )
@@ -211,11 +207,11 @@ def build_year_overlay_figure(
 
 
 def build_summary_table(rows: list[dict]) -> dash_table.DataTable:
-    """Mean/std/min/max/last rolling correlation and beta for every watchlist pair at one window."""
+    """Lookback-average, std/min/max/last of the daily rolling correlation, and beta, for every watchlist pair."""
     data = [
         {
             **row,
-            **{k: round(row[k], 3) for k in ("mean", "std", "min", "max", "last")},
+            **{k: round(row[k], 3) for k in ("avg", "std", "min", "max", "last")},
             "beta": round(row["beta"], 3) if row.get("beta") is not None else "—",
             "r_squared": round(row["r_squared"], 3) if row.get("r_squared") is not None else "—",
         }
@@ -238,8 +234,8 @@ def build_summary_table(rows: list[dict]) -> dash_table.DataTable:
         },
         style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("base", "target")],
         style_data_conditional=[
-            {"if": {"column_id": "mean", "filter_query": "{mean} >= 0.7"}, "color": COLORS["ACCENT_GREEN"], "fontWeight": "bold"},
-            {"if": {"column_id": "mean", "filter_query": "{mean} <= -0.7"}, "color": COLORS["ACCENT_RED"], "fontWeight": "bold"},
+            {"if": {"column_id": "avg", "filter_query": "{avg} >= 0.7"}, "color": COLORS["ACCENT_GREEN"], "fontWeight": "bold"},
+            {"if": {"column_id": "avg", "filter_query": "{avg} <= -0.7"}, "color": COLORS["ACCENT_RED"], "fontWeight": "bold"},
         ],
     )
 
@@ -420,22 +416,26 @@ def _base_target_row(base_id: str, target_id: str) -> dbc.Row:
     )
 
 
+def _window_inputs(rolling_id: str, lookback_id: str) -> list:
+    """Rolling-window and lookback-period inputs (days), defaulting to the Settings values."""
+    return [
+        dbc.Col([html.Div("Rolling window (days)", style=_LABEL), dbc.Input(id=rolling_id, type="number", min=2, max=5000, step=1, value=default_rolling_window())], md=3),
+        dbc.Col([html.Div("Lookback period (days)", style=_LABEL), dbc.Input(id=lookback_id, type="number", min=1, max=5000, step=1, value=default_lookback())], md=3),
+    ]
+
+
 def _heatmap_tab() -> html.Div:
-    default_lookback = default_correlation_window()
-    options = LOOKBACK_OPTIONS
-    if not any(int(opt["value"]) == default_lookback for opt in options):
-        options = sorted([*options, {"label": f"{default_lookback}d", "value": str(default_lookback)}], key=lambda o: int(o["value"]))
     controls = dbc.Row(
         [
-            dbc.Col([html.Div("Lookback period", style=_LABEL), dbc.Select(id="corr-lookback", options=options, value=str(default_lookback))], md=4),
+            *_window_inputs("corr-rolling", "corr-lookback"),
             dbc.Col(
                 [
                     html.Div("As-of date (optional)", style=_LABEL),
                     dcc.DatePickerSingle(id="corr-asof-date", placeholder="Latest available", clearable=True),
                 ],
-                md=4,
+                md=3,
             ),
-            dbc.Col(_compute_button("corr-compute-btn"), md=4, className="d-flex align-items-end"),
+            dbc.Col(_compute_button("corr-compute-btn"), md=3, className="d-flex align-items-end"),
         ],
         className="mb-2",
     )
@@ -449,9 +449,10 @@ def _heatmap_tab() -> html.Div:
 
 
 def _time_series_tab() -> html.Div:
+    presets = sorted({*TS_WINDOW_PRESETS, *default_ts_windows()})
     window_checks = dbc.Checklist(
-        id="corr-ts-windows", options=[{"label": f"{w}d", "value": w} for w in TS_WINDOW_PRESETS],
-        value=DEFAULT_TS_WINDOWS, inline=True, className="mb-1",
+        id="corr-ts-windows", options=[{"label": f"{w}d", "value": w} for w in presets],
+        value=default_ts_windows(), inline=True, className="mb-1",
     )
     controls = [
         _base_target_row("corr-ts-base", "corr-ts-target"),
@@ -503,7 +504,7 @@ def _year_overlay_tab() -> html.Div:
 def _summary_tab() -> html.Div:
     controls = dbc.Row(
         [
-            dbc.Col([html.Div("Window (days)", style=_LABEL), dbc.Input(id="corr-sum-window", type="number", min=2, step=1, value=default_rolling_window())], md=4),
+            *_window_inputs("corr-sum-window", "corr-sum-lookback"),
             dbc.Col(_compute_button("corr-sum-compute-btn"), md=4, className="d-flex align-items-end"),
         ],
         className="mb-2",
