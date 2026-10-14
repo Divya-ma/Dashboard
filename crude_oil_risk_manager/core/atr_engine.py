@@ -78,6 +78,66 @@ def save_params(repository, params: AtrParams) -> None:
         repository.set_setting(KEY_ATR_PARAMS, asdict(params))
 
 
+MIN_PAIR_DAYS = 20  # fewer shared days than this and the hedge ratio is not trustworthy
+
+
+@dataclass
+class PairHedge:
+    """How to hedge a position in contract A with contract B (see pair_hedge)."""
+
+    a: str
+    b: str
+    days: int  # shared trading days (daily changes) used for the full-history figures
+    window_days: int  # shared days actually inside the lookback window
+    atr_a: float
+    atr_b: float
+    atr_date_a: date
+    atr_date_b: date
+    atr_ratio: float  # lots of B per lot of A that give both the same ATR (points)
+    beta_window: float  # minimum-variance lots of B per lot of A, lookback window
+    corr_window: float
+    beta_all: float  # same over every shared day
+    corr_all: float
+    residual_window: float  # daily SD (points of A) left after hedging, window
+    unhedged_window: float  # daily SD (points of A) of A alone, window
+    first_day: date | None
+    last_day: date | None
+
+
+def _beta_corr(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Minimum-variance hedge (y on x: units of x per unit of y) and the correlation of the changes."""
+    if len(x) < 3 or np.var(x, ddof=1) <= 0:
+        return np.nan, np.nan
+    beta = float(np.cov(y, x, ddof=1)[0, 1] / np.var(x, ddof=1))
+    corr = float(np.corrcoef(y, x)[0, 1]) if np.var(y, ddof=1) > 0 else np.nan
+    return beta, corr
+
+
+def pair_hedge(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, window: int) -> PairHedge | None:
+    """Hedge a position in A with B. Frames are indexed by date with columns close and atr (core.atr_calc.atr_frame).
+
+    Daily changes are the changes of the close between the days BOTH traded (a day either skipped is left out for
+    both, so the two changes always cover the same span). The minimum-variance hedge is the beta of A's changes on
+    B's: hold -beta lots of B per lot of A (long A, short beta of B). Its effectiveness is the correlation squared.
+    The ATR ratio is the cruder alternative that only matches the size of the daily moves, not their direction."""
+    both = pd.concat([a["close"].rename("a"), b["close"].rename("b")], axis=1, join="inner").dropna()
+    atr_a, atr_b = a["atr"].dropna(), b["atr"].dropna()
+    if len(both) < 3 or atr_a.empty or atr_b.empty:
+        return None
+    change = both.diff().dropna()
+    tail = change.iloc[-max(int(window), 2):]
+    beta_w, corr_w = _beta_corr(tail["b"].to_numpy(), tail["a"].to_numpy())
+    beta_all, corr_all = _beta_corr(change["b"].to_numpy(), change["a"].to_numpy())
+    unhedged = float(tail["a"].std(ddof=1)) if len(tail) > 1 else np.nan
+    residual = float((tail["a"] - beta_w * tail["b"]).std(ddof=1)) if len(tail) > 1 and np.isfinite(beta_w) else np.nan
+    last_a, last_b = float(atr_a.iloc[-1]), float(atr_b.iloc[-1])
+    return PairHedge(
+        a_name, b_name, int(len(change)), int(len(tail)), last_a, last_b, atr_a.index[-1].date(), atr_b.index[-1].date(),
+        last_a / last_b if last_b > 0 else np.nan, beta_w, corr_w, beta_all, corr_all, residual, unhedged,
+        change.index[0].date(), change.index[-1].date(),
+    )
+
+
 class AtrEngine:
     """The ATR views of one product, built from its stored OHLC frame. Construct once per data version and parameters."""
 
@@ -103,6 +163,15 @@ class AtrEngine:
             actual = last.get(front)
             self.expiry[symbol] = actual.date() if finished and actual is not None else instrument.expiry
         self._dense_cache: dict[tuple, pd.DataFrame] = {}
+
+    def pair_frame(self, symbol: str) -> pd.DataFrame | None:
+        """Close and ATR per active day of one instrument (None when it has too little history)."""
+        frame = None if self._empty else self.atr.get(symbol)
+        return None if frame is None else frame[["close", "atr"]]
+
+    def all_live_symbols(self) -> list[tuple[str, str, str]]:
+        """(family, symbol, label) of every live instrument of the page's 'contracts to watch', by family then expiry."""
+        return [(f, s, self.universe[s].label) for f in ("outright", "spread", "fly") if not self._empty for s in self.live_symbols(f)]
 
     # -- finished and live instruments ------------------------------------
 

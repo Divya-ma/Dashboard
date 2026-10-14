@@ -6,9 +6,10 @@ from dataclasses import asdict
 
 from dash import Input, Output, State, html, no_update
 
-from core.atr_engine import validate_params
+from core.atr_engine import pair_hedge, validate_params
+from core.curve_calendar import PRODUCTS
 from ui.container import container
-from ui.layouts.atr_view import PARAM_INPUTS, atr_body, build_atr_chart
+from ui.layouts.atr_view import PARAM_INPUTS, atr_body, build_atr_chart, hedge_calculator_result
 from ui.layouts.shell import COLORS
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,57 @@ def render_atr_chart(symbol, params_dict, unit):
         return build_atr_chart(None)
 
 
+def hedge_options(version, active_tab, params_dict, current_a, current_b):
+    """The live instruments of every product for both pickers (a pick is kept while it is still listed)."""
+    service = container.oi_service
+    if active_tab != "atr" or service is None or service.atr_store is None or version is None or not params_dict:
+        return no_update, no_update, no_update, no_update
+    try:
+        params = validate_params(params_dict)
+        options = []
+        for product in PRODUCTS:
+            engine = service.atr_engine(product, params)
+            options += [{"label": f"{product} {family}: {label}", "value": symbol} for family, symbol, label in engine.all_live_symbols()]
+    except Exception:  # noqa: BLE001
+        logger.exception("Hedge calculator options failed")
+        return no_update, no_update, no_update, no_update
+    values = [o["value"] for o in options]
+    a = current_a if current_a in values else (values[0] if values else None)
+    b = current_b if current_b in values and current_b != a else next((v for v in values if v != a), None)
+    return options, options, a, b
+
+
+def render_hedge(a, b, lots, window, params_dict):
+    """The hedge of contract A by contract B (either may be CL or BRN, of any family)."""
+    service = container.oi_service
+    muted = {"color": COLORS["TEXT_SECONDARY"]}
+    if service is None or service.atr_store is None or not a or not b or not params_dict:
+        return html.Div("Pick two contracts.", style=muted)
+    if a == b:
+        return html.Div("Pick two different contracts.", style=muted)
+    try:
+        lots = float(lots) if lots not in (None, "") else 1.0
+        window = int(window) if window not in (None, "") else 60
+        if lots <= 0 or not 2 <= window <= 5000:
+            raise ValueError
+    except (TypeError, ValueError):
+        return html.Div("⚠️ Lots must be above 0 and the lookback between 2 and 5,000 days.", style=_ERROR)
+    try:
+        params = validate_params(params_dict)
+        frames, names = {}, {}
+        for symbol in (a, b):
+            product = product_of(symbol)
+            engine = service.atr_engine(product, params)
+            frames[symbol] = engine.pair_frame(symbol)
+            names[symbol] = f"{product} {engine.universe[symbol].label}" if symbol in getattr(engine, "universe", {}) else symbol
+        if frames[a] is None or frames[b] is None:
+            return html.Div("One of the contracts has too little history for an ATR yet.", style=muted)
+        return hedge_calculator_result(pair_hedge(frames[a], frames[b], names[a], names[b], window), lots, window)
+    except Exception:  # noqa: BLE001
+        logger.exception("Hedge calculator failed")
+        return html.Div("Could not work out the hedge; see the log.", style=_ERROR)
+
+
 def register_atr_callbacks(app) -> None:
     app.callback(
         Output("atr-wrap", "children"),
@@ -90,3 +142,24 @@ def register_atr_callbacks(app) -> None:
         Input("atr-params", "data"),
         Input("atr-unit", "value"),
     )(render_atr_chart)
+
+    app.callback(
+        Output("atr-hedge-a", "options"),
+        Output("atr-hedge-b", "options"),
+        Output("atr-hedge-a", "value"),
+        Output("atr-hedge-b", "value"),
+        Input("oi-version", "data"),
+        Input("oi-tabs", "active_tab"),
+        Input("atr-params", "data"),
+        State("atr-hedge-a", "value"),
+        State("atr-hedge-b", "value"),
+    )(hedge_options)
+
+    app.callback(
+        Output("atr-hedge-result", "children"),
+        Input("atr-hedge-a", "value"),
+        Input("atr-hedge-b", "value"),
+        Input("atr-hedge-lots", "value"),
+        Input("atr-hedge-window", "value"),
+        Input("atr-params", "data"),
+    )(render_hedge)

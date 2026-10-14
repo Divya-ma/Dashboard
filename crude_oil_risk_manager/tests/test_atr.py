@@ -432,3 +432,49 @@ def test_the_layout_has_the_atr_controls_and_the_callbacks_are_wired(service, mo
     assert "atr-wrap" in wired and "atr-chart" in wired
     main = next(v for k, v in app.callback_map.items() if "atr-wrap" in k)
     assert {"oi-product", "oi-tabs", "atr-family", "atr-month"} <= {i["id"] for i in main["inputs"]}
+
+
+# ----------------------------------------------------------------------
+# Hedge calculator (any two contracts)
+# ----------------------------------------------------------------------
+
+
+def _pair_frames(beta=1.5, noise=0.0, n=80):
+    rng = np.random.default_rng(1)
+    idx = pd.bdate_range("2026-01-01", periods=n)
+    b = pd.Series(70 + rng.normal(0, 1, n).cumsum(), index=idx)
+    a = beta * b + rng.normal(0, noise, n).cumsum() if noise else beta * b
+    make = lambda s: pd.DataFrame({"close": s, "atr": s.diff().abs().rolling(14).mean()})
+    return make(a), make(b)
+
+
+def test_pair_hedge_recovers_the_beta():
+    from core.atr_engine import pair_hedge
+    a, b = _pair_frames(beta=1.5)
+    result = pair_hedge(a, b, "A", "B", 60)
+    assert result.beta_window == pytest.approx(1.5) and result.corr_window == pytest.approx(1.0)
+    assert result.residual_window == pytest.approx(0.0, abs=1e-9)
+    assert result.atr_ratio == pytest.approx(1.5)
+
+
+def test_pair_hedge_skips_days_either_did_not_trade():
+    from core.atr_engine import pair_hedge
+    a, b = _pair_frames(beta=2.0)
+    result = pair_hedge(a.drop(a.index[10:20]), b, "A", "B", 60)
+    assert result.beta_window == pytest.approx(2.0)  # the gap days drop out of both
+
+
+def test_pair_hedge_none_without_overlap():
+    from core.atr_engine import pair_hedge
+    a, b = _pair_frames()
+    assert pair_hedge(a.iloc[:30], b.iloc[40:], "A", "B", 60) is None
+
+
+def test_hedge_result_renders():
+    from core.atr_engine import pair_hedge
+    from ui.layouts.atr_view import hedge_calculator, hedge_calculator_result
+    a, b = _pair_frames(beta=1.5, noise=0.3)
+    assert hedge_calculator() is not None
+    text = str(hedge_calculator_result(pair_hedge(a, b, "A", "B", 60), 10, 60))
+    assert "lot(s) of B" in text and "opposite side" in text
+    assert "no overlapping" in str(hedge_calculator_result(None, 1, 60))

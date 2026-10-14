@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 from dash import dcc, html
 from dash.dash_table.Format import Format, Group, Scheme
 
-from core.atr_engine import DTE_MARKS, FRONT_DAYS, AtrEngine, AtrParams
+from core.atr_engine import DTE_MARKS, FRONT_DAYS, MIN_PAIR_DAYS, AtrEngine, AtrParams
 from ui.container import container
 from ui.layouts.curve_tab import _CARD, _LABEL, _MUTED, _layout, _table, empty_figure
 from ui.layouts.shell import COLORS
@@ -246,6 +246,77 @@ def build_atr_chart(data: dict | None) -> go.Figure:
     return figure
 
 
+def _stat(title: str, value: str, note: str = "", color: str | None = None) -> dbc.Col:
+    return dbc.Col(html.Div([
+        html.Div(title, style=_LABEL),
+        html.Div(value, style={"color": color or COLORS["TEXT_PRIMARY"], "fontSize": "22px", "fontWeight": "bold"}),
+        html.Div(note, style={**_MUTED, "marginTop": "2px"}),
+    ], style={**_CARD, "padding": "12px 14px", "borderRadius": "6px", "height": "100%"}), md=3, className="mb-2")
+
+
+def _side(beta: float) -> str:
+    return "the opposite side" if beta > 0 else "the same side"
+
+
+def hedge_calculator_result(result, lots: float, window: int) -> html.Div:
+    """The answer for one pair: how many lots of B hedge `lots` of A (result is core.atr_engine.PairHedge or None)."""
+    if result is None:
+        return html.Div("These two contracts have no overlapping trading days with enough history yet.", style=_MUTED)
+    a, b = result.a, result.b
+    pieces = []
+    if result.window_days < MIN_PAIR_DAYS:
+        pieces.append(dbc.Alert(f"Only {result.window_days} shared trading days in the window: treat the ratios as unreliable.", color="warning", className="py-2"))
+    cards = []
+    if np.isfinite(result.beta_window):
+        need = abs(result.beta_window) * lots
+        sentence = (
+            f"To hedge {lots:g} lot(s) of {a}, trade about {need:.2f} lot(s) of {b} on {_side(result.beta_window)} "
+            f"({abs(result.beta_window):.2f} lot of {b} per lot of {a}), the minimum-variance hedge over the last {result.window_days} shared days."
+        )
+        removed = (1 - result.residual_window / result.unhedged_window) * 100 if result.unhedged_window and np.isfinite(result.residual_window) else np.nan
+        corr_ok = np.isfinite(result.corr_window)
+        cards = [
+            _stat("Hedge ratio (recommended)", f"{abs(result.beta_window):.2f}", f"lots of {b} per lot of {a}, on {_side(result.beta_window)}", COLORS["ACCENT_GREEN"]),
+            _stat("Correlation of daily changes", f"{result.corr_window:.2f}" if corr_ok else "n/a", f"the hedge removes about {result.corr_window ** 2 * 100:.0f}% of the variance" if corr_ok else ""),
+            _stat("Daily risk: unhedged, then hedged", f"{result.unhedged_window:.3f} → {result.residual_window:.3f}", f"points of {a}, 1 standard deviation" + (f" (down {removed:.0f}%)" if np.isfinite(removed) else "")),
+            _stat(f"Same over all {result.days} shared days", f"{abs(result.beta_all):.2f}" if np.isfinite(result.beta_all) else "n/a", f"correlation {result.corr_all:.2f}" if np.isfinite(result.corr_all) else ""),
+        ]
+    else:
+        sentence = f"{b} did not move on the shared days, so there is no hedge ratio."
+    pieces.append(html.Div(sentence, style={"color": COLORS["TEXT_PRIMARY"], "fontSize": "15px", "margin": "4px 0 10px"}))
+    if cards:
+        pieces.append(dbc.Row(cards, className="g-2"))
+    ratio = result.atr_ratio
+    pieces.append(html.Div(
+        (f"ATR basis (matches the size of the daily moves only, not their direction): ATR of {a} {result.atr_a:.3f} (as of {result.atr_date_a}) ÷ ATR of {b} {result.atr_b:.3f} "
+         f"(as of {result.atr_date_b}) = {ratio:.2f}, so {ratio * lots:.2f} lot(s) of {b} per {lots:g} of {a}.") if np.isfinite(ratio) else "ATR basis not available.",
+        style={**_MUTED, "marginTop": "6px"},
+    ))
+    pieces.append(html.Div(
+        f"Window: the last {window} shared trading days (data {result.first_day} to {result.last_day}). Changes are close to close on days both contracts traded. "
+        "Lots are exchange lots (one lot of a spread or fly is one lot of each leg); CL and BRN are both 1,000 barrels, so a lot of either is the same size. "
+        "A hedge with a different contract is never perfect: the hedged daily risk above is what is left.",
+        style={**_MUTED, "marginTop": "4px"},
+    ))
+    return html.Div(pieces)
+
+
+def hedge_calculator() -> html.Div:
+    """Pick any two contracts (outright, spread or fly, CL or BRN) and get the hedge ratio of one against the other."""
+    return html.Div([
+        html.H6("Hedge calculator: any two contracts", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "26px", "marginBottom": "2px"}),
+        html.Div("Pick the contract you hold and the contract you would hedge it with. Live contracts within 'Contracts to watch' are listed, CL and BRN.", style={**_MUTED, "marginBottom": "8px"}),
+        dbc.Row([
+            dbc.Col([html.Div("Position held (A)", style=_LABEL), dcc.Dropdown(id="atr-hedge-a", options=[], clearable=False)], md=3, className="mb-2"),
+            dbc.Col([html.Div("Hedge with (B)", style=_LABEL), dcc.Dropdown(id="atr-hedge-b", options=[], clearable=False)], md=3, className="mb-2"),
+            dbc.Col([html.Div("Lots of A", style=_LABEL), dbc.Input(id="atr-hedge-lots", type="number", value=1, min=0, step=1, debounce=True, size="sm")], md=2, className="mb-2"),
+            dbc.Col([html.Div("Lookback (shared days)", style=_LABEL, title="The hedge ratio is measured on the last N trading days both contracts traded"),
+                     dbc.Input(id="atr-hedge-window", type="number", value=60, min=2, max=5000, step=5, debounce=True, size="sm")], md=2, className="mb-2"),
+        ], className="g-2"),
+        dcc.Loading(html.Div(id="atr-hedge-result"), type="dot"),
+    ])
+
+
 def atr_tab_content() -> html.Div:
     """The whole ATR tab (the tables are filled by a callback when the tab is open)."""
     service = container.oi_service
@@ -257,4 +328,5 @@ def atr_tab_content() -> html.Div:
         html.H6("One contract against its usual path", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "22px"}),
         dbc.Row([dbc.Col([html.Div("Contract", style=_LABEL), dcc.Dropdown(id="atr-contract", options=[], clearable=False)], md=3)], className="mb-2"),
         dcc.Graph(id="atr-chart", figure=empty_figure("Pick a contract"), config={"displayModeBar": False}, style={"height": "460px"}),
+        hedge_calculator(),
     ], style={"paddingTop": "14px"})
