@@ -196,18 +196,19 @@ def build_correlation_matrix(
     return pd.DataFrame(values, index=symbols, columns=symbols)
 
 
-def classify_correlation(correlation: float | None) -> str:
+def classify_correlation(correlation: float | None, threshold: float | None = None) -> str:
     """Classify a correlation coefficient.
 
-    >= 0.7 -> "highly_correlated"; <= -0.7 -> "negatively_correlated";
-    otherwise "uncorrelated"; NaN/None -> "insufficient_data".
-    Used by the structure builder for exposure-duplication warnings.
+    >= threshold -> "highly_correlated"; <= -threshold -> "negatively_correlated";
+    otherwise "uncorrelated"; NaN/None -> "insufficient_data". The threshold defaults to 0.7; the
+    Structure Builder passes its own (core.structure_builder.CORRELATION_FLAG_THRESHOLD).
     """
+    limit = _HIGH_THRESHOLD if threshold is None else threshold
     if correlation is None or np.isnan(correlation):
         return "insufficient_data"
-    if correlation >= _HIGH_THRESHOLD:
+    if correlation >= limit:
         return "highly_correlated"
-    if correlation <= -_HIGH_THRESHOLD:
+    if correlation <= -limit:
         return "negatively_correlated"
     return "uncorrelated"
 
@@ -249,61 +250,108 @@ def outright_weights(legs: list[dict]) -> dict[str, float]:
     return weights
 
 
-def structure_return_series(weights: dict[str, float], data_loader: DataLoader) -> pd.Series | None:
-    """A structure's own derived price-difference series: sum(weight_i * diff_i) over its
-    outright legs (see outright_weights), inner-joined on the dates where ALL of ITS OWN
-    legs have data.
+@dataclass
+class StructureSeries:
+    """A structure's derived price-difference series, or why there is none."""
 
-    None if no leg has usable local data, or fewer than _MIN_CORRELATION_OBSERVATIONS common
-    dates remain across just its own legs. A leg with no usable data (never backfilled here
-    — see DataLoader.ensure_cached) or whose read fails unexpectedly (an adapter/network
-    fluke) is silently dropped rather than failing the whole series.
-    """
-    terms = []
-    for symbol, weight in weights.items():
+    series: pd.Series | None
+    missing: list[str] = field(default_factory=list)  # legs with no usable price history
+    proxied: list[str] = field(default_factory=list)  # legs priced from a proxy (see core.settlement_prices)
+
+
+def _leg_closes(symbol: str, data_loader: DataLoader, settlements) -> tuple[pd.Series | None, bool]:
+    """Daily closes of one outright: its settlements when a settlement source is given and has them, else the DataLoader's."""
+    if settlements is not None:
         try:
-            terms.append(data_loader.load_price_differences(symbol, min_rows=_MIN_CORRELATION_OBSERVATIONS) * weight)
-        except CrudeOilRiskError as exc:
-            logger.info("Correlation: no usable price history for %s: %s", symbol, exc)
-        except Exception as exc:  # noqa: BLE001 - one bad leg must not fail the whole derived series
-            logger.warning("Correlation: unexpected error loading price history for %s: %s", symbol, exc)
-    if not terms:
-        return None
+            series, proxied = settlements.closes(symbol)
+        except Exception as exc:  # noqa: BLE001 - fall back to the loader rather than fail the series
+            logger.warning("Correlation: settlement lookup failed for %s: %s", symbol, exc)
+            series, proxied = None, False
+        if series is not None and not series.empty:
+            return series, proxied
+    try:
+        return data_loader.load_close_series(symbol, min_rows=_MIN_CORRELATION_OBSERVATIONS + 1), False
+    except CrudeOilRiskError as exc:
+        logger.info("Correlation: no usable price history for %s: %s", symbol, exc)
+    except Exception as exc:  # noqa: BLE001 - one bad leg must not fail the whole derived series
+        logger.warning("Correlation: unexpected error loading price history for %s: %s", symbol, exc)
+    return None, False
 
-    combined = pd.concat(terms, axis=1, join="inner").dropna().sum(axis=1).sort_index()
-    if len(combined) < _MIN_CORRELATION_OBSERVATIONS:
-        return None
-    return combined
+
+def structure_series(weights: dict[str, float], data_loader: DataLoader, settlements=None) -> StructureSeries:
+    """A structure's own price-difference series from its outright legs (see outright_weights).
+
+    The structure's PRICE is built first, S_t = sum(weight_i * P_i,t) on the dates where ALL of ITS OWN legs have a
+    close, and the daily difference S_t - S_(t-1) is taken afterwards, over those same dates. (Differencing each leg
+    first and adding the differences would mix a one-day change of one leg with a two-day change of another wherever
+    a leg has a missing day.) Every leg is required: dropping one would silently turn the structure into a different
+    one, so a leg without history makes the whole series None and is named in `missing`. Fewer than
+    _MIN_CORRELATION_OBSERVATIONS differences also gives None.
+
+    `settlements` (core.settlement_prices.SettlementPrices) supplies gap-free settlement closes for CL and BRN
+    outrights (BZ from the ICE Brent contract of the same month); anything it does not have is read from `data_loader`.
+    """
+    levels, missing, proxied = {}, [], []
+    for symbol, weight in weights.items():
+        closes, via_proxy = _leg_closes(symbol, data_loader, settlements)
+        if closes is None or closes.empty:
+            missing.append(symbol)
+            continue
+        levels[symbol] = closes * weight
+        if via_proxy:
+            proxied.append(symbol)
+    if missing or not levels:
+        return StructureSeries(None, missing, proxied)
+    price = pd.concat(levels.values(), axis=1, join="inner").dropna().sum(axis=1).sort_index()
+    diffs = price.diff().dropna()
+    if len(diffs) < _MIN_CORRELATION_OBSERVATIONS:
+        return StructureSeries(None, [], proxied)
+    return StructureSeries(diffs, [], proxied)
+
+
+def structure_return_series(weights: dict[str, float], data_loader: DataLoader, settlements=None) -> pd.Series | None:
+    """The price-difference series of `structure_series`, or None (see there)."""
+    return structure_series(weights, data_loader, settlements).series
 
 
 def correlate_structures(
-    weights_a: dict[str, float], weights_b: dict[str, float], rolling: int, lookback: int, data_loader: DataLoader
+    weights_a: dict[str, float], weights_b: dict[str, float], rolling: int, lookback: int, data_loader: DataLoader,
+    settlements=None, threshold: float | None = None,
 ) -> dict:
     """Best-effort correlation between two structures via their own derived difference series
-    (see structure_return_series), measured as in the module docstring. Never raises.
+    (see structure_series), measured as in the module docstring. Never raises.
 
     Returns {"correlation": float | None, "classification": str, "window_used": int,
-    "rolling": int, "error": str | None}. `window_used` is how many days of the lookback were
-    averaged. Falls back to the days available instead of requiring the full lookback up front
-    (align_series' own floor of 20 common dates still applies); "error" then carries a caveat,
-    not a failure.
+    "rolling": int, "error": str | None, "note": str | None}. `window_used` is how many days of the lookback
+    were averaged. Falls back to the days available instead of requiring the full lookback up front
+    (align_series' own floor of 20 common dates still applies); "error" then carries a caveat, not a failure.
+    `note` says when a leg was priced from a proxy. `threshold` is passed to classify_correlation.
     """
-    entry = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "rolling": rolling, "error": None}
-    series_a = structure_return_series(weights_a, data_loader)
-    series_b = structure_return_series(weights_b, data_loader)
-    if series_a is None or series_b is None:
-        entry["error"] = "Not enough local price history for one of the structures' underlying contracts."
+    entry = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "rolling": rolling, "error": None, "note": None}
+    built_a = structure_series(weights_a, data_loader, settlements)
+    built_b = structure_series(weights_b, data_loader, settlements)
+    proxied = sorted({*built_a.proxied, *built_b.proxied})
+    if proxied:
+        from core.settlement_prices import PROXY_NOTE  # local import: keeps the maths module free of the data source
+
+        entry["note"] = PROXY_NOTE
+    if built_a.series is None or built_b.series is None:
+        missing = sorted({*built_a.missing, *built_b.missing})
+        entry["error"] = (
+            f"No price history for {', '.join(missing)}." if missing
+            else "Not enough shared price history across the underlying contracts of one of the structures."
+        )
         return entry
 
     try:
-        aligned_a, aligned_b = data_loader.align_series(series_a, series_b)
+        aligned_a, aligned_b = data_loader.align_series(built_a.series, built_b.series)
         corr, used = lookback_average_correlation(aligned_a, aligned_b, rolling, lookback)
     except (CrudeOilRiskError, ValueError) as exc:
         entry["error"] = str(exc)
         return entry
 
     entry["correlation"] = corr
-    entry["classification"] = classify_correlation(corr)
+    entry["classification"] = classify_correlation(corr, threshold)
     entry["window_used"] = used
     if used < lookback:
         entry["error"] = f"Only {used} of the requested {lookback}-day lookback available."

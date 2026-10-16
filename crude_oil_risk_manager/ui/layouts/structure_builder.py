@@ -9,6 +9,7 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html
 
 from core.structure_utils import STRUCTURE_TEMPLATES
+from core.structure_builder import CORRELATION_FLAG_THRESHOLD
 from ui.layouts.shell import COLORS
 
 STEPS = ["Template", "Legs", "Details", "Review"]
@@ -23,7 +24,7 @@ _ANALYSIS_CARD_STYLE = {"backgroundColor": COLORS["CARD_BG"], "border": f"1px so
 _ANALYSIS_CARD_HEADER = {"backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_PRIMARY"], "fontWeight": "bold", "fontSize": "15px"}
 
 CLASSIFICATION_DISPLAY = {
-    "highly_correlated": ("⚠️ Highly Correlated", COLORS["ACCENT_YELLOW"]),
+    "highly_correlated": ("⚠️ Correlated", COLORS["ACCENT_YELLOW"]),
     "negatively_correlated": ("🔵 Hedge (negative)", COLORS["TEXT_PRIMARY"]),
     "uncorrelated": ("✅ New Exposure", COLORS["ACCENT_GREEN"]),
     "insufficient_data": ("Insufficient data", COLORS["TEXT_SECONDARY"]),
@@ -31,7 +32,7 @@ CLASSIFICATION_DISPLAY = {
 
 EXPOSURE_HINT = "Enter leg symbols to see the net outright equivalent (per 1 lot of the structure)."
 CORRELATION_HINT = "Click 'Refresh Correlation' to compare against your active structures."
-VAR_HINT = "Click 'Refresh Correlation' to estimate this structure's 1-day VaR (Monte Carlo, correlation-adjusted)."
+VAR_HINT = "Click 'Refresh Correlation' to estimate this structure's 1-day VaR (the same Monte Carlo as the VaR & Scenarios page)."
 BETA_HINT = "Click 'Refresh Correlation' to see the lot size that would match or hedge the current portfolio."
 
 
@@ -85,8 +86,10 @@ def render_exposure_table(net: dict[str, float], ignored: list[str]):
     return html.Div(parts)
 
 
-def render_correlation_table(rows: list[dict]):
-    """Candidate | Existing Structure | Correlation | Classification with colour coding."""
+def render_correlation_table(rows: list[dict], threshold: float = CORRELATION_FLAG_THRESHOLD):
+    """Candidate | Existing Structure | Correlation | Classification with colour coding.
+
+    Correlated = at or above +threshold, Hedge = at or below -threshold, otherwise New Exposure."""
     if not rows:
         return html.Div("No active structures to compare against yet.", style={**_MUTED, "fontSize": "14px"})
     table_rows, styles = [], []
@@ -111,7 +114,11 @@ def render_correlation_table(rows: list[dict]):
             )
         table_rows.append([row["candidate"], row["existing_structure"], correlation, chip])
         styles.append({"borderLeft": f"4px solid {color}"})
-    return data_table(["Candidate", "Existing Structure", "Correlation", "Classification"], table_rows, styles)
+    table = data_table(["Candidate", "Existing Structure", "Correlation", "Classification"], table_rows, styles)
+    notes = [f"Correlated when the correlation is {threshold:+.2f} or higher, a hedge when it is {-threshold:+.2f} or lower, new exposure in between. "
+             "Pearson correlation of daily price changes, the rolling window averaged over the lookback (Settings), as on the Correlation page."]
+    notes += [row["note"] for row in rows if row.get("note")][:1]
+    return html.Div([table, html.Div(" ".join(notes), style={**_MUTED, "fontSize": "12px", "marginTop": "6px"})])
 
 
 def _stat_box(label: str, value: str, color: str) -> html.Div:
@@ -126,6 +133,12 @@ def _stat_box(label: str, value: str, color: str) -> html.Div:
             "borderRadius": "8px", "padding": "10px 16px", "flex": "1", "minWidth": "150px",
         },
     )
+
+
+def _draw_text(params: dict) -> str:
+    if "std" in params:
+        return f"mean {params.get('mean', 0):g}, std {params['std']:g} points"
+    return f"uniform from {params.get('low', 0):g} to {params.get('high', 0):g} points"
 
 
 def render_structure_var(var_result: dict | None) -> html.Div:
@@ -143,7 +156,8 @@ def render_structure_var(var_result: dict | None) -> html.Div:
             style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "10px"},
         ),
         html.Div(
-            f"Monte Carlo, {var_result['distribution'].title()} draws, {var_result['n_simulations']:,} simulations, "
+            f"Same Monte Carlo as the VaR & Scenarios page: {var_result['distribution'].title()} draws ({_draw_text(var_result.get('dist_params') or {})} per symbol), "
+            f"{var_result['n_simulations']:,} simulations, legs {', '.join(var_result.get('symbols') or [])}; "
             f"correlation: average over the last {var_result['lookback']}d of the {var_result['rolling']}d rolling value.",
             style={**_MUTED, "fontSize": "13px"},
         ),
@@ -177,10 +191,17 @@ def render_structure_beta(beta_result: dict | None) -> html.Div:
         ),
         html.Div(
             f"Based on {beta_result['observations']} shared observations "
-            f"(window {beta_result['window_used']}d). Positive lots = same side as this structure's legs.",
+            f"(window {beta_result['window_used']}d) of daily settlements. Positive lots = same side as this structure's legs.",
             style={**_MUTED, "fontSize": "13px"},
         ),
     ]
+    notes = []
+    if beta_result.get("skipped_from_portfolio"):
+        notes.append(f"Left out of the portfolio (no price history): {', '.join(beta_result['skipped_from_portfolio'])}.")
+    if beta_result.get("proxied"):
+        notes.append("BZ legs are priced from the ICE Brent settlement of the same month.")
+    if notes:
+        parts.append(html.Div(" ".join(notes), style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "13px", "marginTop": "6px"}))
     return html.Div(parts)
 
 

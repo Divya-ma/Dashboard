@@ -44,6 +44,7 @@ NAV_ITEMS = [
     ("/trade-analyzer", "🎯 Trade Analyzer"),
     ("/curve-compare", "📉 Curve Compare"),
     ("/oi-volume-atr", "📊 OI · Volume · ATR"),
+    ("/churn", "♻️ Churn"),
     ("/archive", "📁 Archive"),
     ("/settings", "⚙️ Settings"),
 ]

@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 # Same look-back DataLoader uses when it backfills a symbol on demand.
 BACKFILL_DAYS = 365 * 3
 
+# A candidate structure counts as correlated with an existing one when its correlation is at or above +this (it adds the same
+# risk) and as a hedge when it is at or below -this. (core.correlation.classify_correlation's own default is 0.7.)
+CORRELATION_FLAG_THRESHOLD = 0.35
+
+# Dollars per point of one lot when a contract has not been saved and no multiplier has been typed in yet.
+FALLBACK_MULTIPLIER = 1000.0
+
 EVENT_TEMPLATE = "template"
 EVENT_ADD = "add"
 EVENT_REMOVE = "remove"
@@ -259,12 +266,37 @@ def _leg_dicts(structure: Structure) -> list[dict]:
     return [{"symbol": leg.contract.symbol, "ratio": leg.ratio} for leg in structure.legs]
 
 
+def candidate_leg_dollar_weights(legs: list[dict], get_contract, default_multiplier: float | None = None) -> dict[str, float]:
+    """Dollar P&L per 1.0-point move of each LEG SYMBOL, for 1 lot of the candidate structure.
+
+    This is the same view of a book the VaR page takes (core.var.leg_dollar_weights): a leg is an exchange-quoted
+    instrument and is used as it is, never decomposed; weight[symbol] = sum(ratio * multiplier) over the legs that use
+    that symbol. The multiplier is the saved contract's, else the one typed in the builder, else FALLBACK_MULTIPLIER.
+    Symbols whose legs cancel are dropped.
+    """
+    weights: dict[str, float] = {}
+    for leg in legs:
+        symbol = normalize_symbol(leg.get("symbol"))
+        try:
+            ratio = float(leg.get("ratio") or 0)
+        except (TypeError, ValueError):
+            ratio = 0.0
+        if not symbol or ratio == 0:
+            continue
+        contract = get_contract(symbol)
+        multiplier = contract.multiplier if contract is not None else (default_multiplier or FALLBACK_MULTIPLIER)
+        weights[symbol] = weights.get(symbol, 0.0) + ratio * multiplier
+    return {symbol: weight for symbol, weight in weights.items() if abs(weight) > 1e-9}
+
+
 def check_portfolio_correlation(
     candidate_legs: list[dict],
     portfolio: list[Structure],
     rolling: int,
     lookback: int,
     data_loader: DataLoader,
+    settlements=None,
+    threshold: float = CORRELATION_FLAG_THRESHOLD,
 ) -> list[dict]:
     """One row per existing active structure, plus a 'vs Whole Portfolio' summary row,
     comparing the prospective structure (`candidate_legs`, i.e. what's typed in the Legs
@@ -279,6 +311,11 @@ def check_portfolio_correlation(
     on every check. Only the underlying outright contracts (almost always already cached)
     need price data, and each pair is aligned on its OWN legs' common dates only — an
     illiquid leg on some other structure never starves a comparison that doesn't involve it.
+
+    The maths is the Correlation tab's: Pearson correlation of daily price differences over a rolling window,
+    averaged over the lookback (both from Settings, defaults 5 and 20), where a structure's price is built from ALL of
+    its outright legs on their shared dates before it is differenced (core.correlation.structure_series). With
+    `settlements` the outrights come from their gap-free daily settlements. Correlated means |correlation| >= `threshold`.
 
     Missing data never raises; a row carries correlation=None with an "error" reason
     instead. The 'vs Whole Portfolio' row is the signed average of the pairwise rows that
@@ -298,8 +335,10 @@ def check_portfolio_correlation(
     for _, weights in entries:
         all_symbols.update(weights)
 
+    if settlements is not None:  # outrights the settlements already cover need no price file, so no backfill call
+        all_symbols = {s for s in all_symbols if settlements.closes(s)[0] is None}
     ensure_cached = getattr(data_loader, "ensure_cached", None)
-    if ensure_cached is not None:
+    if ensure_cached is not None and all_symbols:
         try:
             ensure_cached(list(all_symbols))
         except Exception:  # noqa: BLE001 - a failed pre-warm must never block the correlation check
@@ -308,10 +347,10 @@ def check_portfolio_correlation(
     rows = []
     for structure, weights in entries:
         try:
-            result = correlate_structures(candidate_weights, weights, rolling, lookback, data_loader)
+            result = correlate_structures(candidate_weights, weights, rolling, lookback, data_loader, settlements, threshold)
         except Exception:  # noqa: BLE001 - a data/adapter failure on one structure must never crash the whole check
             logger.exception("Correlation check failed for %s", structure.name)
-            result = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "rolling": rolling, "error": "Could not compute this correlation; see the server log."}
+            result = {"correlation": None, "classification": "insufficient_data", "window_used": 0, "rolling": rolling, "error": "Could not compute this correlation; see the server log.", "note": None}
         rows.append(
             {
                 "candidate": "New structure",
@@ -322,6 +361,7 @@ def check_portfolio_correlation(
                 "window_used": result["window_used"],
                 "rolling": result["rolling"],
                 "error": result["error"],
+                "note": result.get("note"),
             }
         )
 
@@ -334,10 +374,11 @@ def check_portfolio_correlation(
                 "existing_symbol": "PORTFOLIO",
                 "existing_structure": f"Whole Portfolio (avg. of {len(valid)} structure(s))",
                 "correlation": average,
-                "classification": classify_correlation(average),
+                "classification": classify_correlation(average, threshold),
                 "window_used": min(r["window_used"] for r in rows if r["correlation"] is not None),
                 "rolling": rolling,
                 "error": None,
+                "note": next((r["note"] for r in rows if r.get("note")), None),
             }
         )
 

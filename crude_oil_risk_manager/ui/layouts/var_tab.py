@@ -12,7 +12,10 @@ from dash import dash_table, dcc, html
 from dash.dash_table.Format import Format, Group, Scheme, Sign, Symbol
 
 from core.scenarios import KIND_PORTFOLIO
-from core.var import DEFAULT_MC_SIMULATIONS, DISTRIBUTION_NORMAL, DISTRIBUTION_UNIFORM
+from core.var import (
+    DEFAULT_MC_HIGH, DEFAULT_MC_LOW, DEFAULT_MC_MEAN, DEFAULT_MC_SIMULATIONS, DEFAULT_MC_STD, DISTRIBUTION_NORMAL, DISTRIBUTION_UNIFORM, load_mc_settings,
+)
+from ui.container import container
 from ui.layouts.correlation_tab import empty_figure
 from ui.layouts.shell import COLORS
 
@@ -249,10 +252,10 @@ DISTRIBUTION_OPTIONS = [
     {"label": "Uniform", "value": DISTRIBUTION_UNIFORM},
 ]
 DEFAULT_DISTRIBUTION = DISTRIBUTION_NORMAL
-DEFAULT_MEAN = 0.0
-DEFAULT_STD = 0.5
-DEFAULT_LOW = -1.0
-DEFAULT_HIGH = 1.0
+DEFAULT_MEAN = DEFAULT_MC_MEAN
+DEFAULT_STD = DEFAULT_MC_STD
+DEFAULT_LOW = DEFAULT_MC_LOW
+DEFAULT_HIGH = DEFAULT_MC_HIGH
 
 
 def _number_input(id_: str, value: float, label: str, step: float = 0.1) -> html.Div:
@@ -266,7 +269,8 @@ def _number_input(id_: str, value: float, label: str, step: float = 0.1) -> html
 
 
 def var_scenario_layout() -> html.Div:
-    """VaR section on top, scenario analysis below."""
+    """VaR section on top, scenario analysis below. The Monte Carlo controls start at what was last shown (the Structure Builder reads the same)."""
+    distribution, mc, simulations = load_mc_settings(container.repository)
     var_section = dbc.Card(
         dbc.CardBody(
             [
@@ -283,18 +287,18 @@ def var_scenario_layout() -> html.Div:
                 html.Div(
                     [
                         html.Span("Distribution", style={**_MUTED, "marginRight": "8px"}),
-                        dbc.Select(id="var-mc-distribution", options=DISTRIBUTION_OPTIONS, value=DEFAULT_DISTRIBUTION, style={"width": "140px", "display": "inline-block", "marginRight": "16px"}),
+                        dbc.Select(id="var-mc-distribution", options=DISTRIBUTION_OPTIONS, value=distribution, style={"width": "140px", "display": "inline-block", "marginRight": "16px"}),
                         html.Div(
-                            [_number_input("var-mc-mean", DEFAULT_MEAN, "Mean"), _number_input("var-mc-std", DEFAULT_STD, "Std Dev", step=0.05)],
+                            [_number_input("var-mc-mean", mc.get("mean", DEFAULT_MEAN), "Mean"), _number_input("var-mc-std", mc.get("std", DEFAULT_STD), "Std Dev", step=0.05)],
                             id="var-mc-normal-params",
                             style={"display": "inline-block"},
                         ),
                         html.Div(
-                            [_number_input("var-mc-low", DEFAULT_LOW, "Low"), _number_input("var-mc-high", DEFAULT_HIGH, "High")],
+                            [_number_input("var-mc-low", mc.get("low", DEFAULT_LOW), "Low"), _number_input("var-mc-high", mc.get("high", DEFAULT_HIGH), "High")],
                             id="var-mc-uniform-params",
                             style={"display": "none"},
                         ),
-                        _number_input("var-mc-simulations", DEFAULT_MC_SIMULATIONS, "Simulations", step=1000),
+                        _number_input("var-mc-simulations", simulations, "Simulations", step=1000),
                     ],
                     id="var-mc-controls",
                     style={"display": "none", "marginBottom": "12px"},

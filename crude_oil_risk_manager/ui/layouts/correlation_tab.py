@@ -19,6 +19,7 @@ from dash import dash_table, dcc, html
 from config.settings import settings
 from core.user_settings import correlation_windows
 from ui.container import container
+from ui.layouts.corr_matrix_view import corr_matrix_section
 from ui.layouts.shell import COLORS
 
 PLACEHOLDER_TEXT = "Add instruments or structures and click Compute"
@@ -527,24 +528,34 @@ def correlation_layout() -> html.Div:
             dcc.Store(id="corr-missing-symbols", data=[]),
             dcc.Store(id="corr-excel-pair", data=None),  # {base, target} labels from the last Excel Add
             html.H3("🔗 Correlation", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "16px"}),
-            dbc.Row(
+            corr_matrix_section(default_rolling_window(), default_lookback()),
+            html.Details(
                 [
-                    dbc.Col(_left_panel(), lg=4, className="mb-3"),
-                    dbc.Col(
-                        dbc.Tabs(
-                            [
-                                dbc.Tab(_heatmap_tab(), label="Heatmap", tab_id="heatmap"),
-                                dbc.Tab(_time_series_tab(), label="Time Series", tab_id="time-series"),
-                                dbc.Tab(_year_overlay_tab(), label="Year Overlay", tab_id="year-overlay"),
-                                dbc.Tab(_summary_tab(), label="Summary Table", tab_id="summary"),
-                            ],
-                            id="corr-view-tabs",
-                            active_tab="heatmap",
-                        ),
-                        lg=8,
-                        className="mb-3",
+                    html.Summary(
+                        "Custom watchlist: instruments, open structures or Excel columns (heatmap, time series, year overlay, summary)",
+                        style={"color": COLORS["TEXT_PRIMARY"], "cursor": "pointer", "fontSize": "16px", "margin": "26px 0 12px"},
                     ),
-                ]
+                    dbc.Row(
+                        [
+                            dbc.Col(_left_panel(), lg=4, className="mb-3"),
+                            dbc.Col(
+                                dbc.Tabs(
+                                    [
+                                        dbc.Tab(_heatmap_tab(), label="Heatmap", tab_id="heatmap"),
+                                        dbc.Tab(_time_series_tab(), label="Time Series", tab_id="time-series"),
+                                        dbc.Tab(_year_overlay_tab(), label="Year Overlay", tab_id="year-overlay"),
+                                        dbc.Tab(_summary_tab(), label="Summary Table", tab_id="summary"),
+                                    ],
+                                    id="corr-view-tabs",
+                                    active_tab="heatmap",
+                                ),
+                                lg=8,
+                                className="mb-3",
+                            ),
+                        ]
+                    ),
+                ],
+                open=False,
             ),
         ]
     )

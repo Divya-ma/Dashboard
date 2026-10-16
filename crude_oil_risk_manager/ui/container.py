@@ -12,11 +12,13 @@ from dataclasses import dataclass, field
 from adapters.base import HistoricalDataAdapter, LiveDataAdapter
 from adapters.qh_api import QHApi
 from core.alerts import AlertManager
+from core.churn_service import ChurnService
 from core.curve_compare import CurveCompare
 from core.curve_service import CurveService
 from core.data_loader import DataLoader
 from core.excel_correlation import ExcelCorrelationStore
 from core.oi_service import OiService
+from core.settlement_prices import SettlementPrices
 from db.repository import Repository
 
 NO_UPDATE_LABEL = "Last: --:--:--"
@@ -43,6 +45,8 @@ class Container:
     curve_service: CurveService | None = None  # Curve Kinks engine (fed by the live poll)
     curve_compare: CurveCompare | None = None  # Curve Compare page (quote VWAP vs previous settlement)
     oi_service: OiService | None = None  # OI / Volume / ATR page (daily OI download + research)
+    churn_service: ChurnService | None = None  # Churn page (five-minute candles, small-target simulation)
+    settlements: SettlementPrices | None = None  # gap-free daily settlements of CL and BRN outrights (for correlation and beta)
     qh_api: QHApi | None = None  # rate-limited wrappers for every QH API endpoint
     live_cache: LivePriceCache = field(default_factory=LivePriceCache)
     pnl_stop_alert_active: bool = False

@@ -18,12 +18,15 @@ from dash.exceptions import PreventUpdate
 from config.settings import settings
 from core.structure_builder import (
     ACTIVE_STRUCTURE_STATUSES,
+    CORRELATION_FLAG_THRESHOLD,
+    FALLBACK_MULTIPLIER,
     EVENT_ADD,
     EVENT_REMOVE,
     EVENT_TEMPLATE,
     StructureBuildError,
     backfill_symbols_async,
     build_shell_structure,
+    candidate_leg_dollar_weights,
     check_portfolio_correlation,
     next_leg_rows,
     save_shell_structure,
@@ -35,10 +38,9 @@ from core.structure_utils import (
     split_validation_messages,
     validate_structure_legs,
 )
-from core.correlation import structure_return_series
-from core.correlation import beta_window
+from core.correlation import beta_window, structure_series
 from core.user_settings import correlation_windows
-from core.var import DISTRIBUTION_NORMAL, beta_vs_portfolio, monte_carlo_var
+from core.var import beta_vs_portfolio, load_mc_settings, monte_carlo_var
 from ui.callbacks.structures_callbacks import update_active_structures
 from ui.container import container
 from ui.layouts.shell import COLORS
@@ -194,57 +196,77 @@ def update_exposure_preview(symbols, ratios, legs_store):
     return render_exposure_table(net, ignored)
 
 
-# A new symbol typed in the builder has no saved Contract yet (and so no known multiplier)
-# until the structure itself is saved; WTI/Brent-style contracts are 1,000 bbl per lot, so
-# that's the fallback used for the structure builder's own VaR preview only.
-_FALLBACK_MULTIPLIER = 1000.0
+def _multiplier(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
-def _candidate_dollar_weights(net_outright_weights: dict[str, float]) -> dict[str, float]:
-    """Dollar P&L per 1.0-point move, per 1 lot of the candidate structure."""
+def _outright_dollar_weights(net_outright_weights: dict[str, float], default_multiplier: float | None) -> dict[str, float]:
+    """Dollar P&L per 1.0-point move, per outright, for 1 lot of the candidate structure (for the beta regression).
+
+    The multiplier is the saved contract's, else the one typed in the builder, else the 1,000-barrel default.
+    """
     dollar_weights = {}
     for symbol, weight in net_outright_weights.items():
         contract = container.repository.get_contract(symbol)
-        multiplier = contract.multiplier if contract else _FALLBACK_MULTIPLIER
+        multiplier = contract.multiplier if contract else (default_multiplier or FALLBACK_MULTIPLIER)
         dollar_weights[symbol] = weight * multiplier
     return dollar_weights
 
 
-def _candidate_var(dollar_weights: dict[str, float], rolling: int, lookback: int) -> dict:
-    """Monte Carlo VaR (1 lot of the candidate structure) from its outright decomposition.
+def _candidate_var(leg_weights: dict[str, float], rolling: int, lookback: int) -> dict:
+    """Monte Carlo VaR of 1 lot of the candidate, exactly as the VaR & Scenarios page runs it.
 
-    Normal(mean=0, std=1 point) draws, correlated via the same outright symbols' correlation
-    matrix used for the correlation check above — a quick, opinionated default (no
-    distribution picker here; the VaR & Scenarios tab has the full controls for an open
-    structure's actual book).
+    Same function (core.var.monte_carlo_var), same positions view (the leg symbols as entered, each worth ratio x
+    multiplier dollars per point; see core.structure_builder.candidate_leg_dollar_weights), same draws (the
+    distribution, mean/std or low/high and number of simulations the VaR page last showed, saved by it; its defaults
+    until it has been opened), same correlation matrix (Pearson, the rolling window averaged over the lookback).
     """
-    result = monte_carlo_var(
-        dollar_weights, container.data_loader, DISTRIBUTION_NORMAL,
-        {"mean": 0.0, "std": 1.0}, rolling=rolling, lookback=lookback,
-    )
+    distribution, dist_params, n_simulations = load_mc_settings(container.repository)
+    try:
+        container.data_loader.ensure_cached(list(leg_weights))  # one bulk backfill for legs never seen, not one call each
+    except Exception:  # noqa: BLE001 - a failed pre-warm only means the pairs without history are treated as uncorrelated
+        logger.exception("Pre-warm before the candidate VaR failed")
+    try:
+        result = monte_carlo_var(
+            leg_weights, container.data_loader, distribution, dist_params, rolling=rolling, lookback=lookback, n_simulations=n_simulations,
+        )
+    except Exception:  # noqa: BLE001 - the VaR card must say what happened, never crash the check
+        logger.exception("Candidate VaR failed")
+        return {"error": "Could not estimate the VaR; see the server log."}
     if result.error:
         return {"error": result.error}
     return {
         "var_95": result.var[0.95],
         "var_99": result.var[0.99],
         "distribution": result.distribution,
+        "dist_params": result.dist_params,
         "n_simulations": result.n_simulations,
         "rolling": rolling,
         "lookback": lookback,
+        "symbols": result.symbols_included,
         "warnings": result.warnings,
     }
 
 
 def _candidate_beta(dollar_weights: dict[str, float], portfolio: list, window: int) -> dict:
     """Beta of the current portfolio on the candidate structure (1 lot), and the lots of the
-    candidate that would match or hedge it — see core.var.beta_vs_portfolio."""
-    candidate_series = structure_return_series(dollar_weights, container.data_loader)
-    if candidate_series is None:
-        return {"error": "Not enough local price history for this structure's underlying contracts."}
-    return beta_vs_portfolio(candidate_series, 1.0, portfolio, container.data_loader, window)
+    candidate that would match or hedge it — see core.var.beta_vs_portfolio.
+
+    Both sides are built from outright settlements (container.settlements), which have a long gap-free history, so
+    the regression has data even when the legs' own candles are sparse.
+    """
+    built = structure_series(dollar_weights, container.data_loader, container.settlements)
+    if built.series is None:
+        why = f"No price history for {', '.join(built.missing)}." if built.missing else "Not enough shared price history across this structure's underlying contracts."
+        return {"error": why}
+    return beta_vs_portfolio(built.series, 1.0, portfolio, container.data_loader, window, container.settlements)
 
 
-def check_correlation(n_clicks, symbols, ratios, template):
+def check_correlation(n_clicks, symbols, ratios, template, multiplier=None):
     """Correlation, estimated VaR and beta/position-sizing of the candidate; button-only."""
     if not n_clicks:
         raise PreventUpdate
@@ -255,13 +277,14 @@ def check_correlation(n_clicks, symbols, ratios, template):
         placeholder = html.Div("Enter at least one valid leg symbol first.", style=_MUTED)
         return placeholder, [], placeholder, placeholder
 
+    typed_multiplier = _multiplier(multiplier)
     rolling, lookback = correlation_windows(repository)
     portfolio = repository.get_all_structures(status_filter=ACTIVE_STRUCTURE_STATUSES)
-    rows = check_portfolio_correlation(legs, portfolio, rolling, lookback, container.data_loader)
+    rows = check_portfolio_correlation(legs, portfolio, rolling, lookback, container.data_loader, container.settlements)
 
-    dollar_weights = _candidate_dollar_weights(net)
-    var_result = _candidate_var(dollar_weights, rolling, lookback)
-    beta_result = _candidate_beta(dollar_weights, portfolio, beta_window(rolling, lookback))
+    leg_weights = candidate_leg_dollar_weights(legs, repository.get_contract, typed_multiplier)
+    var_result = _candidate_var(leg_weights, rolling, lookback)
+    beta_result = _candidate_beta(_outright_dollar_weights(net, typed_multiplier), portfolio, beta_window(rolling, lookback))
     return render_correlation_table(rows), rows, render_structure_var(var_result), render_structure_beta(beta_result)
 
 
@@ -458,6 +481,7 @@ def register_structure_builder_callbacks(app) -> None:
         State(_LEG_SYMBOLS, "value"),
         State(_LEG_RATIOS, "value"),
         State("store-builder-template", "data"),
+        State("builder-multiplier", "value"),
         prevent_initial_call=True,
     )(check_correlation)
 

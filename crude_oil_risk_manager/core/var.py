@@ -33,6 +33,7 @@ from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError, DataNotAvailableError, InsufficientDataError
 from core.exposure import filter_open_structures, get_structure_net_lots
 from core.models import Contract, Structure
+from core.structure_utils import net_outright_equivalent
 
 _TERM_STRUCTURE_HORIZONS = [1, 2, 3, 5, 10]
 _RELIABLE_SCENARIOS = 252
@@ -426,6 +427,49 @@ DEFAULT_MC_SIMULATIONS = 10_000
 _MAX_MC_SIMULATIONS = 200_000
 _MIN_MC_SIMULATIONS = 100
 
+# The VaR page's Monte Carlo controls. The page saves what it is showing under KEY_VAR_MC and the Structure Builder reads it
+# back, so the two always run the same Monte Carlo (the same distribution, spread of the draws and number of simulations).
+KEY_VAR_MC = "var_mc_params"
+DEFAULT_MC_MEAN = 0.0
+DEFAULT_MC_STD = 0.5  # points per symbol, one standard deviation of a day's move
+DEFAULT_MC_LOW = -1.0
+DEFAULT_MC_HIGH = 1.0
+
+
+def load_mc_settings(repository) -> tuple[str, dict, int]:
+    """(distribution, dist_params, n_simulations) as last shown on the VaR page, or the page's defaults."""
+    raw = {}
+    try:
+        saved = repository.get_setting(KEY_VAR_MC, None) if repository is not None else None
+        raw = saved if isinstance(saved, dict) else {}
+    except Exception:  # noqa: BLE001 - a settings read failure must not stop a VaR estimate
+        raw = {}
+
+    def number(name: str, default: float) -> float:
+        try:
+            return float(raw.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    distribution = raw.get("distribution") if raw.get("distribution") in (DISTRIBUTION_NORMAL, DISTRIBUTION_UNIFORM) else DISTRIBUTION_NORMAL
+    params = (
+        {"mean": number("mean", DEFAULT_MC_MEAN), "std": max(number("std", DEFAULT_MC_STD), 0.0)}
+        if distribution == DISTRIBUTION_NORMAL
+        else {"low": number("low", DEFAULT_MC_LOW), "high": number("high", DEFAULT_MC_HIGH)}
+    )
+    n = int(number("n_simulations", DEFAULT_MC_SIMULATIONS))
+    return distribution, params, min(max(n, _MIN_MC_SIMULATIONS), _MAX_MC_SIMULATIONS)
+
+
+def save_mc_settings(repository, distribution: str, mean, std, low, high, n_simulations) -> None:
+    """Remember the VaR page's Monte Carlo controls (written only when they changed)."""
+    values = {"distribution": distribution, "mean": mean, "std": std, "low": low, "high": high, "n_simulations": n_simulations}
+    try:
+        if repository.get_setting(KEY_VAR_MC, None) != values:
+            repository.set_setting(KEY_VAR_MC, values)
+    except Exception:  # noqa: BLE001 - remembering the controls is a convenience
+        pass
+
 
 def _nearest_correlation_psd(matrix: np.ndarray) -> np.ndarray:
     """Repair a correlation matrix into a valid (symmetric, PSD, unit-diagonal) one.
@@ -584,12 +628,64 @@ def monte_carlo_var(
 # ----------------------------------------------------------------------
 
 
+def outright_dollar_weights(structures: list[Structure]) -> dict[str, float]:
+    """Dollar P&L per 1.0-point move of each OUTRIGHT, from the open structures' traded legs.
+
+    Every leg symbol (a fly, a spread, an outright) is decomposed to outrights with
+    core.structure_utils.net_outright_equivalent and scaled by ratio * side * lots * multiplier, the same
+    sign convention as leg_dollar_weights. Outrights that cancel exactly are dropped.
+    """
+    weights: dict[str, float] = {}
+    for structure in filter_open_structures(structures):
+        for leg in structure.legs:
+            if not leg.is_traded:
+                continue
+            side = 1 if leg.direction == "buy" else -1
+            net, _ignored = net_outright_equivalent([{"symbol": leg.contract.symbol, "ratio": 1}])
+            for symbol, weight in net.items():
+                weights[symbol] = weights.get(symbol, 0.0) + weight * leg.ratio * side * leg.lots * leg.contract.multiplier
+    return {symbol: weight for symbol, weight in weights.items() if abs(weight) > 1e-9}
+
+
+def portfolio_outright_pnl_series(
+    structures: list[Structure], data_loader: DataLoader, settlements
+) -> tuple[pd.Series | None, dict[str, str], list[str]]:
+    """The open structures' daily P&L series from their outrights' settlements.
+
+    portfolio[t] = S[t] - S[t-1] with S[t] = sum(outright dollar weight * settlement[t]) on the dates where every
+    outright has a settlement (the price is combined first, then differenced, as in core.correlation.structure_series).
+    An outright with no usable history is left out and reported in the second value (this understates the portfolio);
+    the third value lists outrights priced from a proxy (BZ from ICE Brent). Returns (None, skipped, proxied) when
+    there is nothing to build.
+    """
+    from core.correlation import _leg_closes  # local import: avoids a cycle at module load
+
+    weights = outright_dollar_weights(structures)
+    levels: dict[str, pd.Series] = {}
+    skipped: dict[str, str] = {}
+    proxied: list[str] = []
+    for symbol, weight in weights.items():
+        closes, via_proxy = _leg_closes(symbol, data_loader, settlements)
+        if closes is None or closes.empty:
+            skipped[symbol] = "no price history"
+            continue
+        levels[symbol] = closes * weight
+        if via_proxy:
+            proxied.append(symbol)
+    if not levels:
+        return None, skipped, proxied
+    price = pd.concat(levels.values(), axis=1, join="inner").dropna().sum(axis=1).sort_index()
+    diffs = price.diff().dropna()
+    return (diffs if not diffs.empty else None), skipped, proxied
+
+
 def beta_vs_portfolio(
     candidate_series: pd.Series,
     candidate_lots: float,
     reference_structures: list[Structure],
     data_loader: DataLoader,
     window: int,
+    settlements=None,
 ) -> dict:
     """Beta of the reference structures' combined P&L on a candidate's own P&L series, and
     the lot count at which the candidate would match or hedge it (regression-based position
@@ -603,21 +699,35 @@ def beta_vs_portfolio(
     every open structure for a brand-new candidate, or every OTHER open structure to see how
     one already-open structure relates to the rest (self-regression would inflate beta).
 
-    Returns {"error": str} if the reference book has no positions or no usable price data,
+    With `settlements` (core.settlement_prices.SettlementPrices) the book is built from its OUTRIGHTS' daily
+    settlements (portfolio_outright_pnl_series), which have a long, gap-free history. Without it the book is built from
+    the leg symbols' own candles (portfolio_pnl_series), where every leg must trade on the same days, so one thinly
+    traded leg can leave almost no common days.
+
+    Returns {"error": str} if the reference book has no open traded position or no usable price data,
     or if the regression itself is underdetermined (see core.regression.beta_from_series).
     Never raises.
     """
     from core.regression import beta_from_series, position_sizing_from_beta  # local import: avoids a cycle at module load
 
-    portfolio_series, skipped = portfolio_pnl_series(reference_structures, data_loader)
+    if not leg_dollar_weights(reference_structures):
+        return {"error": "The portfolio has no open traded positions yet (a shell structure carries no lots), so there is nothing to size against."}
+    proxied: list[str] = []
+    if settlements is not None:
+        portfolio_series, skipped, proxied = portfolio_outright_pnl_series(reference_structures, data_loader, settlements)
+        skipped_text = dict(skipped)
+    else:
+        portfolio_series, skipped_text = portfolio_pnl_series(reference_structures, data_loader)
     if portfolio_series is None:
-        return {"error": "No portfolio price data available to regress against."}
+        detail = f" (no price history for {', '.join(skipped_text)})" if skipped_text else ""
+        return {"error": f"No portfolio price data available to regress against{detail}."}
     try:
         beta_result = beta_from_series(portfolio_series, candidate_series, window)
     except InsufficientDataError as exc:
         return {"error": str(exc)}
     sized = position_sizing_from_beta(beta_result, candidate_lots)
-    sized["skipped_from_portfolio"] = skipped
+    sized["skipped_from_portfolio"] = skipped_text
+    sized["proxied"] = proxied
     sized["error"] = None
     return sized
 

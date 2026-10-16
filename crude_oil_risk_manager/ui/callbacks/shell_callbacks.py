@@ -63,6 +63,7 @@ _ROUTES = {
     "/trade-analyzer": ("curve_tab", "trade_analyzer_layout"),
     "/curve-compare": ("curve_compare_tab", "curve_compare_layout"),
     "/oi-volume-atr": ("oi_tab", "oi_layout"),
+    "/churn": ("churn_tab", "churn_layout"),
     "/archive": ("archive_tab", "archive_layout"),
     "/settings": ("settings", "settings_layout"),
 }

@@ -17,6 +17,7 @@ from core.correlation import (
     lookback_average_correlation,
     outright_weights,
     structure_return_series,
+    structure_series,
 )
 from core.data_loader import DataLoader
 from core.exceptions import DataNotAvailableError, InsufficientDataError
@@ -255,10 +256,12 @@ def test_structure_return_series_none_below_the_observation_floor(tmp_path, load
     assert structure_return_series({"CLZ26": 1.0}, loader) is None
 
 
-def test_structure_return_series_drops_legs_without_local_data(tmp_path, loader, create_synthetic_parquet):
+def test_structure_return_series_needs_every_leg(tmp_path, loader, create_synthetic_parquet):
+    """A leg with no history used to be dropped, which silently turned the structure into a different one."""
     create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(60, seed=1))
-    series = structure_return_series({"CLZ26": 1.0, "BRNZ26": -1.0}, loader)  # BRNZ26 has no data
-    assert series is not None and len(series) == 59
+    assert structure_return_series({"CLZ26": 1.0, "BRNZ26": -1.0}, loader) is None  # BRNZ26 has no data
+    built = structure_series({"CLZ26": 1.0, "BRNZ26": -1.0}, loader)
+    assert built.series is None and built.missing == ["BRNZ26"]
 
 
 # ---------- correlate_structures ----------

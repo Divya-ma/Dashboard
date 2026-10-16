@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     # OI / Volume / ATR page: daily OI of every outright, cached as Parquet
     OI_DATA_DIR: str = "data/oi"
     ATR_DATA_DIR: str = "data/atr"
+    CHURN_DATA_DIR: str = "data/churn"
 
     # Manual Excel fallback source for the Correlation tab (used when the API can't
     # provide a series for a symbol)

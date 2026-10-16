@@ -22,6 +22,7 @@ from core.var import (
     leg_dollar_weights,
     monte_carlo_var,
     portfolio_pnl_var,
+    save_mc_settings,
 )
 from ui.container import container
 from ui.layouts.var_tab import (
@@ -64,6 +65,7 @@ def update_var_section(pathname, lookback, method, distribution, mean, std, low,
         raise PreventUpdate
     lookback_days = int(lookback)
     structures = _open_structures()
+    save_mc_settings(container.repository, distribution, mean, std, low, high, n_simulations)  # the Structure Builder runs the same Monte Carlo
 
     if method == METHOD_MONTE_CARLO:
         weights = leg_dollar_weights(structures)
