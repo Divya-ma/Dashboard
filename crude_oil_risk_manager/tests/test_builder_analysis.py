@@ -11,12 +11,13 @@ from core.correlation import classify_correlation, correlate_structures, structu
 from core.data_loader import DataLoader
 from core.models import Contract, Leg, Structure, StructureStatus, StructureType
 from core.settlement_prices import PROXY_NOTE, SettlementPrices, settlement_code
+from core.positions import candidate_dollar_weights, dollar_weights
 from core.var import (
     DEFAULT_MC_STD,
     KEY_VAR_MC,
+    VOL_FIXED,
     beta_vs_portfolio,
     load_mc_settings,
-    outright_dollar_weights,
     portfolio_outright_pnl_series,
     save_mc_settings,
 )
@@ -165,26 +166,6 @@ def test_the_builder_flags_a_moderate_correlation_as_correlated_and_a_negative_o
 # ----------------------------------------------------------------------
 
 
-def test_leg_dollar_weights_view_the_book_as_the_var_page_does():
-    saved = {"CLZ26": contract("CLZ26", multiplier=500.0)}
-    legs = [{"symbol": "clz26", "ratio": 1}, {"symbol": "CLF27", "ratio": -2}, {"symbol": "CLG27", "ratio": 1}, {"symbol": "CLG27", "ratio": -1}, {"symbol": "", "ratio": 1}]
-    weights = sb.candidate_leg_dollar_weights(legs, saved.get, default_multiplier=250.0)
-    assert weights == {"CLZ26": 500.0, "CLF27": -500.0}  # the saved multiplier wins, then the typed one; legs that cancel or are blank drop out
-    assert sb.candidate_leg_dollar_weights([{"symbol": "CLF27", "ratio": 1}], lambda s: None) == {"CLF27": 1000.0}
-
-
-def test_the_monte_carlo_controls_are_shared_with_the_var_page(tmp_path):
-    repo = Repository(str(tmp_path / "x.db"))
-    assert load_mc_settings(repo) == ("normal", {"mean": 0.0, "std": DEFAULT_MC_STD}, 10_000) and DEFAULT_MC_STD == 0.5
-    assert load_mc_settings(None)[1]["std"] == 0.5
-    save_mc_settings(repo, "normal", 0.0, 0.2, -1.0, 1.0, 5000)
-    assert load_mc_settings(repo) == ("normal", {"mean": 0.0, "std": 0.2}, 5000)
-    save_mc_settings(repo, "uniform", 0.0, 0.2, -0.3, 0.4, 2000)
-    assert load_mc_settings(repo) == ("uniform", {"low": -0.3, "high": 0.4}, 2000)
-    repo.set_setting(KEY_VAR_MC, {"distribution": "weird", "std": "abc", "n_simulations": 5})
-    assert load_mc_settings(repo) == ("normal", {"mean": 0.0, "std": 0.5}, 100)  # bad values fall back, the count is clamped
-
-
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     repo = Repository(str(tmp_path / "builder.db"))
@@ -194,40 +175,9 @@ def env(tmp_path, monkeypatch):
     return fresh
 
 
-def test_the_candidate_var_matches_the_var_page_for_one_leg(env):
-    # one leg of 1 lot: loss at 95% of Normal(0, 0.5 points) x $1,000 per point = 1.645 x 500
-    var = bc._candidate_var({"CLZ26": 1000.0}, 5, 20)
-    assert var["var_95"] == pytest.approx(1.645 * 500, rel=0.06) and var["var_99"] == pytest.approx(2.326 * 500, rel=0.06)
-    assert var["dist_params"] == {"mean": 0.0, "std": 0.5} and var["n_simulations"] == 10_000 and var["symbols"] == ["CLZ26"]
-
-
-def test_the_candidate_var_follows_whatever_the_var_page_was_set_to(env):
-    base = bc._candidate_var({"CLZ26": 1000.0}, 5, 20)["var_95"]
-    save_mc_settings(env.repository, "normal", 0.0, 0.1, -1.0, 1.0, 10_000)
-    assert bc._candidate_var({"CLZ26": 1000.0}, 5, 20)["var_95"] == pytest.approx(base / 5, rel=0.12)
-    save_mc_settings(env.repository, "uniform", 0.0, 0.5, -0.2, 0.2, 10_000)
-    uniform = bc._candidate_var({"CLZ26": 1000.0}, 5, 20)
-    assert uniform["distribution"] == "uniform" and uniform["var_95"] == pytest.approx(0.9 * 200, rel=0.1)  # 5th percentile of U(-0.2, 0.2) x $1,000
-
-
-def test_a_spread_hedges_itself_in_the_var(env, create_synthetic_parquet, tmp_path):
-    closes = walk(120, 8)
-    for symbol, noise in (("CLZ26", 0.0), ("CLF27", 0.05)):  # two legs that move together
-        create_synthetic_parquet(tmp_path / "hist", symbol, closes=closes + np.random.default_rng(1).normal(0, noise, 120))
-    together = bc._candidate_var({"CLZ26": 1000.0, "CLF27": -1000.0}, 5, 20)
-    alone = bc._candidate_var({"CLZ26": 1000.0}, 5, 20)
-    assert together["var_95"] < 0.5 * alone["var_95"]  # correlated legs of opposite sign leave little risk
-
-
 # ----------------------------------------------------------------------
 # Beta and position sizing
 # ----------------------------------------------------------------------
-
-
-def test_the_book_is_built_from_outright_dollar_weights():
-    book = [open_structure("fly", ["CLZ26-F27-G27"], [1], lots=2.0), open_structure("short", ["CLZ26"], [1], lots=1.0, direction="sell"),
-            open_structure("shell", ["CLH27"], [1], lots=0.0, status=StructureStatus.SHELL)]
-    assert outright_dollar_weights(book) == {"CLZ26": 1000.0, "CLF27": -4000.0, "CLG27": 2000.0}  # 2 lots of the fly less 1 lot sold; the shell has no lots
 
 
 def test_beta_has_data_from_settlements_even_when_the_legs_candles_are_sparse(tmp_path, create_synthetic_parquet):
@@ -274,11 +224,112 @@ def test_bz_legs_in_the_book_use_brent_and_the_panel_says_so(tmp_path):
 # ----------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# The VaR of the candidate: both methods of the VaR page
+# ----------------------------------------------------------------------
+
+
+def test_candidate_weights_view_the_book_as_the_var_page_does():
+    saved = {"CLZ26": contract("CLZ26", multiplier=500.0)}
+    legs = [{"symbol": "clz26", "ratio": 1}, {"symbol": "CLF27", "ratio": -2}, {"symbol": "CLG27", "ratio": 1}, {"symbol": "CLG27", "ratio": -1}, {"symbol": "", "ratio": 1}]
+    weights = candidate_dollar_weights(legs, saved.get, default_multiplier=250.0)
+    assert weights == {"CLZ26": 500.0, "CLF27": -500.0}  # the saved multiplier wins, then the typed one; legs that cancel or are blank drop out
+    assert candidate_dollar_weights([{"symbol": "CLF27", "ratio": 1}], lambda s: None) == {"CLF27": 1000.0}
+    fly = candidate_dollar_weights([{"symbol": "CLZ26-F27-G27", "ratio": 1}], lambda s: None, decompose=True)
+    assert fly == {"CLZ26": 1000.0, "CLF27": -2000.0, "CLG27": 1000.0}  # the same lot split into outrights
+
+
+def test_the_book_is_built_from_outright_dollar_weights():
+    book = [open_structure("fly", ["CLZ26-F27-G27"], [1], lots=2.0), open_structure("short", ["CLZ26"], [1], lots=1.0, direction="sell"),
+            open_structure("shell", ["CLH27"], [1], lots=0.0, status=StructureStatus.SHELL)]
+    assert dollar_weights(book, decompose=True) == {"CLZ26": 1000.0, "CLF27": -4000.0, "CLG27": 2000.0}  # 2 lots of the fly less 1 lot sold; the shell has no lots
+
+
+def test_the_monte_carlo_controls_are_shared_with_the_var_page(tmp_path):
+    repo = Repository(str(tmp_path / "x.db"))
+    default = load_mc_settings(repo)
+    assert (default.distribution, default.dist_params, default.n_simulations, default.vol_mode, default.lookback_days) == ("normal", {"mean": 0.0, "std": DEFAULT_MC_STD}, 10_000, "history", 60)
+    assert load_mc_settings(None).vol_mode == "history"
+    save_mc_settings(repo, "normal", 0.0, 0.2, -1.0, 1.0, 5000, VOL_FIXED, 90)
+    saved = load_mc_settings(repo)
+    assert (saved.dist_params, saved.n_simulations, saved.vol_mode, saved.lookback_days) == ({"mean": 0.0, "std": 0.2}, 5000, "fixed", 90)
+    save_mc_settings(repo, "uniform", 0.0, 0.2, -0.3, 0.4, 2000)
+    assert load_mc_settings(repo).dist_params == {"low": -0.3, "high": 0.4}
+    repo.set_setting(KEY_VAR_MC, {"distribution": "weird", "std": "abc", "n_simulations": 5, "vol_mode": "x", "lookback_days": 1})
+    bad = load_mc_settings(repo)
+    assert (bad.distribution, bad.dist_params, bad.n_simulations, bad.vol_mode, bad.lookback_days) == ("normal", {"mean": 0.0, "std": 0.5}, 100, "history", 10)  # bad values fall back, counts are clamped
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    repo = Repository(str(tmp_path / "builder.db"))
+    loader = DataLoader(str(tmp_path / "hist"), MockHistoricalAdapter())
+    fresh = Container(repository=repo, data_loader=loader)
+    monkeypatch.setattr(bc, "container", fresh)
+    return fresh
+
+
+def write_leg(create_synthetic_parquet, tmp_path, symbol, closes):
+    create_synthetic_parquet(tmp_path / "hist", symbol, closes=closes)
+
+
+def test_both_methods_agree_when_the_legs_move_like_a_normal_distribution(env, create_synthetic_parquet, tmp_path):
+    rng = np.random.default_rng(3)
+    write_leg(create_synthetic_parquet, tmp_path, "CLZ26", 75 + np.cumsum(rng.normal(0, 0.12, 300)))  # about 0.12 points a day
+    save_mc_settings(env.repository, "normal", 0.0, 0.5, -1.0, 1.0, 20_000, "history", 250)  # a long window: both methods see 250 days
+    var = bc._candidate_var({"CLZ26": 1000.0}, 5, 20)
+    history, mc = var["historical"], var["mc"]
+    assert history["observations"] == 250 and history["var_95"] > 0
+    assert mc["vol_mode"] == "history" and mc["sigma"]["CLZ26"] == pytest.approx(0.12, rel=0.15)
+    assert mc["var_95"] == pytest.approx(history["var_95"], rel=0.25)  # the two methods agree up to sampling noise
+    assert mc["var_95"] == pytest.approx(1.645 * 1000 * mc["sigma"]["CLZ26"], rel=0.06)  # one leg: 1.645 sigma
+
+
+def test_the_monte_carlo_no_longer_shakes_every_leg_by_half_a_point(env, create_synthetic_parquet, tmp_path):
+    rng = np.random.default_rng(4)
+    write_leg(create_synthetic_parquet, tmp_path, "CLZ26-F27-G27", 0.5 + np.cumsum(rng.normal(0, 0.03, 300)))  # a fly moves about 3 ticks a day
+    history_mode = bc._candidate_var({"CLZ26-F27-G27": 1000.0}, 5, 20)["mc"]["var_95"]
+    save_mc_settings(env.repository, "normal", 0.0, 0.5, -1.0, 1.0, 10_000, VOL_FIXED, 60)
+    fixed = bc._candidate_var({"CLZ26-F27-G27": 1000.0}, 5, 20)["mc"]
+    assert fixed["vol_mode"] == "fixed" and fixed["var_95"] == pytest.approx(1.645 * 500, rel=0.06)  # the old behaviour: $500 a day per lot
+    assert history_mode < fixed["var_95"] / 10  # a fly's own size gives a VaR an order of magnitude lower
+
+
+def test_the_candidate_var_follows_whatever_the_var_page_was_set_to(env):
+    save_mc_settings(env.repository, "normal", 0.0, 0.5, -1.0, 1.0, 10_000, VOL_FIXED, 60)
+    base = bc._candidate_var({"CLZ26": 1000.0}, 5, 20)["mc"]["var_95"]
+    save_mc_settings(env.repository, "normal", 0.0, 0.1, -1.0, 1.0, 10_000, VOL_FIXED, 60)
+    assert bc._candidate_var({"CLZ26": 1000.0}, 5, 20)["mc"]["var_95"] == pytest.approx(base / 5, rel=0.12)
+    save_mc_settings(env.repository, "uniform", 0.0, 0.5, -0.2, 0.2, 10_000, VOL_FIXED, 60)
+    uniform = bc._candidate_var({"CLZ26": 1000.0}, 5, 20)["mc"]
+    assert uniform["distribution"] == "uniform" and uniform["var_95"] == pytest.approx(0.9 * 200, rel=0.1)  # 5th percentile of U(-0.2, 0.2) x $1,000
+
+
+def test_a_spread_hedges_itself_in_the_var(env, create_synthetic_parquet, tmp_path):
+    closes = walk(120, 8)
+    for symbol, noise in (("CLZ26", 0.0), ("CLF27", 0.05)):  # two legs that move together
+        write_leg(create_synthetic_parquet, tmp_path, symbol, closes + np.random.default_rng(1).normal(0, noise, 120))
+    together = bc._candidate_var({"CLZ26": 1000.0, "CLF27": -1000.0}, 5, 20)
+    alone = bc._candidate_var({"CLZ26": 1000.0}, 5, 20)
+    assert together["mc"]["var_95"] < 0.5 * alone["mc"]["var_95"] and together["historical"]["var_95"] < 0.5 * alone["historical"]["var_95"]
+
+
+def test_a_leg_without_history_is_reported_not_hidden(env):
+    var = bc._candidate_var({"CLZ26": 1000.0, "CLF27": -1000.0}, 5, 20)
+    assert "No price data" in var["historical"]["error"]
+    assert any("fixed size" in w for w in var["mc"]["warnings"]) and any("uncorrelated" in w for w in var["mc"]["warnings"])
+
+
+# ----------------------------------------------------------------------
+# The button end to end
+# ----------------------------------------------------------------------
+
+
 def test_refresh_correlation_fills_all_three_panels(env, create_synthetic_parquet, tmp_path):
     index = utc_index(150)
     settlements = FakeSettlements({s: pd.Series(walk(150, seed), index=index) for s, seed in (("CLZ26", 1), ("CLF27", 2), ("CLG27", 3))})
     env.settlements = settlements
-    for symbol in ("CLZ26-F27", "CLF27-G27"):  # the quoted legs' own candles, for the Monte Carlo correlation
+    for symbol in ("CLZ26-F27", "CLF27-G27"):  # the quoted legs' own candles, for the Monte Carlo and historical VaR
         create_synthetic_parquet(tmp_path / "hist", symbol, n_days=150, seed=len(symbol))
     existing = open_structure("Open spread", ["CLZ26-F27"], [1], lots=3.0)
     env.repository.save_contract(contract("CLZ26-F27"))
@@ -286,5 +337,6 @@ def test_refresh_correlation_fills_all_three_panels(env, create_synthetic_parque
     table, rows, var_panel, beta_panel = bc.check_correlation(1, ["CLF27-G27"], [1], "outright", 1000)
     assert [r["existing_structure"] for r in rows][0] == "Open spread" and rows[0]["correlation"] is not None
     assert "Correlated when the correlation is +0.35 or higher" in str(table)
-    assert "VaR 95% (1 lot)" in str(var_panel) and "Same Monte Carlo as the VaR & Scenarios page" in str(var_panel) and "std 0.5" in str(var_panel)
+    text = str(var_panel)
+    assert "Historical simulation" in text and "Monte Carlo" in text and "VaR 95% (1 lot)" in text and "Same methods and settings as the VaR & Scenarios page" in text
     assert "Lots to Match" in str(beta_panel) and "Lots to Hedge" in str(beta_panel) and "daily settlements" in str(beta_panel)

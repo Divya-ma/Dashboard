@@ -45,7 +45,8 @@ _HIGH_THRESHOLD = 0.7
 # Floor for the portfolio-correlation-check fallback below: below this many aligned
 # observations no correlation is attempted at all, matching DataLoader.align_series'
 # own _MIN_COMMON_DATES floor.
-_MIN_CORRELATION_OBSERVATIONS = 20
+MIN_COMMON_DAYS = 20  # fewest shared daily changes any correlation in the app is computed from
+_MIN_CORRELATION_OBSERVATIONS = MIN_COMMON_DAYS
 
 
 def _validate_window(window: int) -> None:
@@ -69,7 +70,7 @@ def beta_window(rolling: int, lookback: int) -> int:
     return max(30, rolling + lookback - 1)
 
 
-def _daily_correlations(a: pd.Series, b: pd.Series, rolling: int) -> pd.Series:
+def daily_correlations(a: pd.Series, b: pd.Series, rolling: int) -> pd.Series:
     """Step 1: per-day Pearson correlation over the last `rolling` days; NaN where undefined."""
     return a.rolling(rolling).corr(b).replace([np.inf, -np.inf], np.nan).clip(-1.0, 1.0)
 
@@ -89,7 +90,7 @@ def lookback_average_correlation(
     aligned = pd.concat([series_a, series_b], axis=1, join="inner").dropna().sort_index()
     if aligned.empty:
         raise InsufficientDataError(f"{series_a.name} and {series_b.name} share no common trading days.")
-    daily = _daily_correlations(aligned.iloc[:, 0], aligned.iloc[:, 1], rolling).iloc[-lookback:].dropna()
+    daily = daily_correlations(aligned.iloc[:, 0], aligned.iloc[:, 1], rolling).iloc[-lookback:].dropna()
     if daily.empty:
         raise InsufficientDataError(
             f"No {rolling}-day correlation is defined for {series_a.name} vs {series_b.name} "
@@ -123,19 +124,14 @@ def calculate_correlation(
     """Correlation of two symbols: the average over the last `lookback` days of the daily
     `rolling`-day Pearson correlation of their price differences (see the module docstring).
 
-    Needs rolling + lookback - 1 common days. Raises InsufficientDataError if fewer are
-    available (or no day has a defined value). Never returns NaN. Result is in [-1.0, 1.0].
+    The two symbols are aligned on their own common dates (at least MIN_COMMON_DAYS of them); if fewer than
+    `lookback` days have a value the average uses the days there are, exactly as every other page does
+    (lookback_average_correlation). Raises InsufficientDataError when there is nothing to average. Never
+    returns NaN. Result is in [-1.0, 1.0].
     """
     _validate_rolling(rolling)
     _validate_lookback(lookback)
-    needed = rolling + lookback - 1
-    aligned_a, aligned_b = _load_aligned(symbol_a, symbol_b, needed, data_loader, start, end)
-    if len(aligned_a) < needed:
-        raise InsufficientDataError(
-            f"Insufficient data for correlation of {symbol_a} and {symbol_b}: "
-            f"{len(aligned_a)} aligned observations available, a {rolling}-day rolling window over a "
-            f"{lookback}-day lookback requires {needed}."
-        )
+    aligned_a, aligned_b = _load_aligned(symbol_a, symbol_b, MIN_COMMON_DAYS, data_loader, start, end)
     value, _ = lookback_average_correlation(aligned_a, aligned_b, rolling, lookback)
     return value
 
@@ -363,7 +359,7 @@ def correlate_structures(
 # ----------------------------------------------------------------------
 
 # Fewest common daily observations a heatmap will be computed from.
-MIN_OBSERVATIONS = 5
+MIN_OBSERVATIONS = MIN_COMMON_DAYS
 
 _TENOR_RE = re.compile(r"[FGHJKMNQUVXZ]\d{2}")
 
@@ -393,63 +389,71 @@ def build_correlation_matrix_from_series(
 ) -> tuple[pd.DataFrame, int]:
     """Correlation matrix of pre-built price-difference series (see the module docstring).
 
-    Series are inner-joined on date; if `as_of` is given, dates after it are dropped first (so
-    the matrix reflects the portfolio as it stood on that date). Each cell is the average over
-    the last `lookback` days of the daily `rolling`-day correlation. Returns (matrix,
-    lookback_days_used): fewer than `lookback` if the history is short. A pair with no defined
-    value is NaN, as is a series with no variance. Raises InsufficientDataError if there are
-    fewer than 2 series, fewer than MIN_OBSERVATIONS common days, or fewer than `rolling` days.
+    Each cell is lookback_average_correlation of that PAIR (the two series aligned on their own common dates), so a
+    cell does not change when another item is added to the watchlist and the Heatmap agrees with the Summary table
+    and the Time Series. If `as_of` is given, dates after it are dropped first (the matrix as the portfolio stood
+    then). Returns (matrix, lookback_days_used): the fewest days any cell averaged, up to `lookback`. A pair with fewer
+    than MIN_COMMON_DAYS common days or no defined value is NaN, as is a series with no variance on the diagonal.
+    Raises InsufficientDataError if there are fewer than 2 series or no pair could be computed.
     """
     _validate_rolling(rolling)
     _validate_lookback(lookback)
     if len(series_by_label) < 2:
         raise InsufficientDataError("Need at least 2 valid series to compute a correlation matrix.")
-    aligned = pd.concat(list(series_by_label.values()), axis=1, join="inner", keys=list(series_by_label))
-    aligned = aligned.dropna().sort_index()
-    if as_of is not None:
-        aligned = aligned[aligned.index <= pd.Timestamp(as_of, tz="UTC")]
-    if len(aligned) < MIN_OBSERVATIONS:
+    limit = pd.Timestamp(as_of, tz="UTC") if as_of is not None else None
+    series = {label: (s[s.index <= limit] if limit is not None else s).dropna().sort_index() for label, s in series_by_label.items()}
+    labels = list(series)
+    values = np.full((len(labels), len(labels)), np.nan)
+    used_min, reasons = lookback, []
+    for i, a in enumerate(labels):
+        values[i, i] = 1.0 if len(series[a]) > 1 and np.std(series[a].to_numpy(dtype=float)) > 0 else np.nan
+        for j in range(i + 1, len(labels)):
+            b = labels[j]
+            common = series[a].index.intersection(series[b].index)
+            if len(common) < max(MIN_COMMON_DAYS, rolling):
+                reasons.append(f"{a} / {b}: {len(common)} common days")
+                continue
+            try:
+                value, used = lookback_average_correlation(series[a], series[b], rolling, lookback)
+            except InsufficientDataError as exc:
+                reasons.append(str(exc))
+                continue
+            values[i, j] = values[j, i] = value
+            used_min = min(used_min, used)
+    if not np.isfinite(values[np.triu_indices(len(labels), 1)]).any():
         as_of_desc = f" as of {as_of}" if as_of is not None else ""
         raise InsufficientDataError(
-            f"Only {len(aligned)} common days across the selected series{as_of_desc}; "
-            f"at least {MIN_OBSERVATIONS} are needed."
+            f"No pair has enough shared history{as_of_desc}: at least {max(MIN_COMMON_DAYS, rolling)} common days are needed"
+            + (f" ({reasons[0]})." if reasons else ".")
         )
-    if len(aligned) < rolling:
-        raise InsufficientDataError(
-            f"Only {len(aligned)} common days across the selected series; a {rolling}-day rolling window needs at least {rolling}."
-        )
-    labels = list(series_by_label)
-    span = aligned.iloc[-(rolling + lookback - 1):]
-    values = np.full((len(labels), len(labels)), np.nan)
-    for i, a in enumerate(labels):
-        for j, b in enumerate(labels):
-            if j < i:
-                values[i, j] = values[j, i]
-            elif i == j:
-                values[i, j] = 1.0 if np.std(span[a].to_numpy(dtype=float)) > 0 else np.nan
-            else:
-                daily = _daily_correlations(aligned[a], aligned[b], rolling).iloc[-lookback:].dropna()
-                if not daily.empty:
-                    values[i, j] = float(daily.mean())
-    return pd.DataFrame(values, index=labels, columns=labels), min(lookback, len(aligned) - rolling + 1)
+    return pd.DataFrame(values, index=labels, columns=labels), used_min
 
 
 def structure_difference_series(structure: Structure, data_loader: DataLoader) -> pd.Series:
     """Daily synthetic PnL-difference series of a structure, in point x lots.
 
-    structure_diff[t] = sum(leg_diff[t] * ratio * side * lots) over the legs, where side is
-    +1 for a buy and -1 for a sell. `ratio` keeps the leg's own sign and size (a fly's -2
-    body) so it agrees with the PnL engine. Legs are inner-joined on date. Raises
-    CrudeOilRiskError if any leg has no usable local price history.
+    The structure's price is built first, S[t] = sum(close[t] * ratio * side * lots) over the legs on the dates where
+    EVERY leg has a close, and the daily difference is taken afterwards (core.correlation.structure_series), so a leg
+    with a missing day cannot mix a one-day change with a two-day one. `side` is +1 for a buy and -1 for a sell and
+    `ratio` keeps the leg's own sign and size (a fly's -2 body), so it agrees with the PnL engine. Raises
+    CrudeOilRiskError if any leg has no usable LOCAL price history (nothing is backfilled here).
     """
-    terms = []
+    weights: dict[str, float] = {}
     for leg in structure.legs:
-        diffs = _load_local_differences(leg.contract.symbol, data_loader)
         side = 1 if leg.direction == "buy" else -1
-        terms.append(diffs * (leg.ratio * side * leg.lots))
-    combined = pd.concat(terms, axis=1, join="inner").sum(axis=1)
-    combined.name = structure.name
-    return combined
+        weights[leg.contract.symbol] = weights.get(leg.contract.symbol, 0.0) + leg.ratio * side * leg.lots
+    for symbol in weights:
+        if data_loader.get_available_date_range(symbol) is None:
+            raise CrudeOilRiskError(f"no local price data for {symbol}")
+    built = structure_series(weights, data_loader)
+    if built.series is None:
+        raise CrudeOilRiskError(
+            f"no price history for {', '.join(built.missing)}" if built.missing
+            else f"fewer than {MIN_COMMON_DAYS} shared trading days across the legs of {structure.name}"
+        )
+    series = built.series.copy()
+    series.name = structure.name
+    return series
 
 
 def _load_local_differences(symbol: str, data_loader: DataLoader) -> pd.Series:

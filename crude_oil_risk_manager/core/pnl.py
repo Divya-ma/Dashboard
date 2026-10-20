@@ -9,6 +9,7 @@ standard library.
 import math
 from datetime import date, datetime, timezone
 
+from core.positions import net_lots_by_product_and_symbol, signed_lots
 from core.models import Leg, PnLRecord, Structure, StructureStatus, Trade, TradeEventType
 
 _EXIT_EVENT_TYPES = {TradeEventType.PARTIAL_EXIT, TradeEventType.FULL_EXIT, TradeEventType.ROLL}
@@ -251,8 +252,8 @@ def calculate_portfolio_pnl(
     open structures only. Realized P&L booked by CLOSED structures is added to
     `total_realized_all_time` (open + closed), so it does not vanish when a structure
     closes; pass `closed_structures` and their trades to include it.
-    net_lots_by_product sums ratio * lots per product across all legs of
-    all included structures. largest_winner/largest_loser are the
+    net_lots_by_product sums ratio x side x lots (a sold leg counts negative, as everywhere
+    else: core.positions) per product across all legs of all included structures. largest_winner/largest_loser are the
     structures with the highest/lowest total P&L (unrealized + realized,
     net of transaction costs), or None if there are no open structures.
 
@@ -302,7 +303,7 @@ def calculate_portfolio_pnl(
             if not leg.is_traded:
                 continue
             product = leg.contract.product
-            net_lots_by_product[product] = net_lots_by_product.get(product, 0.0) + (leg.ratio * leg.lots)
+            net_lots_by_product[product] = net_lots_by_product.get(product, 0.0) + signed_lots(leg)
 
     closed_realized = sum(
         calculate_net_realized_pnl((closed_trades_by_structure or {}).get(s.structure_id, []))
@@ -447,23 +448,9 @@ def calculate_margin_efficiency(total_pnl: float, margin_used: float) -> float |
 
 
 def calculate_net_exposure(structures: list[Structure]) -> dict[str, dict[str, float]]:
-    """Net lots per contract month, summed across ALL structures.
+    """Net lots per contract symbol, summed across ALL structures passed in (whatever their status).
 
-    Returns {product_code: {contract_symbol: net_lots, ...}, ...}, summing
-    ratio * lots for every traded leg (leg.is_traded == True) sharing that
-    contract symbol, across every structure passed in (regardless of
-    structure status).
-
-    This is the single source of truth for the exposure map and VaR — do
-    not reimplement this calculation elsewhere.
+    Returns {product_code: {contract_symbol: net_lots, ...}, ...}, summing ratio x side x lots for every traded leg
+    (a sold leg counts negative). The sum itself lives in core.positions, shared with every other page.
     """
-    exposure: dict[str, dict[str, float]] = {}
-    for structure in structures:
-        for leg in structure.legs:
-            if not leg.is_traded:
-                continue
-            product = leg.contract.product
-            symbol = leg.contract.symbol
-            product_map = exposure.setdefault(product, {})
-            product_map[symbol] = product_map.get(symbol, 0.0) + (leg.ratio * leg.lots)
-    return exposure
+    return net_lots_by_product_and_symbol(structures)

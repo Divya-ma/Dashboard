@@ -21,7 +21,6 @@ KEY_PNL_STOP = "alert_portfolio_pnl_stop"
 KEY_STRUCTURE_MAX_LOSS = "alert_structure_max_loss"
 KEY_STALENESS = "staleness_threshold_seconds"
 KEY_MARGIN_LIMIT = "margin_limit"
-KEY_ROLL_WARNING_DAYS = "roll_warning_days"
 KEY_VAR_CONFIDENCE = "var_confidence"
 # Correlation = average over the last LOOKBACK days of the daily ROLLING-day correlation
 # (core.correlation). New keys, so values saved under the old single-window settings
@@ -85,7 +84,7 @@ def validate_token(raw) -> str:
 
 
 def validate_thresholds(
-    pnl_stop, structure_max_loss, staleness_seconds, margin_limit, roll_warning_days
+    pnl_stop, structure_max_loss, staleness_seconds, margin_limit
 ) -> dict[str, float | int]:
     """Validate the risk/alert thresholds and return {settings_key: value}."""
     pnl_stop = parse_number(pnl_stop, "Portfolio PnL Stop")
@@ -103,9 +102,6 @@ def validate_thresholds(
         KEY_STRUCTURE_MAX_LOSS: structure_max_loss,
         KEY_STALENESS: parse_number(staleness_seconds, "Data Staleness Threshold", minimum=1, maximum=3600),
         KEY_MARGIN_LIMIT: parse_number(margin_limit, "Portfolio Margin Limit", minimum=0),
-        KEY_ROLL_WARNING_DAYS: parse_number(
-            roll_warning_days, "Roll Warning days", minimum=0, maximum=90, integer=True
-        ),
     }
 
 

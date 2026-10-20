@@ -190,6 +190,20 @@ def _feed_curves() -> None:
         logger.exception("Curve engine update failed")
 
 
+def _keep_history_fresh() -> None:
+    """The settlements are the app's price history (correlation, VaR, beta): make sure their daily update has run.
+
+    Cheap when nothing is due (a date comparison); when due it starts the OI/settlement download in the background,
+    exactly as opening the OI page would. Never raises."""
+    service = container.oi_service
+    if service is None:
+        return
+    try:
+        service.ensure_fresh()
+    except Exception:  # noqa: BLE001 - the live poll must not depend on the history update
+        logger.exception("Settlement history refresh check failed")
+
+
 def _last_known_stale():
     """Last cached prices with every entry flagged stale (used when a poll fails)."""
     cache = container.live_cache
@@ -248,6 +262,7 @@ def fetch_live_prices(n_intervals):
     cache.is_stale = is_stale
 
     _feed_curves()
+    _keep_history_fresh()
     _save_pnl_records(prices)
     return prices, label, stale_indicator(is_stale), True
 

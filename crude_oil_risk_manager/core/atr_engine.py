@@ -25,6 +25,7 @@ import pandas as pd
 
 from core.atr_calc import atr_frame
 from core.atr_data import instrument_universe
+from core.hedge import slope_and_corr
 from core.oi_data import EXPIRED_AFTER_DAYS
 from core.oi_monitor import MIN_BASELINE, _baseline
 from core.user_settings import parse_number
@@ -104,15 +105,6 @@ class PairHedge:
     last_day: date | None
 
 
-def _beta_corr(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
-    """Minimum-variance hedge (y on x: units of x per unit of y) and the correlation of the changes."""
-    if len(x) < 3 or np.var(x, ddof=1) <= 0:
-        return np.nan, np.nan
-    beta = float(np.cov(y, x, ddof=1)[0, 1] / np.var(x, ddof=1))
-    corr = float(np.corrcoef(y, x)[0, 1]) if np.var(y, ddof=1) > 0 else np.nan
-    return beta, corr
-
-
 def pair_hedge(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, window: int) -> PairHedge | None:
     """Hedge a position in A with B. Frames are indexed by date with columns close and atr (core.atr_calc.atr_frame).
 
@@ -126,8 +118,8 @@ def pair_hedge(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, windo
         return None
     change = both.diff().dropna()
     tail = change.iloc[-max(int(window), 2):]
-    beta_w, corr_w = _beta_corr(tail["b"].to_numpy(), tail["a"].to_numpy())
-    beta_all, corr_all = _beta_corr(change["b"].to_numpy(), change["a"].to_numpy())
+    beta_w, corr_w = slope_and_corr(tail["a"].to_numpy(), tail["b"].to_numpy())
+    beta_all, corr_all = slope_and_corr(change["a"].to_numpy(), change["b"].to_numpy())
     unhedged = float(tail["a"].std(ddof=1)) if len(tail) > 1 else np.nan
     residual = float((tail["a"] - beta_w * tail["b"]).std(ddof=1)) if len(tail) > 1 and np.isfinite(beta_w) else np.nan
     last_a, last_b = float(atr_a.iloc[-1]), float(atr_b.iloc[-1])
@@ -357,11 +349,7 @@ class AtrEngine:
                     now = float(atr.iloc[-1][other] / atr.iloc[-1][live_front])
                     label = self.universe[other].label
             ratios = np.array(ratios)
-            beta = corr = np.nan
-            if len(dx) > 5 and np.var(dx) > 0:
-                dxa, dya = np.array(dx), np.array(dy)
-                beta = float(np.cov(dya, dxa, ddof=1)[0, 1] / np.var(dxa, ddof=1))
-                corr = float(np.corrcoef(dya, dxa)[0, 1]) if np.var(dya) > 0 else np.nan
+            beta, corr = slope_and_corr(dy, dx, min_obs=6)  # y = the k-th contract's changes, x = the front's
             rows.append({
                 "position": k, "label": label, "days": int(len(ratios)), "now": now,
                 "median": float(np.median(ratios)) if len(ratios) else np.nan,

@@ -1,5 +1,5 @@
 """Live market data adapter implementations."""
 
-from adapters.live.vendor import VendorLiveAdapter
+from adapters.live.fairvalue import FairValueLiveAdapter
 
-__all__ = ["VendorLiveAdapter"]
+__all__ = ["FairValueLiveAdapter"]

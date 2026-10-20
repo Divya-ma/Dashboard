@@ -182,6 +182,13 @@ def month_token(month: int, year: int) -> str:
     return f"{MONTH_TO_LETTER[month]}{year % 100:02d}"
 
 
+def product_of_symbol(symbol: str | None) -> str | None:
+    """CL or BRN from an API-form contract symbol (BRN contracts are CO...), or None for anything else."""
+    if not symbol:
+        return None
+    return next((code for code, spec in PRODUCTS.items() if symbol.startswith(spec.api_code)), None)
+
+
 def parse_contract(symbol: str) -> tuple[str, int, int]:
     """("COZ26") -> ("CO", 12, 2026). Works on the first leg of a spread/fly symbol too."""
     front = symbol.split("-")[0]

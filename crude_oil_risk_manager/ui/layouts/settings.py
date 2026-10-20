@@ -71,10 +71,6 @@ def _thresholds_section() -> dbc.AccordionItem:
                 "Portfolio Margin Limit ($)",
                 _number_input("settings-margin-limit", settings.DEFAULT_MARGIN_LIMIT),
             ),
-            _field(
-                "Roll Warning (days before expiry)",
-                _number_input("settings-roll-warning-days", settings.ROLL_WARNING_DAYS_BEFORE_EXPIRY),
-            ),
             dbc.Button("Save Thresholds", id="settings-save-thresholds", color="primary"),
             html.Div("", id="settings-thresholds-feedback", style=_STATUS_STYLE),
         ],

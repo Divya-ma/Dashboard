@@ -36,9 +36,6 @@ BACKFILL_DAYS = 365 * 3
 # risk) and as a hedge when it is at or below -this. (core.correlation.classify_correlation's own default is 0.7.)
 CORRELATION_FLAG_THRESHOLD = 0.35
 
-# Dollars per point of one lot when a contract has not been saved and no multiplier has been typed in yet.
-FALLBACK_MULTIPLIER = 1000.0
-
 EVENT_TEMPLATE = "template"
 EVENT_ADD = "add"
 EVENT_REMOVE = "remove"
@@ -264,29 +261,6 @@ def structure_symbol(structure: Structure) -> str | None:
 
 def _leg_dicts(structure: Structure) -> list[dict]:
     return [{"symbol": leg.contract.symbol, "ratio": leg.ratio} for leg in structure.legs]
-
-
-def candidate_leg_dollar_weights(legs: list[dict], get_contract, default_multiplier: float | None = None) -> dict[str, float]:
-    """Dollar P&L per 1.0-point move of each LEG SYMBOL, for 1 lot of the candidate structure.
-
-    This is the same view of a book the VaR page takes (core.var.leg_dollar_weights): a leg is an exchange-quoted
-    instrument and is used as it is, never decomposed; weight[symbol] = sum(ratio * multiplier) over the legs that use
-    that symbol. The multiplier is the saved contract's, else the one typed in the builder, else FALLBACK_MULTIPLIER.
-    Symbols whose legs cancel are dropped.
-    """
-    weights: dict[str, float] = {}
-    for leg in legs:
-        symbol = normalize_symbol(leg.get("symbol"))
-        try:
-            ratio = float(leg.get("ratio") or 0)
-        except (TypeError, ValueError):
-            ratio = 0.0
-        if not symbol or ratio == 0:
-            continue
-        contract = get_contract(symbol)
-        multiplier = contract.multiplier if contract is not None else (default_multiplier or FALLBACK_MULTIPLIER)
-        weights[symbol] = weights.get(symbol, 0.0) + ratio * multiplier
-    return {symbol: weight for symbol, weight in weights.items() if abs(weight) > 1e-9}
 
 
 def check_portfolio_correlation(

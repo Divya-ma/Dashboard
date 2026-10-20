@@ -4,7 +4,7 @@ The shock size of each instrument is its previous trading day's True Range,
 TR = max(High - Low, |High - PrevClose|, |Low - PrevClose|), read from the local
 daily Parquet. Every instrument uses its own TR; nothing is a uniform shock.
 The PnL impact of a shock is shock * the instrument's dollar weight
-(core.var.leg_dollar_weights), i.e. sum(shock * ratio * side * lots * multiplier)
+(core.positions.dollar_weights), i.e. sum(shock * ratio * side * lots * multiplier)
 over the legs on that instrument.
 """
 

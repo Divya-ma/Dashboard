@@ -116,24 +116,39 @@ def test_matrix_from_series_perfect_and_negative_correlation():
 
 
 def test_matrix_uses_all_common_days_when_lookback_is_longer():
-    a, b = diff_series(np.random.default_rng(1).normal(size=12)), diff_series(np.random.default_rng(2).normal(size=12))
+    a, b = diff_series(np.random.default_rng(1).normal(size=30)), diff_series(np.random.default_rng(2).normal(size=30))
     _, n = build_correlation_matrix_from_series({"A": a, "B": b}, rolling=5, lookback=90)
-    assert n == 8  # 12 common days, a 5-day window: 8 daily values exist
+    assert n == 26  # 30 common days, a 5-day window: 26 daily values exist
 
 
 def test_matrix_aligns_on_common_dates_and_takes_the_latest_window():
-    long = diff_series(np.arange(50.0) % 7)
-    short = diff_series(np.arange(50.0) % 5).iloc[20:]  # starts later
+    long = diff_series(np.arange(60.0) % 7)
+    short = diff_series(np.arange(60.0) % 5).iloc[25:]  # starts later
     _, n = build_correlation_matrix_from_series({"A": long, "B": short}, rolling=5, lookback=90)
-    assert n == 26  # 30 common days -> 26 daily 5-day values
+    assert n == 31  # 35 common days -> 31 daily 5-day values
+
+
+def test_a_cell_does_not_change_when_another_item_is_added():
+    """Every pair is aligned on its own common dates, so the Heatmap agrees with the Summary table whatever else is listed."""
+    rng = np.random.default_rng(21)
+    a = diff_series(rng.normal(size=80))
+    b = diff_series(0.5 * a.to_numpy() + rng.normal(size=80))
+    c = diff_series(rng.normal(size=80)).iloc[50:]  # a short-history item
+    pair, _ = build_correlation_matrix_from_series({"A": a, "B": b}, rolling=5, lookback=20)
+    triple, _ = build_correlation_matrix_from_series({"A": a, "B": b, "C": c}, rolling=5, lookback=20)
+    assert triple.loc["A", "B"] == pytest.approx(pair.loc["A", "B"])
+    assert np.isfinite(triple.loc["A", "C"])  # C has 30 days: enough for the floor of 20
+    summary = {(r["base"], r["target"]): r["avg"] for r in watchlist_pair_summary({"A": a, "B": b, "C": c}, 5, 20)}
+    assert triple.loc["A", "B"] == pytest.approx(summary[("A", "B")]) and triple.loc["A", "C"] == pytest.approx(summary[("A", "C")])
 
 
 def test_matrix_zero_variance_series_is_nan_not_an_error():
-    flat = diff_series(np.zeros(20))
-    moving = diff_series(np.random.default_rng(3).normal(size=20))
-    matrix, _ = build_correlation_matrix_from_series({"flat": flat, "moving": moving}, rolling=5, lookback=20)
+    flat = diff_series(np.zeros(30))
+    moving = diff_series(np.random.default_rng(3).normal(size=30))
+    other = diff_series(np.random.default_rng(4).normal(size=30))
+    matrix, _ = build_correlation_matrix_from_series({"flat": flat, "moving": moving, "other": other}, rolling=5, lookback=20)
     assert np.isnan(matrix.loc["flat", "moving"]) and np.isnan(matrix.loc["flat", "flat"])
-    assert matrix.loc["moving", "moving"] == 1.0
+    assert matrix.loc["moving", "moving"] == 1.0 and np.isfinite(matrix.loc["moving", "other"])
 
 
 def test_matrix_needs_two_series_and_enough_common_days():
@@ -147,7 +162,7 @@ def test_matrix_needs_two_series_and_enough_common_days():
         build_correlation_matrix_from_series({"A": diff_series(range(9)), "B": diff_series(range(9))}, rolling=1, lookback=5)
     with pytest.raises(ValueError):
         build_correlation_matrix_from_series({"A": diff_series(range(9)), "B": diff_series(range(9))}, rolling=3, lookback=0)
-    with pytest.raises(InsufficientDataError, match="rolling window needs at least 8"):
+    with pytest.raises(InsufficientDataError, match="common days"):
         build_correlation_matrix_from_series({"A": diff_series(range(7)), "B": diff_series(range(7))}, rolling=8, lookback=2)
 
 
@@ -260,9 +275,9 @@ def test_compute_mixed_instruments_and_structures_skips_invalid(make_data, loade
 
 
 def test_compute_reports_short_history(make_data, loader):
-    make_data(CLZ26=random_closes(15, 1), CLF27=random_closes(15, 2))
+    make_data(CLZ26=random_closes(30, 1), CLF27=random_closes(30, 2))
     result = compute_watchlist_correlation([instrument("CLZ26"), instrument("CLF27")], {}, 5, 90, loader)
-    assert result.error is None and result.observations == 10 and result.requested == 90 and result.rolling == 5
+    assert result.error is None and result.observations == 25 and result.requested == 90 and result.rolling == 5
 
 
 def test_compute_watchlist_correlation_as_of_restricts_to_that_date(make_data, loader):
@@ -563,9 +578,9 @@ def test_compute_heatmap_success_status_and_figure(env, make_data):
 
 
 def test_compute_heatmap_notes_short_history_and_skipped_items(env, make_data):
-    make_data(CLZ26=random_closes(20, 1), CLF27=random_closes(20, 2))
+    make_data(CLZ26=random_closes(30, 1), CLF27=random_closes(30, 2))
     figure, status = cc.compute_heatmap(1, [instrument("CLZ26"), instrument("CLF27"), instrument("NOPE26")], 5, 90, None)
-    assert "Only 15 days of history available (requested 90d)" in status.children
+    assert "Only 25 days of history available (requested 90d)" in status.children
     assert "Skipped: NOPE26" in status.children
 
 

@@ -1,23 +1,18 @@
 """Per-contract net exposure for the Exposure Map tab.
 
-Every traded leg of every open structure contributes ratio * side * lots, where
-side is +1 for a buy and -1 for a sell (the leg ratio carries the leg's own side
-within the structure, the direction flips a sold position). A leg whose symbol is
-itself a spread/fly is decomposed into its outright contracts with
-core.structure_utils.decompose_to_outrights, so the map is always per outright.
-
-core.exposure.calculate_net_exposure is deliberately not used here: it keeps
-exchange-quoted symbols intact (VaR needs their own price series) and ignores
-Leg.direction, whereas this map needs outrights and the sell sign.
+Every traded leg of every open structure contributes ratio x side x lots, where side is +1 for a buy and -1 for a
+sell (core.positions.signed_lots: the same rule as Home's net lots, the VaR and the beta panels). A leg whose symbol is
+itself a spread/fly is split into its outright contracts (core.positions.leg_outrights), so the map is always per outright.
+This module adds only what the map needs on top: gross long, gross short and the structures each outright comes from.
 """
 
 import calendar
 import logging
 
 from adapters.base import LETTER_TO_MONTH
-from core.exposure import filter_open_structures
 from core.models import Structure
-from core.structure_utils import decompose_to_outrights, parse_symbol
+from core.positions import filter_open_structures, leg_outrights
+from core.structure_utils import parse_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +43,7 @@ def build_exposure_map(structures: list[Structure]) -> list[dict]:
         for leg in structure.legs:
             if not leg.is_traded:
                 continue
-            signed_lots = leg.ratio * (1 if leg.direction == "buy" else -1) * leg.lots
-            try:
-                outrights = decompose_to_outrights(leg.contract.symbol, signed_lots)
-            except ValueError as exc:
-                logger.warning("Skipping leg %s of %s in the exposure map: %s", leg.contract.symbol, structure.name, exc)
-                continue
+            outrights = leg_outrights(leg, structure.name)
             for symbol, lots in outrights.items():
                 entry = totals.setdefault(
                     symbol, {"symbol": symbol, "net_lots": 0.0, "gross_long": 0.0, "gross_short": 0.0, "structures": []}

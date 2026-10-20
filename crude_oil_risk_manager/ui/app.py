@@ -30,7 +30,6 @@ from core.curve_compare import CurveCompare  # noqa: E402
 from core.curve_history import CurveHistoryStore  # noqa: E402
 from core.curve_service import CurveService  # noqa: E402
 from core.curve_store import PrevSettlementStore, SnapshotStore  # noqa: E402
-from core.data_loader import DataLoader  # noqa: E402
 from core.excel_correlation import ExcelCorrelationStore  # noqa: E402
 from core.atr_data import AtrStore  # noqa: E402
 from core.churn_data import ChurnStore  # noqa: E402
@@ -38,7 +37,7 @@ from core.churn_service import ChurnService  # noqa: E402
 from core.oi_data import OiStore  # noqa: E402
 from core.oi_service import OiService  # noqa: E402
 from core.quote_store import FairValueStore, QuoteStore  # noqa: E402
-from core.settlement_prices import SettlementPrices  # noqa: E402
+from core.settlement_prices import SettlementFirstLoader, SettlementPrices  # noqa: E402
 from core.structure_builder import active_composite_symbols  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_STALENESS  # noqa: E402
 from db.repository import Repository  # noqa: E402
@@ -113,7 +112,10 @@ container.repository = repository
 container.live_adapter = live_adapter
 container.historical_adapter = historical_adapter
 container.alert_manager = alert_manager
-container.data_loader = DataLoader(_resolve_path(settings.HISTORICAL_DATA_DIR), historical_adapter)
+# Settlements of CL and BRN are the app's price history; stored candles are the fallback (see SettlementFirstLoader).
+_oi_store = OiStore(_resolve_path(settings.OI_DATA_DIR))
+container.settlements = SettlementPrices(_oi_store)
+container.data_loader = SettlementFirstLoader(_resolve_path(settings.HISTORICAL_DATA_DIR), historical_adapter, container.settlements)
 container.excel_store = ExcelCorrelationStore(_resolve_path(settings.CORRELATION_UPLOADS_DIR))
 container.qh_api = qh_api
 
@@ -133,11 +135,9 @@ container.curve_compare = CurveCompare(
 )
 # OI / Volume / ATR page: daily OI of every outright; downloads only while that page is open.
 container.oi_service = OiService(
-    repository, qh_api, OiStore(_resolve_path(settings.OI_DATA_DIR)),
+    repository, qh_api, _oi_store,
     alert_manager=alert_manager, atr_store=AtrStore(_resolve_path(settings.ATR_DATA_DIR)),
 )
-
-container.settlements = SettlementPrices(container.oi_service.store)
 
 
 def _atr_lookup(product: str) -> dict[str, float]:

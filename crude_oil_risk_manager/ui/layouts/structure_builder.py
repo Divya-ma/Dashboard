@@ -32,7 +32,7 @@ CLASSIFICATION_DISPLAY = {
 
 EXPOSURE_HINT = "Enter leg symbols to see the net outright equivalent (per 1 lot of the structure)."
 CORRELATION_HINT = "Click 'Refresh Correlation' to compare against your active structures."
-VAR_HINT = "Click 'Refresh Correlation' to estimate this structure's 1-day VaR (the same Monte Carlo as the VaR & Scenarios page)."
+VAR_HINT = "Click 'Refresh Correlation' to estimate this structure's 1-day VaR (historical and Monte Carlo, as on the VaR & Scenarios page)."
 BETA_HINT = "Click 'Refresh Correlation' to see the lot size that would match or hedge the current portfolio."
 
 
@@ -141,30 +141,40 @@ def _draw_text(params: dict) -> str:
     return f"uniform from {params.get('low', 0):g} to {params.get('high', 0):g} points"
 
 
+def _var_block(title: str, detail: str, result: dict, accent: tuple[str, str]) -> html.Div:
+    """One method's two stat boxes with its title and a line saying what it is, or why it has no number."""
+    if result.get("error"):
+        body = html.Div(result["error"], style={**_MUTED, "fontSize": "13px"})
+    else:
+        body = html.Div(
+            [_stat_box("VaR 95% (1 lot)", f"${result['var_95']:,.0f}", accent[0]), _stat_box("VaR 99% (1 lot)", f"${result['var_99']:,.0f}", accent[1])],
+            style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "6px"},
+        )
+    parts = [html.Div(title, style={"color": COLORS["TEXT_PRIMARY"], "fontWeight": "bold", "fontSize": "14px", "marginBottom": "6px"}), body]
+    if not result.get("error"):
+        parts.append(html.Div(detail, style={**_MUTED, "fontSize": "12px"}))
+    for warning in result.get("warnings") or []:
+        parts.append(html.Div(warning, style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "12px", "marginTop": "4px"}))
+    return html.Div(parts, style={"marginBottom": "14px"})
+
+
 def render_structure_var(var_result: dict | None) -> html.Div:
-    """VaR 95%/99% (per 1 lot) for the candidate structure, or why it couldn't be computed."""
+    """VaR 95%/99% (per 1 lot) of the candidate by the historical and the Monte Carlo method of the VaR page."""
     if var_result is None:
         return html.Div("Enter at least one valid leg symbol first.", style={**_MUTED, "fontSize": "14px"})
-    if var_result.get("error"):
-        return html.Div(var_result["error"], style={**_MUTED, "fontSize": "14px"})
-    parts = [
-        html.Div(
-            [
-                _stat_box("VaR 95% (1 lot)", f"${var_result['var_95']:,.0f}", COLORS["ACCENT_YELLOW"]),
-                _stat_box("VaR 99% (1 lot)", f"${var_result['var_99']:,.0f}", COLORS["ACCENT_RED"]),
-            ],
-            style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "10px"},
-        ),
-        html.Div(
-            f"Same Monte Carlo as the VaR & Scenarios page: {var_result['distribution'].title()} draws ({_draw_text(var_result.get('dist_params') or {})} per symbol), "
-            f"{var_result['n_simulations']:,} simulations, legs {', '.join(var_result.get('symbols') or [])}; "
-            f"correlation: average over the last {var_result['lookback']}d of the {var_result['rolling']}d rolling value.",
-            style={**_MUTED, "fontSize": "13px"},
-        ),
-    ]
-    if var_result.get("warnings"):
-        parts.append(html.Div(" ".join(var_result["warnings"]), style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "13px", "marginTop": "6px"}))
-    return html.Div(parts)
+    history, mc = var_result.get("historical") or {"error": "Not worked out."}, var_result.get("mc") or {"error": "Not worked out."}
+    mc_detail = ""
+    if not mc.get("error"):
+        size = (f"each leg's own volatility over the last {mc['vol_lookback']}d" if mc.get("vol_mode") == "history"
+                else f"{_draw_text(mc.get('dist_params') or {})} per leg")
+        mc_detail = (f"{mc['distribution'].title()} draws, {size}; {mc['n_simulations']:,} simulations; "
+                     f"correlation: average over the last {mc['lookback']}d of the {mc['rolling']}d rolling value.")
+    return html.Div([
+        _var_block("Historical simulation", (f"The candidate's legs priced over the last {history['observations']} of {history['lookback']} days." if not history.get("error") else ""),
+                   history, (COLORS["ACCENT_YELLOW"], COLORS["ACCENT_RED"])),
+        _var_block("Monte Carlo", mc_detail, mc, (COLORS["ACCENT_YELLOW"], COLORS["ACCENT_RED"])),
+        html.Div(f"Legs: {', '.join(var_result.get('symbols') or [])}. Same methods and settings as the VaR & Scenarios page.", style={**_MUTED, "fontSize": "12px"}),
+    ])
 
 
 def render_structure_beta(beta_result: dict | None) -> html.Div:

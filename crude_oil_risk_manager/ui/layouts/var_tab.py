@@ -13,7 +13,8 @@ from dash.dash_table.Format import Format, Group, Scheme, Sign, Symbol
 
 from core.scenarios import KIND_PORTFOLIO
 from core.var import (
-    DEFAULT_MC_HIGH, DEFAULT_MC_LOW, DEFAULT_MC_MEAN, DEFAULT_MC_SIMULATIONS, DEFAULT_MC_STD, DISTRIBUTION_NORMAL, DISTRIBUTION_UNIFORM, load_mc_settings,
+    DEFAULT_MC_HIGH, DEFAULT_MC_LOW, DEFAULT_MC_MEAN, DEFAULT_MC_SIMULATIONS, DEFAULT_MC_STD, DISTRIBUTION_NORMAL, DISTRIBUTION_UNIFORM, VOL_FIXED, VOL_HISTORY,
+    load_mc_settings,
 )
 from ui.container import container
 from ui.layouts.correlation_tab import empty_figure
@@ -251,6 +252,10 @@ DISTRIBUTION_OPTIONS = [
     {"label": "Normal", "value": DISTRIBUTION_NORMAL},
     {"label": "Uniform", "value": DISTRIBUTION_UNIFORM},
 ]
+VOL_OPTIONS = [
+    {"label": "Each symbol's own (history)", "value": VOL_HISTORY},
+    {"label": "Fixed size (points)", "value": VOL_FIXED},
+]
 DEFAULT_DISTRIBUTION = DISTRIBUTION_NORMAL
 DEFAULT_MEAN = DEFAULT_MC_MEAN
 DEFAULT_STD = DEFAULT_MC_STD
@@ -270,7 +275,8 @@ def _number_input(id_: str, value: float, label: str, step: float = 0.1) -> html
 
 def var_scenario_layout() -> html.Div:
     """VaR section on top, scenario analysis below. The Monte Carlo controls start at what was last shown (the Structure Builder reads the same)."""
-    distribution, mc, simulations = load_mc_settings(container.repository)
+    saved = load_mc_settings(container.repository)
+    distribution, mc, simulations = saved.distribution, saved.dist_params, saved.n_simulations
     var_section = dbc.Card(
         dbc.CardBody(
             [
@@ -286,15 +292,17 @@ def var_scenario_layout() -> html.Div:
                 ),
                 html.Div(
                     [
+                        html.Span("Volatility", style={**_MUTED, "marginRight": "8px"}),
+                        dbc.Select(id="var-mc-vol", options=VOL_OPTIONS, value=saved.vol_mode, style={"width": "210px", "display": "inline-block", "marginRight": "16px"}),
                         html.Span("Distribution", style={**_MUTED, "marginRight": "8px"}),
                         dbc.Select(id="var-mc-distribution", options=DISTRIBUTION_OPTIONS, value=distribution, style={"width": "140px", "display": "inline-block", "marginRight": "16px"}),
                         html.Div(
-                            [_number_input("var-mc-mean", mc.get("mean", DEFAULT_MEAN), "Mean"), _number_input("var-mc-std", mc.get("std", DEFAULT_STD), "Std Dev", step=0.05)],
+                            [_number_input("var-mc-mean", mc.get("mean", DEFAULT_MEAN), "Mean"), _number_input("var-mc-std", mc.get("std", DEFAULT_STD), "Std Dev (fixed size)", step=0.05)],
                             id="var-mc-normal-params",
                             style={"display": "inline-block"},
                         ),
                         html.Div(
-                            [_number_input("var-mc-low", mc.get("low", DEFAULT_LOW), "Low"), _number_input("var-mc-high", mc.get("high", DEFAULT_HIGH), "High")],
+                            [_number_input("var-mc-low", mc.get("low", DEFAULT_LOW), "Low (fixed)"), _number_input("var-mc-high", mc.get("high", DEFAULT_HIGH), "High (fixed)")],
                             id="var-mc-uniform-params",
                             style={"display": "none"},
                         ),

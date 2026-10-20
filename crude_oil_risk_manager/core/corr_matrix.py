@@ -26,14 +26,16 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from core.correlation import _daily_correlations, beta_window
+from core.correlation import MIN_COMMON_DAYS, beta_window, daily_correlations
+from core.curve_calendar import FAMILY_WEIGHTS
+from core.hedge import rolling_slope
 from core.oi_data import contract_universe
 
 FAMILIES = ("outright", "spread", "fly", "dfly")
-WEIGHTS = {"outright": (1,), "spread": (1, -1), "fly": (1, -2, 1), "dfly": (1, -3, 3, -1)}
+WEIGHTS = FAMILY_WEIGHTS  # one definition of the structures: core.curve_calendar
 FAMILY_NAMES = {"outright": "outright", "spread": "spread", "fly": "fly", "dfly": "d-fly"}
 MAX_STRUCTURES = 30  # the OI universe reaches 36 months ahead; a dfly needs 3 more months than its count
-MIN_DAYS_ALIGNED = 3
+MIN_DAYS_ALIGNED = MIN_COMMON_DAYS  # the app-wide floor for a correlation (core.correlation)
 FRONT_DATA_GAP_DAYS = 7  # a contract whose settlements stopped this long before the as-of day is not the front
 
 
@@ -119,7 +121,7 @@ def pair_daily(target: pd.Series, base: pd.Series, rolling: int) -> pd.Series:
     aligned = pd.concat([target.rename("t"), base.rename("b")], axis=1, join="inner").dropna().sort_index()
     if len(aligned) < MIN_DAYS_ALIGNED:
         return pd.Series(dtype=float)
-    return _daily_correlations(aligned["t"], aligned["b"], rolling).dropna()
+    return daily_correlations(aligned["t"], aligned["b"], rolling).dropna()
 
 
 def lookback_value(daily: pd.Series, lookback: int, start: date | None = None) -> tuple[float, int]:
@@ -159,9 +161,8 @@ def rolling_beta(target: pd.Series, base: pd.Series, window: int) -> pd.DataFram
     aligned = pd.concat([target.rename("t"), base.rename("b")], axis=1, join="inner").dropna().sort_index()
     if len(aligned) < max(window, MIN_DAYS_ALIGNED):
         return pd.DataFrame(columns=["beta", "corr"])
-    var = aligned["b"].rolling(window).var()
-    beta = (aligned["t"].rolling(window).cov(aligned["b"]) / var.where(var > 0)).replace([np.inf, -np.inf], np.nan)
-    corr = _daily_correlations(aligned["t"], aligned["b"], window)
+    beta = rolling_slope(aligned["t"], aligned["b"], window)
+    corr = daily_correlations(aligned["t"], aligned["b"], window)
     return pd.DataFrame({"beta": beta, "corr": corr}).dropna(subset=["beta"])
 
 

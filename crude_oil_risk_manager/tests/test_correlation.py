@@ -64,10 +64,13 @@ def test_correlation_unrelated_series_near_zero(tmp_path, loader, create_synthet
 
 
 def test_correlation_insufficient_data_raises(tmp_path, loader, create_synthetic_parquet):
+    create_synthetic_parquet(tmp_path, "CLZ26", n_days=15, seed=1)
+    create_synthetic_parquet(tmp_path, "CLF27", n_days=15, seed=2)
+    with pytest.raises(InsufficientDataError):  # 14 days of changes: fewer than the 20 every correlation needs
+        calculate_correlation("CLZ26", "CLF27", 5, 60, loader)
     create_synthetic_parquet(tmp_path, "CLZ26", n_days=30, seed=1)
     create_synthetic_parquet(tmp_path, "CLF27", n_days=30, seed=2)
-    with pytest.raises(InsufficientDataError):  # 29 days of changes, but 5 + 60 - 1 = 64 are needed
-        calculate_correlation("CLZ26", "CLF27", 5, 60, loader)
+    assert -1.0 <= calculate_correlation("CLZ26", "CLF27", 5, 60, loader) <= 1.0  # 29 days of changes: the lookback average uses the days there are
 
 
 def test_correlation_zero_variance_raises_instead_of_nan(tmp_path, loader, create_synthetic_parquet):
@@ -110,13 +113,13 @@ def test_it_is_not_a_single_pearson_over_the_last_R_plus_L_days():
     assert averaged != pytest.approx(one_big_window)
 
 
-def test_defaults_5_and_20_need_24_common_days(tmp_path, loader, create_synthetic_parquet):
-    base = random_closes(24, seed=1)  # 23 diffs: one short
+def test_a_pair_needs_20_common_days_and_averages_the_days_there_are(tmp_path, loader, create_synthetic_parquet):
+    base = random_closes(20, seed=1)  # 19 diffs: one short of the floor
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
     create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
     with pytest.raises(InsufficientDataError):
         calculate_correlation("CLZ26", "CLF27", 5, 20, loader)
-    base = random_closes(25, seed=1)  # 24 diffs: exactly enough
+    base = random_closes(21, seed=1)  # 20 diffs: enough, though a full 20-day lookback of 5-day values needs 24
     create_synthetic_parquet(tmp_path, "CLZ26", closes=base)
     create_synthetic_parquet(tmp_path, "CLF27", closes=2 * base + 10)
     assert calculate_correlation("CLZ26", "CLF27", 5, 20, loader) == pytest.approx(1.0)

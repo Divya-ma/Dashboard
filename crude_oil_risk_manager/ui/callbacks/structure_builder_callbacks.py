@@ -19,14 +19,12 @@ from config.settings import settings
 from core.structure_builder import (
     ACTIVE_STRUCTURE_STATUSES,
     CORRELATION_FLAG_THRESHOLD,
-    FALLBACK_MULTIPLIER,
     EVENT_ADD,
     EVENT_REMOVE,
     EVENT_TEMPLATE,
     StructureBuildError,
     backfill_symbols_async,
     build_shell_structure,
-    candidate_leg_dollar_weights,
     check_portfolio_correlation,
     next_leg_rows,
     save_shell_structure,
@@ -40,7 +38,8 @@ from core.structure_utils import (
 )
 from core.correlation import beta_window, structure_series
 from core.user_settings import correlation_windows
-from core.var import beta_vs_portfolio, load_mc_settings, monte_carlo_var
+from core.positions import candidate_dollar_weights
+from core.var import beta_vs_portfolio, historical_var, load_mc_settings, monte_carlo_var
 from ui.callbacks.structures_callbacks import update_active_structures
 from ui.container import container
 from ui.layouts.shell import COLORS
@@ -204,52 +203,46 @@ def _multiplier(value) -> float | None:
     return number if number > 0 else None
 
 
-def _outright_dollar_weights(net_outright_weights: dict[str, float], default_multiplier: float | None) -> dict[str, float]:
-    """Dollar P&L per 1.0-point move, per outright, for 1 lot of the candidate structure (for the beta regression).
-
-    The multiplier is the saved contract's, else the one typed in the builder, else the 1,000-barrel default.
-    """
-    dollar_weights = {}
-    for symbol, weight in net_outright_weights.items():
-        contract = container.repository.get_contract(symbol)
-        multiplier = contract.multiplier if contract else (default_multiplier or FALLBACK_MULTIPLIER)
-        dollar_weights[symbol] = weight * multiplier
-    return dollar_weights
-
-
 def _candidate_var(leg_weights: dict[str, float], rolling: int, lookback: int) -> dict:
-    """Monte Carlo VaR of 1 lot of the candidate, exactly as the VaR & Scenarios page runs it.
+    """VaR of 1 lot of the candidate by BOTH methods of the VaR & Scenarios page, with the page's own settings.
 
-    Same function (core.var.monte_carlo_var), same positions view (the leg symbols as entered, each worth ratio x
-    multiplier dollars per point; see core.structure_builder.candidate_leg_dollar_weights), same draws (the
-    distribution, mean/std or low/high and number of simulations the VaR page last showed, saved by it; its defaults
-    until it has been opened), same correlation matrix (Pearson, the rolling window averaged over the lookback).
+    historical   the candidate's legs priced over the last N days (core.var.historical_var): what really happened.
+    monte carlo  core.var.monte_carlo_var with the distribution, simulation count and volatility choice the VaR page last
+                 showed (saved by it; its defaults until it has been opened), N being the page's lookback. By default each
+                 leg moves as much as it really does, so the two methods agree unless the returns are far from normal.
+    The positions are the legs as entered (core.positions.candidate_dollar_weights): ratio x multiplier dollars per point.
     """
-    distribution, dist_params, n_simulations = load_mc_settings(container.repository)
+    settings_mc = load_mc_settings(container.repository)
     try:
         container.data_loader.ensure_cached(list(leg_weights))  # one bulk backfill for legs never seen, not one call each
-    except Exception:  # noqa: BLE001 - a failed pre-warm only means the pairs without history are treated as uncorrelated
+    except Exception:  # noqa: BLE001 - a failed pre-warm only means the legs without history are skipped or left uncorrelated
         logger.exception("Pre-warm before the candidate VaR failed")
+    out: dict = {"symbols": sorted(leg_weights)}
     try:
-        result = monte_carlo_var(
-            leg_weights, container.data_loader, distribution, dist_params, rolling=rolling, lookback=lookback, n_simulations=n_simulations,
+        history = historical_var(leg_weights, settings_mc.lookback_days, container.data_loader)
+        out["historical"] = (
+            {"error": history.error} if history.error
+            else {"var_95": history.var[0.95], "var_99": history.var[0.99], "observations": history.observations,
+                  "lookback": settings_mc.lookback_days, "warnings": history.warnings}
         )
-    except Exception:  # noqa: BLE001 - the VaR card must say what happened, never crash the check
-        logger.exception("Candidate VaR failed")
-        return {"error": "Could not estimate the VaR; see the server log."}
-    if result.error:
-        return {"error": result.error}
-    return {
-        "var_95": result.var[0.95],
-        "var_99": result.var[0.99],
-        "distribution": result.distribution,
-        "dist_params": result.dist_params,
-        "n_simulations": result.n_simulations,
-        "rolling": rolling,
-        "lookback": lookback,
-        "symbols": result.symbols_included,
-        "warnings": result.warnings,
-    }
+    except Exception:  # noqa: BLE001 - one card failing must not hide the other
+        logger.exception("Candidate historical VaR failed")
+        out["historical"] = {"error": "Could not work out the historical VaR; see the server log."}
+    try:
+        mc = monte_carlo_var(
+            leg_weights, container.data_loader, settings_mc.distribution, settings_mc.dist_params, rolling=rolling, lookback=lookback,
+            n_simulations=settings_mc.n_simulations, vol_mode=settings_mc.vol_mode, vol_lookback=settings_mc.lookback_days,
+        )
+        out["mc"] = (
+            {"error": mc.error} if mc.error
+            else {"var_95": mc.var[0.95], "var_99": mc.var[0.99], "distribution": mc.distribution, "dist_params": mc.dist_params,
+                  "n_simulations": mc.n_simulations, "vol_mode": mc.vol_mode, "vol_lookback": mc.vol_lookback, "sigma": mc.sigma,
+                  "rolling": rolling, "lookback": lookback, "warnings": mc.warnings}
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Candidate Monte Carlo VaR failed")
+        out["mc"] = {"error": "Could not estimate the Monte Carlo VaR; see the server log."}
+    return out
 
 
 def _candidate_beta(dollar_weights: dict[str, float], portfolio: list, window: int) -> dict:
@@ -282,9 +275,9 @@ def check_correlation(n_clicks, symbols, ratios, template, multiplier=None):
     portfolio = repository.get_all_structures(status_filter=ACTIVE_STRUCTURE_STATUSES)
     rows = check_portfolio_correlation(legs, portfolio, rolling, lookback, container.data_loader, container.settlements)
 
-    leg_weights = candidate_leg_dollar_weights(legs, repository.get_contract, typed_multiplier)
+    leg_weights = candidate_dollar_weights(legs, repository.get_contract, typed_multiplier)
     var_result = _candidate_var(leg_weights, rolling, lookback)
-    beta_result = _candidate_beta(_outright_dollar_weights(net, typed_multiplier), portfolio, beta_window(rolling, lookback))
+    beta_result = _candidate_beta(candidate_dollar_weights(legs, repository.get_contract, typed_multiplier, decompose=True), portfolio, beta_window(rolling, lookback))
     return render_correlation_table(rows), rows, render_structure_var(var_result), render_structure_beta(beta_result)
 
 

@@ -44,10 +44,10 @@ class Contract(BaseModel):
         default="USD", description="Contract currency. Default USD; GBP for ICE Gasoil pence products."
     )
     expiry_date: date | None = Field(
-        default=None, description="Contract expiry date, when known. Used for roll warnings."
+        default=None, description="Contract expiry date, when known (stored; no page reads it yet)."
     )
     first_notice_date: date | None = Field(
-        default=None, description="First notice date, when known. Used for roll warnings."
+        default=None, description="First notice date, when known (stored; no page reads it yet)."
     )
 
     @field_validator("product")

@@ -248,3 +248,14 @@ def test_validate_open_time():
             validate_open_time(bad, "UTC")
     with pytest.raises(ValueError):
         validate_open_time("07:00", "Mars/Olympus")
+
+
+def test_historical_scale_respects_fat_tails_that_the_mad_ignores():
+    from core.curve_kinks import historical_scale, robust_scale
+
+    rng = np.random.default_rng(0)
+    calm = rng.normal(0, 0.1, 190)
+    burst = rng.normal(0, 1.0, 10)  # a volatility burst the MAD barely sees
+    history = np.concatenate([calm, burst])[:, None]
+    assert historical_scale(history)[0] > robust_scale(history, axis=0)[0] * 1.5
+    assert historical_scale(history, floor=5.0)[0] == 5.0

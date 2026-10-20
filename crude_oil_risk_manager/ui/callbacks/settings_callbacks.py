@@ -37,7 +37,6 @@ from core.user_settings import (
     KEY_PNL_BASELINE,
     KEY_PNL_REALIZED_BASELINE,
     KEY_PNL_STOP,
-    KEY_ROLL_WARNING_DAYS,
     KEY_CORRELATION_ROLLING,
     KEY_STALENESS,
     KEY_STRUCTURE_MAX_LOSS,
@@ -69,7 +68,6 @@ _THRESHOLD_FIELDS = [
     "settings-structure-max-loss",
     "settings-staleness-threshold",
     "settings-margin-limit",
-    "settings-roll-warning-days",
 ]
 _DEFAULT_FIELDS = ["settings-var-confidence", "settings-correlation-rolling", "settings-correlation-lookback"]
 _TEAMS_FIELDS = ["settings-teams-webhook", "settings-teams-enabled"]
@@ -104,7 +102,6 @@ def load_settings(pathname):
         repo.get_setting(KEY_STRUCTURE_MAX_LOSS, settings.ALERT_STRUCTURE_MAX_LOSS),
         repo.get_setting(KEY_STALENESS, settings.LIVE_STALENESS_THRESHOLD_SECONDS),
         repo.get_setting(KEY_MARGIN_LIMIT, settings.DEFAULT_MARGIN_LIMIT),
-        repo.get_setting(KEY_ROLL_WARNING_DAYS, settings.ROLL_WARNING_DAYS_BEFORE_EXPIRY),
         repo.get_setting(KEY_VAR_CONFIDENCE, settings.DEFAULT_VAR_CONFIDENCE),
         repo.get_setting(KEY_CORRELATION_ROLLING, settings.DEFAULT_CORRELATION_ROLLING_WINDOW),
         repo.get_setting(KEY_CORRELATION_LOOKBACK, settings.DEFAULT_CORRELATION_LOOKBACK),
@@ -227,10 +224,10 @@ def test_connection(n_clicks, token_value):
 # ----------------------------------------------------------------------
 
 
-def save_thresholds(n_clicks, pnl_stop, structure_max_loss, staleness, margin_limit, roll_days):
+def save_thresholds(n_clicks, pnl_stop, structure_max_loss, staleness, margin_limit):
     """Validate and store the risk thresholds; the staleness threshold takes effect immediately."""
     try:
-        values = validate_thresholds(pnl_stop, structure_max_loss, staleness, margin_limit, roll_days)
+        values = validate_thresholds(pnl_stop, structure_max_loss, staleness, margin_limit)
     except ValueError as exc:
         return "❌ Not saved", f"❌ {exc}"
 
@@ -482,7 +479,6 @@ def register_settings_callbacks(app) -> None:
         Output("settings-structure-max-loss", "value"),
         Output("settings-staleness-threshold", "value"),
         Output("settings-margin-limit", "value"),
-        Output("settings-roll-warning-days", "value"),
         Output("settings-var-confidence", "value"),
         Output("settings-correlation-rolling", "value"),
         Output("settings-correlation-lookback", "value"),

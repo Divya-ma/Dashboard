@@ -73,8 +73,6 @@ class Settings(BaseSettings):
     DEFAULT_CORRELATION_LOOKBACK: int = 20
     DEFAULT_MARGIN_LIMIT: float = 1000000.0
 
-    # Contract roll warning
-    ROLL_WARNING_DAYS_BEFORE_EXPIRY: int = 5
 
 
 settings = Settings()

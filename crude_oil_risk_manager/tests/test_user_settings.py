@@ -8,7 +8,6 @@ from core.user_settings import (
     correlation_windows,
     KEY_MARGIN_LIMIT,
     KEY_PNL_STOP,
-    KEY_ROLL_WARNING_DAYS,
     KEY_STALENESS,
     KEY_STRUCTURE_MAX_LOSS,
     KEY_VAR_CONFIDENCE,
@@ -80,7 +79,7 @@ def test_token_error_message_never_contains_the_token():
 def valid_thresholds(**overrides):
     args = dict(
         pnl_stop=-50000, structure_max_loss=-10000, staleness_seconds=120,
-        margin_limit=1_000_000, roll_warning_days=5,
+        margin_limit=1_000_000,
     )
     args.update(overrides)
     return args
@@ -92,7 +91,6 @@ def test_thresholds_valid_returns_keyed_values():
         KEY_STRUCTURE_MAX_LOSS: -10000.0,
         KEY_STALENESS: 120.0,
         KEY_MARGIN_LIMIT: 1_000_000.0,
-        KEY_ROLL_WARNING_DAYS: 5,
     }
 
 
@@ -112,9 +110,6 @@ def test_thresholds_positive_structure_max_loss_rejected():
         ("staleness_seconds", 0),
         ("staleness_seconds", 5000),
         ("margin_limit", -1),
-        ("roll_warning_days", 2.5),
-        ("roll_warning_days", -1),
-        ("roll_warning_days", 91),
         ("pnl_stop", "lots"),
         ("margin_limit", None),
     ],

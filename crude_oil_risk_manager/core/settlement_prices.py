@@ -13,6 +13,8 @@ Anything else (WBS, G, a symbol that does not parse) returns None and the caller
 import pandas as pd
 
 from adapters.base import SymbolTranslator
+from core.data_loader import DataLoader
+from core.structure_utils import decompose_to_outrights
 
 PROXY_NOTE = "BZ legs are priced from the ICE Brent settlement of the same month (BZ has no stored settlements)."
 
@@ -41,6 +43,11 @@ class SettlementPrices:
         self._store = store
         self._wide: dict[str, tuple[str, pd.DataFrame]] = {}
 
+    @property
+    def version(self) -> str:
+        """Changes whenever the stored settlements change."""
+        return self._store.version
+
     def _matrix(self, product: str) -> pd.DataFrame:
         version = self._store.version
         cached = self._wide.get(product)
@@ -66,3 +73,51 @@ class SettlementPrices:
         series.index = pd.DatetimeIndex(series.index).tz_localize("UTC")
         series.name = symbol
         return series, proxied
+
+
+class SettlementFirstLoader(DataLoader):
+    """The app's one price-history source: official settlements where the store has them, stored candles otherwise.
+
+    Every page that reads daily history through a DataLoader (the Correlation tab, the Monte Carlo and historical VaR, the
+    New Structure builder's legs, the beta panels) gets a CL or BRN symbol's series from the settlements: an outright is its
+    settlement; a spread, fly or condor is built from its outrights' settlements (the structure's PRICE on the dates every
+    outright settled, as in core.correlation.structure_series), so a quoted fly has a settlement history on every trading
+    day instead of only the days it printed. Anything else (WBS, G, BZ, or a CL/BRN contract the store does not hold) is
+    read from the candles exactly as before, and a symbol is never half settlement and half candle. BZ is NOT proxied here:
+    its basis to Brent is real risk, so it keeps its own candles (the builder's beta panel may still proxy it, and says so).
+
+    Because `get_available_date_range` and `ensure_cached` read through the same method, a settlement-covered symbol counts
+    as cached and never triggers a candle backfill.
+    """
+
+    def __init__(self, data_dir: str, historical_adapter, settlements: SettlementPrices):
+        super().__init__(data_dir, historical_adapter)
+        self._settlements = settlements
+        self._derived: dict[str, tuple[str, pd.Series | None]] = {}
+
+    def _from_settlements(self, symbol: str) -> pd.Series | None:
+        try:
+            parts = decompose_to_outrights(symbol, 1.0)
+        except ValueError:
+            return None
+        levels = []
+        for outright, weight in parts.items():
+            series, proxied = self._settlements.closes(outright)
+            if series is None or proxied:
+                return None
+            levels.append(series * weight)
+        price = pd.concat(levels, axis=1, join="inner").dropna().sum(axis=1).sort_index()
+        if len(price) < 2:
+            return None
+        price.name = symbol
+        return price
+
+    def _read_series(self, symbol: str) -> pd.Series | None:
+        version = self._settlements.version
+        cached = self._derived.get(symbol)
+        if cached is None or cached[0] != version:
+            if len(self._derived) > 600:
+                self._derived.clear()
+            self._derived[symbol] = (version, self._from_settlements(symbol))
+        derived = self._derived[symbol][1]
+        return derived if derived is not None else super()._read_series(symbol)

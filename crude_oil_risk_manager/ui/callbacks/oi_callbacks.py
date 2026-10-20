@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from dash import Input, Output, State, callback_context, html, no_update
 from dash.exceptions import MissingCallbackContextException
 
-from core.curve_calendar import PRODUCTS
+from core.curve_calendar import PRODUCTS, product_of_symbol as product_of
 from core.oi_monitor import STATUS_SUDDEN, MonitorParams, validate_params
 from ui.container import container
 from ui.layouts.oi_monitor_view import PARAM_INPUTS, build_monitor_chart, monitor_body
@@ -36,13 +36,6 @@ def _triggered_id():
         return callback_context.triggered_id
     except MissingCallbackContextException:  # called directly, not by Dash
         return None
-
-
-def product_of(symbol: str | None) -> str | None:
-    """CL or BRN from a contract symbol (BRN contracts are CO...)."""
-    if not symbol:
-        return None
-    return "BRN" if symbol.startswith("CO") else "CL"
 
 
 def update_status(n_intervals, n_clicks, current_version=None):

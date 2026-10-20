@@ -1,48 +1,42 @@
-"""Historical-simulation Value-at-Risk (VaR).
+"""Value-at-Risk: two methods that the VaR & Scenarios page and the New Structure builder both run.
 
-Scenario P&L for each historical day is price_difference * net_lots *
-multiplier; VaR is the loss at the (1 - confidence) percentile of that
-distribution, always expressed as a POSITIVE number.
+HISTORICAL SIMULATION (`historical_var`, `portfolio_pnl_var`). The book's P&L for each of the last N days is
+sum(price change x dollar weight) over its symbols; VaR is the loss at the (1 - confidence) percentile of those days,
+always a POSITIVE number. It uses what really happened, including its fat tails, and needs no assumption about volatility.
+Weaknesses: it assumes the past repeats, it is limited by the shortest-history symbol (a date only counts when every symbol
+has a price), and it uses price differences, so absolute dollar moves drive it.
 
-Known weaknesses of this approach (read before relying on the numbers):
+MONTE CARLO (`monte_carlo_var`). Draws many correlated one-day moves and prices the book on them:
+  move_i = sigma_i x (correlated standard draw) + mean_i,      P&L = sum(dollar weight_i x move_i)
+The correlation is the app-wide one (core.correlation: Pearson, the rolling window averaged over the lookback), repaired
+into a valid correlation matrix before it is used. sigma_i, the size of one symbol's daily move, is either
 
-1. Historical simulation assumes the past return distribution repeats. It may
-   understate tail risk when the market moves into a new regime.
-2. Thin history on newly listed contract months reduces reliability. In a
-   portfolio VaR the inner join on dates means the shortest-history symbol
-   limits the scenario count for the whole portfolio.
-3. It uses price differences, not percentage returns. That suits spread and
-   fly structures, but absolute dollar moves — not percentage moves — drive
-   VaR.
-4. Price differences are assumed stationary. Verify this periodically.
-5. VaR is not a complete risk measure: it does not capture liquidity risk or
-   gap risk at the open.
+  history   its own standard deviation of daily price changes over the last N days (the same N and the same prices the
+            historical method uses). Default. Each symbol moves as much as it really does, so a fly is not shaken as
+            hard as an outright, and the two methods agree to within sampling noise when returns are near normal.
+  fixed     one number of points for every symbol (the VaR page's Std Dev box). A blunt tool: 0.5 points on a fly is
+            $500 a lot a day, far more than a fly really moves, which is why this mode gave enormous VaRs.
 
-TODO: Marginal VaR (accounting for cross-structure correlation) is not
-implemented; per-structure VaR here is standalone (the structure in
-isolation).
+Normal draws have a standard deviation of sigma_i; Uniform draws are scaled to the same sigma_i (history) or run from
+Low to High (fixed). Both methods work on the symbols as quoted (core.positions.dollar_weights), so a fly has its own
+price history.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
 
 from core.data_loader import DataLoader
-from core.exceptions import CrudeOilRiskError, DataNotAvailableError, InsufficientDataError
-from core.exposure import filter_open_structures, get_structure_net_lots
-from core.models import Contract, Structure
-from core.structure_utils import net_outright_equivalent
+from core.exceptions import CrudeOilRiskError, InsufficientDataError
+from core.models import Structure
+from core.positions import dollar_weights
 
-_TERM_STRUCTURE_HORIZONS = [1, 2, 3, 5, 10]
-_RELIABLE_SCENARIOS = 252
 _MIN_SCENARIOS = 20
 
-_MARGINAL_VAR_NOTE = (
-    "TODO: Marginal VaR (accounting for cross-structure correlation) not yet "
-    "implemented. Confirm aggregation method with user before building."
-)
+# ----------------------------------------------------------------------
+# Shared helpers
+# ----------------------------------------------------------------------
 
 
 def _validate_inputs(confidence: float, horizon_days: int) -> None:
@@ -52,257 +46,16 @@ def _validate_inputs(confidence: float, horizon_days: int) -> None:
         raise ValueError(f"horizon_days must be >= 1, got {horizon_days}")
 
 
-def _scale_var(var_1day: float, horizon_days: int) -> float:
-    """Square-root-of-time scaling: VaR_N = VaR_1 * sqrt(N)."""
-    return float(var_1day * np.sqrt(horizon_days))
-
-
 def _var_from_scenarios(scenario_pnl: np.ndarray, confidence: float) -> tuple[float, float]:
     """Return (var, percentile_cutoff); var = max(0, -percentile), so never negative."""
     cutoff = float(np.percentile(scenario_pnl, (1.0 - confidence) * 100.0))
     return max(0.0, -cutoff), cutoff
 
 
-def _data_warning(n_scenarios: int) -> str | None:
-    if n_scenarios < _RELIABLE_SCENARIOS:
-        return (
-            f"Only {n_scenarios} scenarios available (recommend minimum "
-            f"{_RELIABLE_SCENARIOS}). VaR estimate may be unreliable."
-        )
-    return None
-
-
 def _combine_scenarios(pnl_by_symbol: dict[str, pd.Series]) -> pd.Series:
     """Sum per-symbol scenario P&L on dates where ALL symbols have data (inner join)."""
     frame = pd.concat(list(pnl_by_symbol.values()), axis=1, join="inner", keys=list(pnl_by_symbol))
     return frame.sum(axis=1)
-
-
-def calculate_historical_var(
-    symbol: str,
-    net_lots: float,
-    multiplier: float,
-    confidence: float,
-    horizon_days: int,
-    data_loader: DataLoader,
-) -> dict:
-    """Historical-simulation VaR for a single position (one symbol).
-
-    scenario_pnl = price_diff * net_lots * multiplier for each historical day.
-    var_1day = -np.percentile(scenario_pnl, (1 - confidence) * 100), floored
-    at 0.0 so VaR is always a non-negative loss amount.
-
-    For horizon_days > 1, VaR is scaled by square-root-of-time
-    (var_1day * sqrt(horizon_days)). WARNING: square-root scaling assumes
-    i.i.d. returns. For spread structures this may understate risk if
-    autocorrelation exists.
-
-    Returns a dict with symbol, var_1day, var_Nday (N = horizon_days),
-    confidence, scenarios_used, percentile_cutoff (the raw scenario P&L at
-    the percentile, normally negative), min/max/mean scenario P&L, and
-    data_warning (set if fewer than 252 scenarios are available).
-    A zero net_lots position has a VaR of 0.0.
-
-    Raises DataNotAvailableError / InsufficientDataError from the loader if
-    the symbol's price history cannot be provided.
-    """
-    _validate_inputs(confidence, horizon_days)
-    if multiplier <= 0:
-        raise ValueError(f"multiplier must be > 0, got {multiplier}")
-
-    diffs = data_loader.load_price_differences(symbol)
-    scenario_pnl = diffs.to_numpy(dtype=float) * net_lots * multiplier
-    var_1day, cutoff = _var_from_scenarios(scenario_pnl, confidence)
-    n = len(scenario_pnl)
-
-    return {
-        "symbol": symbol,
-        "var_1day": var_1day,
-        "var_Nday": _scale_var(var_1day, horizon_days),
-        "confidence": confidence,
-        "scenarios_used": n,
-        "percentile_cutoff": cutoff,
-        "min_scenario_pnl": float(np.min(scenario_pnl)),
-        "max_scenario_pnl": float(np.max(scenario_pnl)),
-        "mean_scenario_pnl": float(np.mean(scenario_pnl)),
-        "data_warning": _data_warning(n),
-    }
-
-
-def calculate_portfolio_var(
-    structures: list[Structure],
-    exposure_summary: dict,
-    confidence: float,
-    horizon_days: int,
-    data_loader: DataLoader,
-    contracts: dict[str, Contract],
-) -> dict:
-    """Portfolio-level historical-simulation VaR.
-
-    Portfolio VaR: per-symbol scenario P&L (price_diff * net_lots *
-    multiplier) for every symbol with non-zero net_lots in
-    exposure_summary["by_product"], summed on dates where ALL symbols have
-    data (inner join), then the confidence percentile is applied to the
-    combined series. Horizons > 1 day use square-root-of-time scaling, which
-    assumes i.i.d. returns and may understate risk for autocorrelated spread
-    structures.
-
-    per_structure_var is STANDALONE VaR (each open structure in isolation,
-    over its own symbols' common dates), not marginal contribution.
-    standalone values are None (with a data_warning) if none of a structure's
-    positions have price data or too few common dates exist; a structure
-    with no net position has 0.0.
-
-    A symbol with no price data (or no contract multiplier) is excluded from
-    portfolio VaR and reported in data_warnings — missing data is never
-    replaced by zeros. This understates VaR, so consumers must surface the
-    warnings. Raises DataNotAvailableError if positions exist but none has
-    data, and InsufficientDataError if fewer than 20 common dates remain.
-    """
-    _validate_inputs(confidence, horizon_days)
-
-    open_structures = filter_open_structures(structures)
-    data_warnings: list[str] = []
-
-    multipliers = {symbol: contract.multiplier for symbol, contract in contracts.items()}
-    for structure in open_structures:
-        for leg in structure.legs:
-            multipliers.setdefault(leg.contract.symbol, leg.contract.multiplier)
-
-    portfolio_lots: dict[str, float] = {}
-    for symbols in exposure_summary.get("by_product", {}).values():
-        for symbol, info in symbols.items():
-            if info["net_lots"] != 0:
-                portfolio_lots[symbol] = info["net_lots"]
-
-    structure_lots: dict[str, dict[str, float]] = {
-        s.structure_id: {sym: lots for sym, lots in get_structure_net_lots(s).items() if lots != 0}
-        for s in open_structures
-    }
-
-    needed = set(portfolio_lots)
-    for lots in structure_lots.values():
-        needed.update(lots)
-
-    diffs: dict[str, pd.Series] = {}
-    failures: dict[str, str] = {}
-    for symbol in sorted(needed):
-        if symbol not in multipliers:
-            failures[symbol] = "no contract specification (multiplier) available"
-            continue
-        try:
-            diffs[symbol] = data_loader.load_price_differences(symbol)
-        except CrudeOilRiskError as exc:
-            failures[symbol] = str(exc)
-
-    def scenario_pnl(symbol: str, lots: float) -> pd.Series:
-        return diffs[symbol] * lots * multipliers[symbol]
-
-    # ---- portfolio-level VaR ----
-    included = [s for s in portfolio_lots if s in diffs]
-    for symbol in portfolio_lots:
-        if symbol in failures:
-            data_warnings.append(
-                f"{symbol} excluded from portfolio VaR (VaR is understated): {failures[symbol]}"
-            )
-
-    if not portfolio_lots:
-        var_1day, n_scenarios = 0.0, 0
-    else:
-        if not included:
-            raise DataNotAvailableError(
-                "Portfolio VaR cannot be calculated: no price data for any position. "
-                + "; ".join(f"{s}: {m}" for s, m in failures.items())
-            )
-        combined = _combine_scenarios({s: scenario_pnl(s, portfolio_lots[s]) for s in included})
-        n_scenarios = len(combined)
-        if n_scenarios < _MIN_SCENARIOS:
-            raise InsufficientDataError(
-                f"Portfolio VaR: only {n_scenarios} common dates across {included}, "
-                f"minimum required is {_MIN_SCENARIOS}."
-            )
-        var_1day, _ = _var_from_scenarios(combined.to_numpy(dtype=float), confidence)
-        warning = _data_warning(n_scenarios)
-        if warning:
-            data_warnings.append(f"Portfolio: {warning}")
-
-    # ---- per-structure standalone VaR ----
-    per_structure_var: dict[str, dict] = {}
-    for structure in open_structures:
-        lots_by_symbol = structure_lots[structure.structure_id]
-        have = [s for s in lots_by_symbol if s in diffs]
-        missing = [s for s in lots_by_symbol if s in failures]
-        notes: list[str] = []
-        if missing:
-            notes.append(f"Excluded symbols with no usable data: {', '.join(missing)}.")
-
-        standalone_1day: float | None
-        if not lots_by_symbol:
-            standalone_1day = 0.0
-        elif not have:
-            standalone_1day = None
-            notes.append("No price data for any of this structure's positions.")
-        else:
-            combined = _combine_scenarios({s: scenario_pnl(s, lots_by_symbol[s]) for s in have})
-            if len(combined) < _MIN_SCENARIOS:
-                standalone_1day = None
-                notes.append(
-                    f"Only {len(combined)} common dates (minimum {_MIN_SCENARIOS}); VaR not calculated."
-                )
-            else:
-                standalone_1day, _ = _var_from_scenarios(combined.to_numpy(dtype=float), confidence)
-                warning = _data_warning(len(combined))
-                if warning:
-                    notes.append(warning)
-
-        per_structure_var[structure.structure_id] = {
-            "standalone_var_1day": standalone_1day,
-            "standalone_var_Nday": None if standalone_1day is None else _scale_var(standalone_1day, horizon_days),
-            "symbols_included": have,
-            "data_warning": " ".join(notes) if notes else None,
-        }
-
-    return {
-        "portfolio_var_1day": var_1day,
-        "portfolio_var_Nday": _scale_var(var_1day, horizon_days),
-        "confidence": confidence,
-        "horizon_days": horizon_days,
-        "scenarios_used": n_scenarios,
-        "common_dates_used": n_scenarios,
-        "per_structure_var": per_structure_var,
-        "marginal_var": None,
-        "marginal_var_note": _MARGINAL_VAR_NOTE,
-        "data_warnings": data_warnings,
-        "calculated_at": datetime.now(timezone.utc),
-    }
-
-
-# ----------------------------------------------------------------------
-# Portfolio PnL series VaR (VaR & Scenarios tab)
-# ----------------------------------------------------------------------
-
-# Below this many daily observations the result is still shown, with a warning.
-RELIABLE_OBSERVATIONS = 10
-_SERIES_MIN_DIFF_ROWS = 2
-
-
-def leg_dollar_weights(structures: list[Structure]) -> dict[str, float]:
-    """Dollar PnL per 1.0 point move, per leg symbol, summed over the open structures' traded legs.
-
-    weight[symbol] = sum(ratio * side * lots * multiplier) with side +1 for a buy and -1
-    for a sell (the leg ratio carries the leg's own side within the structure). Leg symbols
-    are exchange-quoted instruments and are used as they are, never decomposed. Symbols
-    whose legs cancel exactly are dropped.
-    """
-    weights: dict[str, float] = {}
-    for structure in filter_open_structures(structures):
-        for leg in structure.legs:
-            if not leg.is_traded:
-                continue
-            side = 1 if leg.direction == "buy" else -1
-            symbol = leg.contract.symbol
-            weights[symbol] = weights.get(symbol, 0.0) + leg.ratio * side * leg.lots * leg.contract.multiplier
-    return {symbol: weight for symbol, weight in weights.items() if abs(weight) > 1e-9}
 
 
 @dataclass
@@ -335,61 +88,59 @@ def var_from_pnl_series(pnl: pd.Series, confidences: tuple[float, ...] = (0.95, 
     return var, cutoff
 
 
-def portfolio_pnl_series(
-    structures: list[Structure], data_loader: DataLoader
-) -> tuple[pd.Series | None, dict[str, str]]:
-    """The open structures' combined daily P&L series (undated-truncated), and skipped symbols.
+# ----------------------------------------------------------------------
+# Historical simulation
+# ----------------------------------------------------------------------
 
-    portfolio_pnl[t] = sum over leg symbols of price_diff[t] * leg_dollar_weights[symbol],
-    inner-joined on date. Symbols without local Parquet history are skipped (reported in
-    the second dict) rather than backfilled or zero-filled. None (with an empty dict) if
-    there are no open structures; None (with skipped populated) if no symbol has usable
-    data or the legs share no common trading day. Shared by portfolio_pnl_var (which then
-    truncates to a lookback window) and the beta-vs-portfolio panels, which want the full
-    history for the regression.
+# Below this many daily observations the result is still shown, with a warning.
+RELIABLE_OBSERVATIONS = 10
+_SERIES_MIN_DIFF_ROWS = 2
+
+
+def pnl_series(weights: dict[str, float], data_loader: DataLoader) -> tuple[pd.Series | None, dict[str, str]]:
+    """Daily P&L series of a book given as {symbol: dollars per 1.0-point move}, and the symbols left out.
+
+    pnl[t] = sum over symbols of price_diff[t] x weight, inner-joined on date. Symbols without usable price history are
+    skipped (reported in the second dict) rather than zero-filled; this understates the book. None (with an empty dict) if
+    there are no weights; None (with `skipped` filled) if no symbol has data or the symbols share no trading day.
     """
-    weights = leg_dollar_weights(structures)
     if not weights:
         return None, {}
-
     series: dict[str, pd.Series] = {}
     skipped: dict[str, str] = {}
     for symbol, weight in weights.items():
         try:
             if data_loader.get_available_date_range(symbol) is None:
-                raise CrudeOilRiskError("no price data in the local Parquet")
+                raise CrudeOilRiskError("no price data")
             series[symbol] = data_loader.load_price_differences(symbol, min_rows=_SERIES_MIN_DIFF_ROWS) * weight
         except CrudeOilRiskError as exc:
             skipped[symbol] = str(exc)
     if not series:
         return None, skipped
-
     combined = _combine_scenarios(series).dropna().sort_index()
     return (combined if not combined.empty else None), skipped
 
 
-def portfolio_pnl_var(
-    structures: list[Structure],
-    lookback_days: int,
-    data_loader: DataLoader,
-    confidences: tuple[float, ...] = (0.95, 0.99),
-) -> PortfolioVarResult:
-    """1-day historical VaR of the open structures over the last `lookback_days` common days.
+def portfolio_pnl_series(structures: list[Structure], data_loader: DataLoader) -> tuple[pd.Series | None, dict[str, str]]:
+    """The open structures' combined daily P&L series (see pnl_series), by the legs as quoted."""
+    return pnl_series(dollar_weights(structures), data_loader)
 
-    See portfolio_pnl_series for how the underlying combined P&L series is built. Symbols
-    without local Parquet history are skipped and reported (this understates VaR); nothing
-    is backfilled. Fewer common days than requested uses them all; fewer than
-    RELIABLE_OBSERVATIONS still returns a result with a warning.
+
+def historical_var(
+    weights: dict[str, float], lookback_days: int, data_loader: DataLoader, confidences: tuple[float, ...] = (0.95, 0.99),
+) -> PortfolioVarResult:
+    """1-day historical VaR of a book ({symbol: dollars per point}) over the last `lookback_days` common days.
+
+    Symbols without price history are skipped and reported (this understates VaR); nothing is backfilled or zero-filled.
+    Fewer common days than requested uses them all; fewer than RELIABLE_OBSERVATIONS still returns a result with a warning.
     """
     if lookback_days < 1:
         raise ValueError(f"lookback_days must be >= 1, got {lookback_days}")
     result = PortfolioVarResult(requested=lookback_days)
-    weights = leg_dollar_weights(structures)
     if not weights:
         result.error = "No open structures — nothing to analyze"
         return result
-
-    combined, result.skipped = portfolio_pnl_series(structures, data_loader)
+    combined, result.skipped = pnl_series(weights, data_loader)
     if result.skipped:
         result.warnings.append(
             f"Skipped (no usable price data): {', '.join(result.skipped)}. VaR excludes these legs and is understated."
@@ -408,36 +159,49 @@ def portfolio_pnl_var(
     return result
 
 
+def portfolio_pnl_var(
+    structures: list[Structure], lookback_days: int, data_loader: DataLoader, confidences: tuple[float, ...] = (0.95, 0.99),
+) -> PortfolioVarResult:
+    """1-day historical VaR of the open structures (see historical_var)."""
+    return historical_var(dollar_weights(structures), lookback_days, data_loader, confidences)
+
+
 # ----------------------------------------------------------------------
-# Monte Carlo VaR (correlation-matrix, Cholesky-simulated)
+# Monte Carlo
 # ----------------------------------------------------------------------
-#
-# L = cholesky(C); simulated_returns = L @ draws; simulated_pnl = weights . simulated_returns;
-# VaR = -percentile(simulated_pnl, (1-confidence)*100). `draws` come from a distribution the
-# caller picks per symbol (Normal(mean, std) or Uniform(low, high)); the Cholesky factor of the
-# correlation matrix then imposes the observed cross-symbol correlation on those independent
-# draws. This is a distinct method from the historical-simulation VaR above: it does not resample
-# actual historical days, it generates new scenarios from an assumed distribution shaped by the
-# correlation matrix, so it can produce scenarios outside the historical range.
 
 DISTRIBUTION_NORMAL = "normal"
 DISTRIBUTION_UNIFORM = "uniform"
+VOL_HISTORY = "history"
+VOL_FIXED = "fixed"
 
 DEFAULT_MC_SIMULATIONS = 10_000
 _MAX_MC_SIMULATIONS = 200_000
 _MIN_MC_SIMULATIONS = 100
+DEFAULT_MC_LOOKBACK = 60  # days of price changes the volatility of each symbol is measured over (history mode)
+MIN_VOL_ROWS = 10
+_UNIFORM_LIMIT = float(np.sqrt(3.0))  # a Uniform(-sqrt3, +sqrt3) draw has mean 0 and standard deviation 1
 
 # The VaR page's Monte Carlo controls. The page saves what it is showing under KEY_VAR_MC and the Structure Builder reads it
-# back, so the two always run the same Monte Carlo (the same distribution, spread of the draws and number of simulations).
+# back, so the two always run the same Monte Carlo.
 KEY_VAR_MC = "var_mc_params"
 DEFAULT_MC_MEAN = 0.0
-DEFAULT_MC_STD = 0.5  # points per symbol, one standard deviation of a day's move
+DEFAULT_MC_STD = 0.5  # points, used in fixed mode (and for a symbol with too little history in history mode)
 DEFAULT_MC_LOW = -1.0
 DEFAULT_MC_HIGH = 1.0
 
 
-def load_mc_settings(repository) -> tuple[str, dict, int]:
-    """(distribution, dist_params, n_simulations) as last shown on the VaR page, or the page's defaults."""
+@dataclass
+class McSettings:
+    distribution: str = DISTRIBUTION_NORMAL
+    dist_params: dict = field(default_factory=lambda: {"mean": DEFAULT_MC_MEAN, "std": DEFAULT_MC_STD})
+    n_simulations: int = DEFAULT_MC_SIMULATIONS
+    vol_mode: str = VOL_HISTORY
+    lookback_days: int = DEFAULT_MC_LOOKBACK
+
+
+def load_mc_settings(repository) -> McSettings:
+    """The Monte Carlo controls as last shown on the VaR page, or the page's defaults."""
     raw = {}
     try:
         saved = repository.get_setting(KEY_VAR_MC, None) if repository is not None else None
@@ -452,18 +216,22 @@ def load_mc_settings(repository) -> tuple[str, dict, int]:
             return default
 
     distribution = raw.get("distribution") if raw.get("distribution") in (DISTRIBUTION_NORMAL, DISTRIBUTION_UNIFORM) else DISTRIBUTION_NORMAL
+    mean = number("mean", DEFAULT_MC_MEAN)
     params = (
-        {"mean": number("mean", DEFAULT_MC_MEAN), "std": max(number("std", DEFAULT_MC_STD), 0.0)}
+        {"mean": mean, "std": max(number("std", DEFAULT_MC_STD), 0.0)}
         if distribution == DISTRIBUTION_NORMAL
         else {"low": number("low", DEFAULT_MC_LOW), "high": number("high", DEFAULT_MC_HIGH)}
     )
-    n = int(number("n_simulations", DEFAULT_MC_SIMULATIONS))
-    return distribution, params, min(max(n, _MIN_MC_SIMULATIONS), _MAX_MC_SIMULATIONS)
+    simulations = min(max(int(number("n_simulations", DEFAULT_MC_SIMULATIONS)), _MIN_MC_SIMULATIONS), _MAX_MC_SIMULATIONS)
+    vol_mode = raw.get("vol_mode") if raw.get("vol_mode") in (VOL_HISTORY, VOL_FIXED) else VOL_HISTORY
+    lookback = max(int(number("lookback_days", DEFAULT_MC_LOOKBACK)), MIN_VOL_ROWS)
+    return McSettings(distribution, params, simulations, vol_mode, lookback)
 
 
-def save_mc_settings(repository, distribution: str, mean, std, low, high, n_simulations) -> None:
+def save_mc_settings(repository, distribution: str, mean, std, low, high, n_simulations, vol_mode: str = VOL_HISTORY, lookback_days: int = DEFAULT_MC_LOOKBACK) -> None:
     """Remember the VaR page's Monte Carlo controls (written only when they changed)."""
-    values = {"distribution": distribution, "mean": mean, "std": std, "low": low, "high": high, "n_simulations": n_simulations}
+    values = {"distribution": distribution, "mean": mean, "std": std, "low": low, "high": high, "n_simulations": n_simulations,
+              "vol_mode": vol_mode, "lookback_days": lookback_days}
     try:
         if repository.get_setting(KEY_VAR_MC, None) != values:
             repository.set_setting(KEY_VAR_MC, values)
@@ -505,6 +273,20 @@ def _validate_distribution(distribution: str, dist_params: dict) -> None:
         raise ValueError(f"Unknown distribution '{distribution}', expected '{DISTRIBUTION_NORMAL}' or '{DISTRIBUTION_UNIFORM}'")
 
 
+def historical_volatilities(symbols: list[str], data_loader: DataLoader, lookback_days: int) -> tuple[dict[str, float], dict[str, str]]:
+    """({symbol: standard deviation of its daily price changes over the last `lookback_days`}, {symbol: why none})."""
+    sigma: dict[str, float] = {}
+    missing: dict[str, str] = {}
+    for symbol in symbols:
+        try:
+            changes = data_loader.load_price_differences(symbol, min_rows=MIN_VOL_ROWS).tail(lookback_days)
+        except CrudeOilRiskError as exc:
+            missing[symbol] = str(exc)
+            continue
+        sigma[symbol] = float(changes.std(ddof=1)) if len(changes) > 1 else 0.0
+    return sigma, missing
+
+
 def simulate_correlated_pnl(
     correlation_matrix: pd.DataFrame,
     dollar_weights: dict[str, float],
@@ -512,15 +294,16 @@ def simulate_correlated_pnl(
     dist_params: dict,
     n_simulations: int = DEFAULT_MC_SIMULATIONS,
     seed: int | None = None,
+    sigma: dict[str, float] | None = None,
 ) -> np.ndarray:
-    """Simulated portfolio P&L for `n_simulations` correlated draws.
+    """Simulated portfolio P&L for `n_simulations` correlated one-day moves.
 
-    L = cholesky(nearest-PSD(C)); draws ~ distribution(dist_params), one column per symbol,
-    independent before correlating; simulated_returns = draws @ L.T applies the correlation;
-    simulated_pnl = simulated_returns @ weight_vector. `dollar_weights` is dollar P&L per
-    1.0-point move for each symbol (see leg_dollar_weights / outright_weights * multiplier).
-    Symbols with a zero weight contribute nothing but are still simulated (so the requested
-    correlation structure is respected even for hedge legs with a net-zero weight).
+    z are independent standard draws (Normal(0, 1), or Uniform scaled to standard deviation 1), one column per symbol;
+    L = cholesky(nearest-PSD(C)) makes them correlated; each symbol's move is  (z @ L.T) x sigma_i + mean_i.
+    With `sigma` ({symbol: points}) each symbol moves by its own size; without it every symbol moves by the distribution's
+    (the fixed mode): Normal(mean, std) or Uniform(low, high). `dollar_weights` is dollar P&L per 1.0-point move for each symbol.
+    Symbols with a zero weight contribute nothing but are still simulated (so the requested correlation structure is
+    respected even for hedge legs with a net-zero weight).
     """
     if not dollar_weights:
         return np.zeros(0, dtype=float)
@@ -530,19 +313,25 @@ def simulate_correlated_pnl(
 
     symbols = list(dollar_weights)
     matrix = correlation_matrix.reindex(index=symbols, columns=symbols).to_numpy(dtype=float)
-    psd = _nearest_correlation_psd(matrix)
-    cholesky_factor = np.linalg.cholesky(psd)
+    cholesky_factor = np.linalg.cholesky(_nearest_correlation_psd(matrix))
 
     rng = np.random.default_rng(seed)
     n = len(symbols)
     if distribution == DISTRIBUTION_NORMAL:
-        draws = rng.normal(dist_params.get("mean", 0.0), dist_params.get("std", 1.0), size=(n_simulations, n))
+        draws = rng.normal(0.0, 1.0, size=(n_simulations, n))
+        fixed_sigma, fixed_mean = float(dist_params.get("std", 1.0)), float(dist_params.get("mean", 0.0))
     else:
-        draws = rng.uniform(dist_params.get("low", -1.0), dist_params.get("high", 1.0), size=(n_simulations, n))
+        draws = rng.uniform(-_UNIFORM_LIMIT, _UNIFORM_LIMIT, size=(n_simulations, n))
+        low, high = float(dist_params.get("low", -1.0)), float(dist_params.get("high", 1.0))
+        fixed_sigma, fixed_mean = (high - low) / np.sqrt(12.0), (high + low) / 2.0
+    if sigma is None:
+        scale, shift = np.full(n, fixed_sigma), np.full(n, fixed_mean)
+    else:
+        scale = np.array([sigma.get(s, fixed_sigma) for s in symbols], dtype=float)
+        shift = np.full(n, fixed_mean if distribution == DISTRIBUTION_NORMAL else 0.0)
 
-    simulated_returns = draws @ cholesky_factor.T
-    weight_vector = np.array([dollar_weights[s] for s in symbols])
-    return simulated_returns @ weight_vector
+    moves = (draws @ cholesky_factor.T) * scale + shift
+    return moves @ np.array([dollar_weights[s] for s in symbols])
 
 
 @dataclass
@@ -555,6 +344,9 @@ class MonteCarloVarResult:
     n_simulations: int = 0
     distribution: str = DISTRIBUTION_NORMAL
     dist_params: dict = field(default_factory=dict)
+    vol_mode: str = VOL_HISTORY
+    vol_lookback: int = 0
+    sigma: dict[str, float] = field(default_factory=dict)  # points per symbol (history mode)
     symbols_included: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
@@ -580,19 +372,21 @@ def monte_carlo_var(
     lookback: int = 20,
     n_simulations: int = DEFAULT_MC_SIMULATIONS,
     seed: int | None = None,
+    vol_mode: str = VOL_HISTORY,
+    vol_lookback: int = DEFAULT_MC_LOOKBACK,
 ) -> MonteCarloVarResult:
-    """Correlation-matrix Monte Carlo VaR for a book of dollar-weighted positions.
+    """Correlation-matrix Monte Carlo VaR for a book of dollar-weighted positions (see the module docstring).
 
-    Builds the symbols' pairwise correlation matrix (core.correlation.build_correlation_matrix: the
-    average over the last `lookback` days of the daily `rolling`-day correlation; best-effort: a pair with no usable history is left uncorrelated rather than failing the
-    whole run), then delegates to simulate_correlated_pnl. Symbols with no correlation data at
-    all still simulate as uncorrelated with everything else (a data_warning is added), since a
-    Monte Carlo run should never silently drop a position the way historical-simulation VaR
-    does for missing price history.
+    The correlation matrix is core.correlation.build_correlation_matrix (the average over the last `lookback` days of the
+    daily `rolling`-day correlation). A pair with no usable history is left uncorrelated rather than failing the run, and a
+    warning says so. In history mode each symbol's volatility is measured over its last `vol_lookback` daily changes; a
+    symbol with too little history falls back to the fixed size, with a warning. A Monte Carlo run never silently drops a
+    position the way historical VaR does for missing price history.
     """
     from core.correlation import build_correlation_matrix  # local import: avoids a cycle at module load
 
-    result = MonteCarloVarResult(distribution=distribution, dist_params=dict(dist_params), n_simulations=n_simulations)
+    result = MonteCarloVarResult(distribution=distribution, dist_params=dict(dist_params), n_simulations=n_simulations,
+                                 vol_mode=vol_mode, vol_lookback=vol_lookback)
     if not dollar_weights:
         result.error = "No positions — nothing to simulate"
         return result
@@ -611,8 +405,18 @@ def monte_carlo_var(
                 "uncorrelated (0.0), which may understate diversification benefit or risk."
             )
 
+    sigma = None
+    if vol_mode == VOL_HISTORY:
+        sigma, missing = historical_volatilities(symbols, data_loader, vol_lookback)
+        result.sigma = dict(sigma)
+        if missing:
+            result.warnings.append(
+                f"No usable history to measure the volatility of {', '.join(missing)}; the fixed size of the draws is used for "
+                f"{'it' if len(missing) == 1 else 'them'}."
+            )
+
     try:
-        pnl = simulate_correlated_pnl(matrix, dollar_weights, distribution, dist_params, n_simulations, seed)
+        pnl = simulate_correlated_pnl(matrix, dollar_weights, distribution, dist_params, n_simulations, seed, sigma)
     except ValueError as exc:
         result.error = str(exc)
         return result
@@ -628,25 +432,6 @@ def monte_carlo_var(
 # ----------------------------------------------------------------------
 
 
-def outright_dollar_weights(structures: list[Structure]) -> dict[str, float]:
-    """Dollar P&L per 1.0-point move of each OUTRIGHT, from the open structures' traded legs.
-
-    Every leg symbol (a fly, a spread, an outright) is decomposed to outrights with
-    core.structure_utils.net_outright_equivalent and scaled by ratio * side * lots * multiplier, the same
-    sign convention as leg_dollar_weights. Outrights that cancel exactly are dropped.
-    """
-    weights: dict[str, float] = {}
-    for structure in filter_open_structures(structures):
-        for leg in structure.legs:
-            if not leg.is_traded:
-                continue
-            side = 1 if leg.direction == "buy" else -1
-            net, _ignored = net_outright_equivalent([{"symbol": leg.contract.symbol, "ratio": 1}])
-            for symbol, weight in net.items():
-                weights[symbol] = weights.get(symbol, 0.0) + weight * leg.ratio * side * leg.lots * leg.contract.multiplier
-    return {symbol: weight for symbol, weight in weights.items() if abs(weight) > 1e-9}
-
-
 def portfolio_outright_pnl_series(
     structures: list[Structure], data_loader: DataLoader, settlements
 ) -> tuple[pd.Series | None, dict[str, str], list[str]]:
@@ -660,7 +445,7 @@ def portfolio_outright_pnl_series(
     """
     from core.correlation import _leg_closes  # local import: avoids a cycle at module load
 
-    weights = outright_dollar_weights(structures)
+    weights = dollar_weights(structures, decompose=True)
     levels: dict[str, pd.Series] = {}
     skipped: dict[str, str] = {}
     proxied: list[str] = []
@@ -710,7 +495,7 @@ def beta_vs_portfolio(
     """
     from core.regression import beta_from_series, position_sizing_from_beta  # local import: avoids a cycle at module load
 
-    if not leg_dollar_weights(reference_structures):
+    if not dollar_weights(reference_structures):
         return {"error": "The portfolio has no open traded positions yet (a shell structure carries no lots), so there is nothing to size against."}
     proxied: list[str] = []
     if settlements is not None:
@@ -730,20 +515,3 @@ def beta_vs_portfolio(
     sized["proxied"] = proxied
     sized["error"] = None
     return sized
-
-
-def get_var_term_structure(
-    symbol: str,
-    net_lots: float,
-    multiplier: float,
-    confidence: float,
-    data_loader: DataLoader,
-) -> dict[int, float]:
-    """VaR for horizons [1, 2, 3, 5, 10] days, as {horizon_days: var_amount}.
-
-    The 1-day VaR is computed once from history and scaled by
-    square-root-of-time for longer horizons (assumes i.i.d. returns; may
-    understate risk for autocorrelated spread structures).
-    """
-    result = calculate_historical_var(symbol, net_lots, multiplier, confidence, 1, data_loader)
-    return {h: _scale_var(result["var_1day"], h) for h in _TERM_STRUCTURE_HORIZONS}

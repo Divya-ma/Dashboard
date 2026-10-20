@@ -52,6 +52,15 @@ def robust_scale(values: np.ndarray, axis=None, floor: float = 0.0) -> np.ndarra
     return np.maximum(_MAD_TO_STD * mad, floor)
 
 
+def historical_scale(values: np.ndarray, axis=0, floor: float = 0.0) -> np.ndarray:
+    """Scale of a history for turning a deviation into a z-score: the larger of the robust (MAD) scale and the standard deviation.
+
+    The MAD alone ignores the fat tails of curve residuals (volatility clusters), so z-scores built on it had a
+    standard deviation of 2 to 3 out of sample and flagged most days; the standard deviation brings it to ~1.2.
+    """
+    return np.maximum(robust_scale(values, axis=axis, floor=floor), np.nanstd(values, axis=axis, ddof=1))
+
+
 def neighbour_weights(n: int) -> np.ndarray:
     """W (n x n): row k holds the weights predicting point k from its neighbours (zero diagonal).
 
@@ -190,10 +199,10 @@ def prepare_history(
     prepared = PreparedHistory(
         values=values, dates=dates, months=months, n=n,
         center=np.median(window, axis=0),
-        spread=robust_scale(window, axis=0, floor=params.min_scale),
-        resid_scale=robust_scale(resid_hist[-params.lookback_days:], axis=0, floor=params.min_scale),
+        spread=historical_scale(window, axis=0, floor=params.min_scale),
+        resid_scale=historical_scale(resid_hist[-params.lookback_days:], axis=0, floor=params.min_scale),
         resid_hist=resid_hist,
-        fit_scale=robust_scale(
+        fit_scale=historical_scale(
             fit_resid[-params.lookback_days:] if fit_resid is not None else fit_residuals(window, params.poly_degree),
             axis=0, floor=params.min_scale,
         ),
@@ -211,7 +220,7 @@ def prepare_history(
         basis = vt[:components]
         leftover = centered - centered @ basis.T @ basis
         prepared.pca_mean, prepared.pca_components = mean, basis
-        prepared.pca_scale = robust_scale(leftover, axis=0, floor=params.min_scale)
+        prepared.pca_scale = historical_scale(leftover, axis=0, floor=params.min_scale)
     return prepared
 
 
@@ -290,7 +299,7 @@ def seasonal_context(
         if len(sample) < 10 or len(years) < 2:
             out.append((None, len(sample)))
             continue
-        scale = float(robust_scale(sample, floor=params.min_scale))
+        scale = float(historical_scale(sample, floor=params.min_scale))
         out.append(((residual - float(np.median(sample))) / scale, len(sample)))
     return out
 

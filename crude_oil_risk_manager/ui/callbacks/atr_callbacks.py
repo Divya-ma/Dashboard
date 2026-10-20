@@ -7,7 +7,7 @@ from dataclasses import asdict
 from dash import Input, Output, State, html, no_update
 
 from core.atr_engine import pair_hedge, validate_params
-from core.curve_calendar import PRODUCTS
+from core.curve_calendar import PRODUCTS, product_of_symbol as product_of
 from ui.container import container
 from ui.layouts.atr_view import PARAM_INPUTS, atr_body, build_atr_chart, hedge_calculator_result
 from ui.layouts.shell import COLORS
@@ -16,13 +16,6 @@ logger = logging.getLogger(__name__)
 
 _ERROR = {"color": COLORS["ACCENT_RED"]}
 _FIELDS = [field for _, _, field, _, _ in PARAM_INPUTS]
-
-
-def product_of(symbol: str | None) -> str | None:
-    """CL or BRN from a contract symbol (BRN contracts are CO...)."""
-    if not symbol:
-        return None
-    return "BRN" if symbol.startswith("CO") else "CL"
 
 
 def render_atr(version, product, family, unit, month, *values):

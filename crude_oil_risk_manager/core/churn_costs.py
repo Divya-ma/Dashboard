@@ -18,6 +18,7 @@ the table if it is different). The rates are kept in the settings table and edit
 
 from dataclasses import dataclass
 
+from core.curve_calendar import FAMILY_WEIGHTS
 from core.user_settings import parse_number
 
 KEY_CHURN_COSTS = "churn_costs"
@@ -25,7 +26,7 @@ KEY_CHURN_COMBO = "churn_combo_rebates"
 KEY_CHURN_USE_REBATES = "churn_use_rebates"  # off by default: churning is judged on TC alone
 
 STRUCTURE_LOTS = {"outright": 1, "spread": 2, "fly": 4, "dfly": 8}  # gross lots when every month appears once
-STRUCTURE_WEIGHTS = {"outright": (1,), "spread": (1, -1), "fly": (1, -2, 1), "dfly": (1, -3, 3, -1)}
+STRUCTURE_WEIGHTS = FAMILY_WEIGHTS  # one definition of the structures: core.curve_calendar
 
 
 @dataclass(frozen=True)

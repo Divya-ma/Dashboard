@@ -10,16 +10,17 @@ from dash.exceptions import PreventUpdate
 
 from core.correlation import structure_difference_series
 from core.exceptions import CrudeOilRiskError
-from core.exposure import filter_open_structures
+from core.positions import dollar_weights, filter_open_structures
 from core.scenarios import build_scenarios, load_previous_day_atr
 from core.structure_view import statuses_for_filter
 from core.correlation import beta_window
 from core.user_settings import correlation_windows
 from core.var import (
     DISTRIBUTION_NORMAL,
+    VOL_FIXED,
+    VOL_HISTORY,
     MonteCarloVarResult,
     beta_vs_portfolio,
-    leg_dollar_weights,
     monte_carlo_var,
     portfolio_pnl_var,
     save_mc_settings,
@@ -59,16 +60,17 @@ def toggle_distribution_params(distribution):
     )
 
 
-def update_var_section(pathname, lookback, method, distribution, mean, std, low, high, n_simulations):
+def update_var_section(pathname, lookback, method, distribution, mean, std, low, high, n_simulations, vol_mode=VOL_HISTORY):
     """Cards, warnings and histogram: on tab open and whenever any VaR control changes."""
     if pathname != _PATH:
         raise PreventUpdate
     lookback_days = int(lookback)
     structures = _open_structures()
-    save_mc_settings(container.repository, distribution, mean, std, low, high, n_simulations)  # the Structure Builder runs the same Monte Carlo
+    vol_mode = vol_mode if vol_mode in (VOL_HISTORY, VOL_FIXED) else VOL_HISTORY
+    save_mc_settings(container.repository, distribution, mean, std, low, high, n_simulations, vol_mode, lookback_days)  # the Structure Builder runs the same Monte Carlo
 
     if method == METHOD_MONTE_CARLO:
-        weights = leg_dollar_weights(structures)
+        weights = dollar_weights(structures)
         n_sims = int(n_simulations or 10_000)
         dist_params = (
             {"mean": float(mean or 0.0), "std": float(std or 0.0)}
@@ -79,11 +81,11 @@ def update_var_section(pathname, lookback, method, distribution, mean, std, low,
         try:
             result = monte_carlo_var(
                 weights, container.data_loader, distribution, dist_params,
-                rolling=rolling, lookback=corr_lookback, n_simulations=n_sims,
+                rolling=rolling, lookback=corr_lookback, n_simulations=n_sims, vol_mode=vol_mode, vol_lookback=lookback_days,
             )
         except ValueError as exc:
             result = MonteCarloVarResult(error=str(exc))
-        period_label = f"{n_sims:,} sims"
+        period_label = f"{n_sims:,} sims" + (f", own volatility ({lookback_days}d)" if vol_mode == VOL_HISTORY else ", fixed size")
         title = f"Simulated Portfolio PnL Distribution (Monte Carlo, {distribution.title()})"
     else:
         result = portfolio_pnl_var(structures, lookback_days, container.data_loader)
@@ -102,7 +104,7 @@ def update_scenarios(pathname, n_clicks):
     """Scenario table: on tab open and on Refresh Scenarios (which re-reads the previous day's TR)."""
     if pathname != _PATH:
         raise PreventUpdate
-    weights = leg_dollar_weights(_open_structures())
+    weights = dollar_weights(_open_structures())
     if not weights:
         return [], NOTHING_TO_ANALYZE, ""
     atr = load_previous_day_atr(sorted(weights), container.data_loader)
@@ -150,6 +152,7 @@ def register_var_callbacks(app) -> None:
         Input("var-mc-low", "value"),
         Input("var-mc-high", "value"),
         Input("var-mc-simulations", "value"),
+        Input("var-mc-vol", "value"),
     )(update_var_section)
 
     app.callback(

@@ -37,6 +37,7 @@ from core.curve_calendar import FAMILIES, FLY, CurveStructure, parse_contract
 from core.curve_history import CurveHistoryStore, generic_code
 from core.curve_settings import CurveParams
 from core.exceptions import InsufficientDataError
+from core.hedge import slope_and_corr
 
 MIN_TICK = 0.01
 MIN_HEDGE_ROWS = 30
@@ -214,7 +215,7 @@ def rank_hedges(
         hedge = HedgeOption(
             family=candidate.family, label=candidate.structure.label,
             generic=structure_generic(product, candidate.structure), side=h_side, ratio=abs(ratio),
-            ratio_minvar=float(-np.cov(x, b)[0, 1] / np.var(b, ddof=1)), lots=0, entry=candidate.live,
+            ratio_minvar=float(-slope_and_corr(x, b)[0]), lots=0, entry=candidate.live,
             corr=correlation, var_reduction=max(0.0, reduction), legs=trade_legs(candidate.structure, h_side),
         )
         if abs(ratio) < 0.05:

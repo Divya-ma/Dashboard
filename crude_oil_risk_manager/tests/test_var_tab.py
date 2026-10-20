@@ -12,10 +12,10 @@ from adapters.base import API_CODE_TO_PRODUCT, SymbolTranslator
 from core.data_loader import DataLoader
 from core.exceptions import InsufficientDataError
 from core.models import Contract, Leg, Structure, StructureStatus, StructureType
+from core.positions import dollar_weights
 from core.scenarios import KIND_PORTFOLIO, build_scenarios, load_previous_day_atr, previous_day_true_range
 from core.var import (
     RELIABLE_OBSERVATIONS,
-    leg_dollar_weights,
     portfolio_pnl_var,
     var_from_pnl_series,
 )
@@ -86,8 +86,8 @@ def structure(name, legs, status=StructureStatus.OPEN):
 # ---------- dollar weights ----------
 
 
-def test_leg_dollar_weights_apply_ratio_side_lots_and_multiplier():
-    weights = leg_dollar_weights([
+def test_dollar_weights_apply_ratio_side_lots_and_multiplier():
+    weights = dollar_weights([
         structure("a", [("CLZ26", 1, "buy", 2), ("CLF27", -1, "buy", 2)]),
         structure("b", [("CLZ26", 1, "sell", 1)]),
         structure("fly", [("CLG27", 1, "sell", 1), ("CLH27", -2, "sell", 1)]),
@@ -98,8 +98,8 @@ def test_leg_dollar_weights_apply_ratio_side_lots_and_multiplier():
     assert weights["CLJ27-K27"] == 3000  # exchange-quoted spread leg used as it is
 
 
-def test_leg_dollar_weights_ignore_closed_shell_and_cancelling_legs():
-    weights = leg_dollar_weights([
+def test_dollar_weights_ignore_closed_shell_and_cancelling_legs():
+    weights = dollar_weights([
         structure("closed", [("CLZ26", 1, "buy", 5)], StructureStatus.CLOSED),
         structure("shell", [("CLZ26", 1, "buy", 0)], StructureStatus.SHELL),
         structure("up", [("CLF27", 1, "buy", 2)]),
