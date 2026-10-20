@@ -1,16 +1,13 @@
-"""Home tab layout: portfolio metric cards, winner/loser, stale-data warning and live structures table.
+"""Home tab layout: portfolio metric cards, winner/loser, stale-data warning and the live structures as packets.
 
 This is the skeleton only; ui/callbacks/home_callbacks.py fills it from the
 `store-portfolio-pnl` store.
 """
 
-import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
 from dash import html
 
 from ui.layouts.shell import COLORS
-
-MAX_TABLE_ROWS = 20
 
 _LABEL_STYLE = {
     "fontSize": "12px",
@@ -57,52 +54,6 @@ GRID_THEME = {
         "browserColorScheme: 'dark'})"
     )
 }
-
-_PNL_FORMATTER = {
-    "function": (
-        "params.value == null ? '' : "
-        "(params.value >= 0 ? '+$' : '-$') + d3.format(',.0f')(Math.abs(params.value))"
-    )
-}
-_PNL_CELL_STYLE = {
-    "styleConditions": [
-        {"condition": "params.value >= 0", "style": {"color": COLORS["ACCENT_GREEN"]}},
-        {"condition": "params.value < 0", "style": {"color": COLORS["ACCENT_RED"]}},
-    ]
-}
-
-
-def _pnl_column(field: str, header: str) -> dict:
-    return {
-        "field": field,
-        "headerName": header,
-        "type": "rightAligned",
-        "valueFormatter": _PNL_FORMATTER,
-        "cellStyle": _PNL_CELL_STYLE,
-    }
-
-
-COLUMN_DEFS = [
-    {"field": "name", "headerName": "Name", "flex": 2, "minWidth": 180},
-    {"field": "products", "headerName": "Product(s)"},
-    _pnl_column("unrealized", "Unrealized PnL"),
-    _pnl_column("realized", "Realized PnL"),
-    _pnl_column("total", "Total PnL"),
-    {"field": "status", "headerName": "Status"},
-    {"field": "days_held", "headerName": "Days Held", "type": "rightAligned"},
-]
-
-ROW_STYLE_CONDITIONS = [
-    {
-        "condition": "params.data.total > 0",
-        "style": {"backgroundColor": _rgba(COLORS["ACCENT_GREEN"], 0.08)},
-    },
-    {
-        "condition": "params.data.total < 0",
-        "style": {"backgroundColor": _rgba(COLORS["ACCENT_RED"], 0.08)},
-    },
-]
-
 
 REALIZED_VALUE_STYLE = {"fontSize": "2rem", "fontWeight": "bold", "lineHeight": "1.2", "color": COLORS["TEXT_PRIMARY"]}
 
@@ -169,17 +120,7 @@ def home_layout() -> html.Div:
     table = html.Div(
         [
             html.Div("Live Structures", style={**_LABEL_STYLE, "fontSize": "14px", "marginBottom": "10px"}),
-            dag.AgGrid(
-                id="home-structures-table",
-                columnDefs=COLUMN_DEFS,
-                rowData=[],
-                getRowId="params.data.structure_id",
-                defaultColDef={"sortable": True, "resizable": True},
-                columnSize="responsiveSizeToFit",
-                getRowStyle={"styleConditions": ROW_STYLE_CONDITIONS},
-                dashGridOptions={"domLayout": "autoHeight", "suppressCellFocus": True, "animateRows": False, "theme": GRID_THEME},
-                style={"width": "100%"},
-            ),
+            html.Div(id="home-structures-table", children=[html.Div("No open structures.", style={"color": COLORS["TEXT_SECONDARY"]})]),
         ]
     )
 

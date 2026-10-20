@@ -6,7 +6,7 @@ from dash.exceptions import PreventUpdate
 from db.repository import Repository
 from ui.callbacks import home_callbacks as hc
 from ui.container import Container
-from ui.layouts.home import MAX_TABLE_ROWS, home_layout
+from ui.layouts.home import home_layout
 from ui.layouts.shell import COLORS
 
 
@@ -177,47 +177,35 @@ def test_stale_banner_also_reports_symbols_with_no_price():
     assert "No live price for: CLF27" in result[13][0].children
 
 
-# ---------- update_home_table ----------
+# ---------- update_home_table (packets) ----------
 
 
-def test_table_empty_store_gives_no_rows():
-    assert hc.update_home_table({}) == []
+def packet(name, rows, unrealized=0.0, risk=None):
+    return {"name": name, "rows": rows, "unrealized": unrealized, "risk": risk}
 
 
-def test_table_rows_sorted_by_total_pnl_descending_with_ids():
-    rows = hc.update_home_table(payload())
-    assert [r["structure_id"] for r in rows] == ["a", "b", "c"]
-    assert rows[0] == {
-        "structure_id": "a", "name": "CL outright", "products": "CL",
-        "unrealized": 9800.0, "realized": 0.0, "total": 9800.0,
-        "status": "Open", "days_held": 0,
-    }
-    assert rows[2]["status"] == "Partially Closed"
+def packet_row(name="BRN Z26-F27-G27", side="BUY", unrealized=100.0, risk=250.0, live=0.35):
+    return {"structure_id": "abc", "name": name, "side": side, "lots": 5.0, "entry": 0.3, "live": live,
+            "risk": risk, "unrealized": unrealized, "total": unrealized, "is_stale": False}
 
 
-def test_table_joins_multiple_products():
-    data = payload(per_structure={"x": per_structure_entry("Cross", 1.0, products=("BRN", "CL"))})
-    assert hc.update_home_table(data)[0]["products"] == "BRN, CL"
+def test_table_empty_store_says_there_are_no_structures():
+    assert "No open structures" in str(hc.update_home_table({}))
+    assert "No open structures" in str(hc.update_home_table({"packets": []}))
 
 
-def test_table_limited_to_max_rows():
-    many = {f"s{i}": per_structure_entry(f"S{i}", float(i)) for i in range(MAX_TABLE_ROWS + 5)}
-    rows = hc.update_home_table(payload(per_structure=many))
-    assert len(rows) == MAX_TABLE_ROWS
-    assert rows[0]["total"] == float(MAX_TABLE_ROWS + 4)
+def test_table_shows_a_card_per_packet_with_the_structure_columns():
+    text = str(hc.update_home_table({"packets": [packet("BRN flies", [packet_row()], 100.0, 250.0)]}))
+    for expected in ("BRN flies", "Packet risk $250", "BRN Z26-F27-G27", "BUY", "0.30", "0.35", "$250", "+$100", "/structures/abc"):
+        assert expected in text, expected
+    for header in ("Side", "Lots", "Entry", "Live", "Risk (1d VaR 95%)", "Unrealized PnL"):
+        assert header in text
 
 
-# ---------- navigate_to_structure ----------
-
-
-def test_navigate_uses_row_id_from_click():
-    assert hc.navigate_to_structure({"rowId": "abc-123", "colId": "name"}) == "/structures/abc-123"
-
-
-@pytest.mark.parametrize("clicked", [None, {}, {"rowId": None}])
-def test_navigate_without_row_id_does_nothing(clicked):
-    with pytest.raises(PreventUpdate):
-        hc.navigate_to_structure(clicked)
+def test_table_marks_missing_live_price_and_risk_with_a_dash():
+    row = packet_row(live=None, risk=None, side="SELL")
+    text = str(hc.update_home_table({"packets": [packet("CL spreads", [row])]}))
+    assert "SELL" in text and "'—'" in text
 
 
 # ---------- layout ----------

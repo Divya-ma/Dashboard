@@ -18,6 +18,7 @@ from dash.exceptions import PreventUpdate
 from adapters.base import APIError, AuthenticationError, SymbolTranslator
 from config.settings import settings
 from core.models import AlertLevel, StructureStatus, TradeEventType
+from core.packets import RiskCache, build_packets
 from core.pnl import (
     apply_pnl_reset_baseline,
     build_pnl_record,
@@ -279,6 +280,12 @@ def update_countdown(countdown_intervals, poll_intervals):
 # ----------------------------------------------------------------------
 
 
+_risk_cache = RiskCache(
+    lambda: container.data_loader,
+    lambda: container.settlements.version if container.settlements is not None else None,
+)
+
+
 def _add_structure_details(summary: dict, structures, stale_symbols: list[str]) -> None:
     """Add display details (name, products, status, days held) and the stale/missing symbols in use."""
     for structure in structures:
@@ -337,6 +344,7 @@ def refresh_portfolio_pnl(n_intervals, live_prices):
     all_trades = [t for group in (*trades.values(), *closed_trades.values()) for t in group]
     summary["todays_realized_pnl"] = calculate_todays_realized_pnl(all_trades)
     _add_structure_details(summary, structures, stale)
+    summary["packets"] = build_packets(structures, summary["per_structure"], prices, _risk_cache)
     summary["todays_pnl"] = _todays_pnl(structures, trades, prices, stale, summary)
     summary["calculated_at"] = summary["calculated_at"].isoformat()
     summary["has_missing_prices"] = bool(summary["missing_price_symbols"])

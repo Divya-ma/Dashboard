@@ -372,6 +372,41 @@ def compute_heatmap(n_clicks, watchlist, rolling, lookback, as_of_str):
     return build_heatmap_figure(result.matrix, rolling_days, lookback_days), _status(text + skipped)
 
 
+def portfolio_items(structures: dict) -> list[dict]:
+    """Watchlist items for the open structures, each with a label that is unique and says what is held."""
+    items, seen = [], set()
+    for structure in structures.values():
+        traded = [leg for leg in structure.legs if leg.is_traded]
+        if not traded:
+            continue
+        side = "BUY" if all(leg.direction == "buy" for leg in traded) else "SELL" if all(leg.direction == "sell" for leg in traded) else "MIXED"
+        label = f"{structure.name} ({side} {traded[0].lots:g})"
+        if label in seen:
+            label = f"{label} #{structure.structure_id[:4]}"
+        seen.add(label)
+        items.append({"type": "structure", "key": structure.structure_id, "label": label})
+    return items
+
+
+def compute_portfolio_matrix(n_clicks, rolling, lookback):
+    """Correlation matrix of all open positions (also runs when the tab opens)."""
+    try:
+        rolling_days, lookback_days = _read_windows(rolling, lookback)
+    except ValueError as exc:
+        return empty_figure(str(exc), is_error=True), _status(f"⚠️ {exc}", is_error=True)
+    structures = _open_structures()
+    items = portfolio_items(structures)
+    if len(items) < 2:
+        return empty_figure("Hold at least 2 positions to see how they correlate"), _status(f"{len(items)} open position(s).")
+    result = compute_watchlist_correlation(items, structures, rolling_days, lookback_days, container.data_loader)
+    skipped = f" Skipped: {', '.join(f'{k} ({v})' for k, v in result.skipped.items())}." if result.skipped else ""
+    if result.error:
+        return empty_figure(result.error, is_error=True), _status(f"⚠️ {result.error}.{skipped}", is_error=True)
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    text = f"Last computed {now} UTC · {len(result.matrix)} positions · {rolling_days}d rolling, average of the last {result.observations} days."
+    return build_heatmap_figure(result.matrix, rolling_days, lookback_days), _status(text + skipped)
+
+
 # ----------------------------------------------------------------------
 # Time Series / Year Overlay / Summary Table
 # ----------------------------------------------------------------------
@@ -504,6 +539,14 @@ def compute_summary(n_clicks, watchlist, rolling, lookback):
 
 def register_correlation_callbacks(app) -> None:
     """Attach the Correlation tab callbacks to the Dash app."""
+    app.callback(
+        Output("corr-pf-heatmap", "figure"),
+        Output("corr-pf-status", "children"),
+        Input("corr-pf-btn", "n_clicks"),
+        State("corr-pf-rolling", "value"),
+        State("corr-pf-lookback", "value"),
+    )(compute_portfolio_matrix)
+
     app.callback(
         Output("corr-instrument-group", "style"),
         Output("corr-structure-group", "style"),

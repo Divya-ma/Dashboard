@@ -449,6 +449,29 @@ def _heatmap_tab() -> html.Div:
     )
 
 
+def portfolio_matrix_section() -> html.Div:
+    """Correlation of every open position with every other (daily P&L changes of each structure as held)."""
+    return html.Div(
+        [
+            html.H5("Portfolio positions", style={"color": COLORS["TEXT_PRIMARY"], "margin": "26px 0 4px"}),
+            html.Div(
+                "Every open structure against every other, on the daily P&L changes of the position as held (a sold structure is "
+                "flipped), so a negative cell means the two positions offset each other.",
+                style={**_MUTED, "marginBottom": "10px"},
+            ),
+            dbc.Row(
+                [
+                    *_window_inputs("corr-pf-rolling", "corr-pf-lookback"),
+                    dbc.Col(_compute_button("corr-pf-btn"), md=3, className="d-flex align-items-end"),
+                ],
+                className="mb-2",
+            ),
+            dcc.Graph(id="corr-pf-heatmap", figure=empty_figure("Open positions will appear here"), config={"displayModeBar": False}, style={"height": "560px"}),
+            html.Div(id="corr-pf-status", style={**_MUTED, "marginTop": "10px", "minHeight": "20px"}),
+        ]
+    )
+
+
 def _time_series_tab() -> html.Div:
     presets = sorted({*TS_WINDOW_PRESETS, *default_ts_windows()})
     window_checks = dbc.Checklist(
@@ -529,6 +552,7 @@ def correlation_layout() -> html.Div:
             dcc.Store(id="corr-excel-pair", data=None),  # {base, target} labels from the last Excel Add
             html.H3("🔗 Correlation", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "16px"}),
             corr_matrix_section(default_rolling_window(), default_lookback()),
+            portfolio_matrix_section(),
             html.Details(
                 [
                     html.Summary(

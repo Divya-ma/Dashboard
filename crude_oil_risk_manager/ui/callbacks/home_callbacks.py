@@ -5,13 +5,13 @@ which runs on every tab (so alerts keep working away from Home). These callbacks
 only render that store, and they refresh whenever it updates.
 """
 
-from dash import Input, Output, html
-from dash.exceptions import PreventUpdate
+import dash_bootstrap_components as dbc
+from dash import Input, Output, dcc, html
 
 from config.settings import settings
 from core.user_settings import KEY_MARGIN_LIMIT
 from ui.container import container
-from ui.layouts.home import MAX_TABLE_ROWS, REALIZED_VALUE_STYLE
+from ui.layouts.home import REALIZED_VALUE_STYLE
 from ui.layouts.shell import COLORS
 
 _STATUS_LABELS = {"open": "Open", "partially_closed": "Partially Closed"}
@@ -145,34 +145,58 @@ def update_home_metrics(portfolio_pnl):
     )
 
 
+_CELL = {"padding": "6px 10px", "textAlign": "right", "whiteSpace": "nowrap"}
+_HEAD = {**_CELL, "color": COLORS["TEXT_SECONDARY"], "fontSize": "11px", "textTransform": "uppercase", "fontWeight": "normal"}
+_COLUMNS = ["Structure", "Side", "Lots", "Entry", "Live", "Risk (1d VaR 95%)", "Unrealized PnL"]
+
+
+def _price(value: float | None) -> str:
+    return "—" if value is None else f"{value:,.2f}"
+
+
+def _risk(value: float | None) -> str:
+    return "—" if value is None else f"${value:,.0f}"
+
+
+def _structure_row(row: dict) -> html.Tr:
+    side_color = {"BUY": COLORS["ACCENT_GREEN"], "SELL": COLORS["ACCENT_RED"]}.get(row["side"], COLORS["TEXT_SECONDARY"])
+    name = dcc.Link(row["name"], href=f"/structures/{row['structure_id']}", style={"color": COLORS["TEXT_PRIMARY"]})
+    if row.get("is_stale"):
+        name = html.Span([name, html.Span(" ⚠ stale", style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "11px"})])
+    return html.Tr([
+        html.Td(name, style={**_CELL, "textAlign": "left"}),
+        html.Td(row["side"], style={**_CELL, "color": side_color, "fontWeight": "bold"}),
+        html.Td(f"{row['lots']:,g}", style=_CELL),
+        html.Td(_price(row["entry"]), style=_CELL),
+        html.Td(_price(row["live"]), style=_CELL),
+        html.Td(_risk(row["risk"]), style=_CELL),
+        html.Td(_pnl_span(row["unrealized"]), style=_CELL),
+    ], style={"borderTop": f"1px solid {COLORS['BORDER_COLOR']}"})
+
+
+def _packet_card(packet: dict) -> dbc.Card:
+    header = html.Div([
+        html.Span(packet["name"], style={"fontWeight": "bold", "fontSize": "15px"}),
+        html.Span(f"  {len(packet['rows'])} structure{'s' if len(packet['rows']) != 1 else ''}", style=_SMALL_TEXT),
+        html.Span([
+            html.Span(f"Packet risk {_risk(packet['risk'])}", style={"color": COLORS["TEXT_SECONDARY"], "marginRight": "16px"}),
+            _pnl_span(packet["unrealized"]),
+        ], style={"float": "right"}),
+    ], style={"marginBottom": "8px"})
+    table = html.Table([
+        html.Thead(html.Tr([html.Th(c, style={**_HEAD, "textAlign": "left" if c == "Structure" else "right"}) for c in _COLUMNS])),
+        html.Tbody([_structure_row(r) for r in packet["rows"]]),
+    ], style={"width": "100%", "fontSize": "13px"})
+    return dbc.Card(dbc.CardBody([header, table]), className="mb-3", style={
+        "backgroundColor": COLORS["CARD_BG"], "border": f"1px solid {COLORS['BORDER_COLOR']}"})
+
+
 def update_home_table(portfolio_pnl):
-    """Row data for the live structures table: open structures, best PnL first, max 20 rows."""
-    if not portfolio_pnl:
-        return []
-
-    rows = [
-        {
-            "structure_id": structure_id,
-            "name": info.get("name", structure_id),
-            "products": ", ".join(info.get("products", [])),
-            "unrealized": info["unrealized"],
-            "realized": info["realized"],
-            "total": info["total"],
-            "status": _STATUS_LABELS.get(info.get("status"), info.get("status", "")),
-            "days_held": info.get("days_held"),
-        }
-        for structure_id, info in portfolio_pnl.get("per_structure", {}).items()
-    ]
-    rows.sort(key=lambda row: row["total"], reverse=True)
-    return rows[:MAX_TABLE_ROWS]
-
-
-def navigate_to_structure(cell_clicked):
-    """Go to /structures/{structure_id} when a table row is clicked."""
-    structure_id = (cell_clicked or {}).get("rowId")
-    if not structure_id:
-        raise PreventUpdate
-    return f"/structures/{structure_id}"
+    """Live structures as packets (product + shape), each a table of its structures; click a name to open it."""
+    packets = (portfolio_pnl or {}).get("packets") or []
+    if not packets:
+        return [html.Div("No open structures.", style={"color": COLORS["TEXT_SECONDARY"]})]
+    return [_packet_card(p) for p in packets]
 
 
 def register_home_callbacks(app) -> None:
@@ -196,12 +220,6 @@ def register_home_callbacks(app) -> None:
     )(update_home_metrics)
 
     app.callback(
-        Output("home-structures-table", "rowData"),
+        Output("home-structures-table", "children"),
         Input("store-portfolio-pnl", "data"),
     )(update_home_table)
-
-    app.callback(
-        Output("url", "pathname"),
-        Input("home-structures-table", "cellClicked"),
-        prevent_initial_call=True,
-    )(navigate_to_structure)

@@ -813,3 +813,22 @@ def test_render_watchlist_rows_flags_excel_type(env, tmp_path):
     rendered, backfill_style, missing = cc.render_watchlist_rows([item])
     assert "EXCEL" in str(rendered)
     assert missing == []  # nothing to backfill for an excel-sourced item
+
+
+def test_portfolio_matrix_correlates_the_open_positions_and_flips_a_sold_one(env, make_data, repo):
+    base = random_closes(80, 1)
+    make_data(CLZ26=base, CLF27=base * 1.0 + random_closes(80, 2) * 0.05, CLG27=random_closes(80, 3))
+    for name, symbol, direction in (("long z", "CLZ26", "buy"), ("short f", "CLF27", "sell"), ("long g", "CLG27", "buy")):
+        repo.save_structure(structure(name, [(symbol, 1, direction, 2.0)]))
+    figure, status = cc.compute_portfolio_matrix(None, 5, 30)
+    labels = list(figure.data[0].x)
+    assert labels == ["long z (BUY 2)", "short f (SELL 2)", "long g (BUY 2)"] or sorted(labels) == sorted(["long z (BUY 2)", "short f (SELL 2)", "long g (BUY 2)"])
+    z = figure.data[0].z
+    i, j = labels.index("long z (BUY 2)"), labels.index("short f (SELL 2)")
+    assert z[i][j] < -0.5  # the sold position offsets the bought one
+    assert "3 positions" in status.children
+
+
+def test_portfolio_matrix_needs_two_positions(env, repo):
+    figure, status = cc.compute_portfolio_matrix(None, 5, 30)
+    assert "at least 2 positions" in figure.layout.annotations[0].text
