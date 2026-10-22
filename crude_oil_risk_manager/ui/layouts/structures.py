@@ -9,6 +9,7 @@ import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
 from dash import html
 
+from ui.layouts.dissolve import dissolve_button, dissolve_modal
 from ui.layouts.home import GRID_THEME
 from ui.layouts.shell import COLORS
 from ui.layouts.structure_detail import (
@@ -172,7 +173,10 @@ def structures_layout() -> html.Div:
     """Active structures, collapsible closed structures and the structure detail modal."""
     header = html.Div(
         [
-            dbc.Button("+ New Structure", id="btn-new-structure", color="success", style={"float": "right"}),
+            html.Div(
+                [dissolve_button(), dbc.Button("+ New Structure", id="btn-new-structure", color="success")],
+                style={"float": "right"},
+            ),
             html.H3("📊 Structures", style={"color": COLORS["TEXT_PRIMARY"], "margin": 0}),
         ],
         style={"overflow": "hidden", "marginBottom": "16px"},
@@ -216,7 +220,7 @@ def structures_layout() -> html.Div:
     return html.Div(
         [
             header, filter_bar, active_grid, closed_section,
-            _detail_modal(),
+            _detail_modal(), dissolve_modal(),
             # Later in the DOM than the detail modal, so they stack above it.
             confirm_exit_modal(), confirm_edit_modal(), confirm_delete_modal(), confirm_leg_exit_modal(), detail_toast(),
         ]

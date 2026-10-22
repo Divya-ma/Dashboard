@@ -69,10 +69,12 @@ class OiService:
     def needs_update(self) -> bool:
         today = self._clock().date().isoformat()
         loaded = self.store.loaded_history_days
-        if self.store.updated_on != today or loaded is None or loaded < self.history_days():
+        if self.store.updated_on != today or loaded is None or loaded < self.history_days() or not self.store.has_every_product():
             return True
         atr = self.atr_store
-        return atr is not None and (atr.updated_on != today or atr.loaded_history_days is None or atr.loaded_history_days < self.atr_history_days())
+        return atr is not None and (
+            atr.updated_on != today or atr.loaded_history_days is None or atr.loaded_history_days < self.atr_history_days() or not atr.has_every_product()
+        )
 
     def _run(self) -> None:
         progress = self.store.progress

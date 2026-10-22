@@ -7,6 +7,7 @@ from dataclasses import asdict
 from dash import Input, Output, State, html, no_update
 
 from core.atr_engine import pair_hedge, validate_params
+from core.contract_specs import spec_for_product
 from core.curve_calendar import PRODUCTS, product_of_symbol as product_of
 from ui.container import container
 from ui.layouts.atr_view import PARAM_INPUTS, atr_body, build_atr_chart, hedge_calculator_result
@@ -82,7 +83,7 @@ def hedge_options(version, active_tab, params_dict, current_a, current_b):
 
 
 def render_hedge(a, b, lots, window, params_dict):
-    """The hedge of contract A by contract B (either may be CL or BRN, of any family)."""
+    """The hedge of contract A by contract B (either may be CL, BRN or G, of any family)."""
     service = container.oi_service
     muted = {"color": COLORS["TEXT_SECONDARY"]}
     if service is None or service.atr_store is None or not a or not b or not params_dict:
@@ -106,7 +107,8 @@ def render_hedge(a, b, lots, window, params_dict):
             names[symbol] = f"{product} {engine.universe[symbol].label}" if symbol in getattr(engine, "universe", {}) else symbol
         if frames[a] is None or frames[b] is None:
             return html.Div("One of the contracts has too little history for an ATR yet.", style=muted)
-        return hedge_calculator_result(pair_hedge(frames[a], frames[b], names[a], names[b], window), lots, window)
+        size_ratio = spec_for_product(product_of(a)).multiplier / spec_for_product(product_of(b)).multiplier
+        return hedge_calculator_result(pair_hedge(frames[a], frames[b], names[a], names[b], window, size_ratio), lots, window)
     except Exception:  # noqa: BLE001
         logger.exception("Hedge calculator failed")
         return html.Div("Could not work out the hedge; see the log.", style=_ERROR)

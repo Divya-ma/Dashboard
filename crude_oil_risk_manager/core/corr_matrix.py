@@ -17,7 +17,8 @@ the range already has a full window). The matrix is target structures (rows) aga
 (columns).
 
 The hedge ratio is the minimum-variance one: the beta of the target's daily changes on the base's over a
-window of W days (lots of base per lot of target); `rolling_beta` gives its path.
+window of W days (lots of base per lot of target); `rolling_beta` gives its path in POINTS per point, and the page scales it
+by the two products' contract sizes (a gasoil lot is 100 tonnes, a CL or Brent lot 1,000 barrels) to get lots.
 """
 
 from dataclasses import dataclass

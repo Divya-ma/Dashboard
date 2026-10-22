@@ -133,7 +133,7 @@ def update_home_metrics(portfolio_pnl):
         reset_note,
         today_text,
         today_style,
-        _unrealized_card(portfolio_pnl["total_unrealized"], portfolio_pnl.get("total_transaction_costs", 0.0)),
+        _unrealized_card(portfolio_pnl["total_unrealized"], portfolio_pnl.get("total_open_costs", portfolio_pnl.get("total_transaction_costs", 0.0))),
         str(portfolio_pnl["open_structure_count"]),
         str(portfolio_pnl["open_leg_count"]),
         _net_lots(portfolio_pnl.get("net_lots_by_product", {})),
@@ -145,9 +145,9 @@ def update_home_metrics(portfolio_pnl):
     )
 
 
-_CELL = {"padding": "6px 10px", "textAlign": "right", "whiteSpace": "nowrap"}
+_CELL = {"padding": "4px 8px", "textAlign": "right", "whiteSpace": "nowrap"}
 _HEAD = {**_CELL, "color": COLORS["TEXT_SECONDARY"], "fontSize": "11px", "textTransform": "uppercase", "fontWeight": "normal"}
-_COLUMNS = ["Structure", "Side", "Lots", "Entry", "Live", "Risk (1d VaR 95%)", "Unrealized PnL"]
+_LEG_COLUMNS = ["Contract", "Side", "Lots", "Entry", "Live", "Risk", "Unrealized"]
 
 
 def _price(value: float | None) -> str:
@@ -158,45 +158,58 @@ def _risk(value: float | None) -> str:
     return "—" if value is None else f"${value:,.0f}"
 
 
-def _structure_row(row: dict) -> html.Tr:
-    side_color = {"BUY": COLORS["ACCENT_GREEN"], "SELL": COLORS["ACCENT_RED"]}.get(row["side"], COLORS["TEXT_SECONDARY"])
-    name = dcc.Link(row["name"], href=f"/structures/{row['structure_id']}", style={"color": COLORS["TEXT_PRIMARY"]})
-    if row.get("is_stale"):
-        name = html.Span([name, html.Span(" ⚠ stale", style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "11px"})])
+def _side_color(side: str) -> str:
+    return {"BUY": COLORS["ACCENT_GREEN"], "SELL": COLORS["ACCENT_RED"]}.get(side, COLORS["TEXT_SECONDARY"])
+
+
+def _stat(label: str, value) -> html.Div:
+    return html.Div(
+        [html.Div(label, style={"fontSize": "10px", "textTransform": "uppercase", "color": COLORS["TEXT_SECONDARY"]}),
+         html.Div(value, style={"fontSize": "14px", "color": COLORS["TEXT_PRIMARY"]})],
+        style={"marginRight": "18px"},
+    )
+
+
+def _leg_row(leg: dict) -> html.Tr:
     return html.Tr([
-        html.Td(name, style={**_CELL, "textAlign": "left"}),
-        html.Td(row["side"], style={**_CELL, "color": side_color, "fontWeight": "bold"}),
-        html.Td(f"{row['lots']:,g}", style=_CELL),
-        html.Td(_price(row["entry"]), style=_CELL),
-        html.Td(_price(row["live"]), style=_CELL),
-        html.Td(_risk(row["risk"]), style=_CELL),
-        html.Td(_pnl_span(row["unrealized"]), style=_CELL),
+        html.Td(leg["symbol"], style={**_CELL, "textAlign": "left"}),
+        html.Td(leg["side"], style={**_CELL, "color": _side_color(leg["side"])}),
+        html.Td(f"{leg['lots']:,g}", style=_CELL),
+        html.Td(_price(leg["entry"]), style=_CELL),
+        html.Td(_price(leg["live"]), style=_CELL),
+        html.Td(_risk(leg["risk"]), style=_CELL),
+        html.Td("—" if leg["unrealized"] is None else _pnl_span(leg["unrealized"]), style=_CELL),
     ], style={"borderTop": f"1px solid {COLORS['BORDER_COLOR']}"})
 
 
 def _packet_card(packet: dict) -> dbc.Card:
-    header = html.Div([
-        html.Span(packet["name"], style={"fontWeight": "bold", "fontSize": "15px"}),
-        html.Span(f"  {len(packet['rows'])} structure{'s' if len(packet['rows']) != 1 else ''}", style=_SMALL_TEXT),
-        html.Span([
-            html.Span(f"Packet risk {_risk(packet['risk'])}", style={"color": COLORS["TEXT_SECONDARY"], "marginRight": "16px"}),
-            _pnl_span(packet["unrealized"]),
-        ], style={"float": "right"}),
-    ], style={"marginBottom": "8px"})
-    table = html.Table([
-        html.Thead(html.Tr([html.Th(c, style={**_HEAD, "textAlign": "left" if c == "Structure" else "right"}) for c in _COLUMNS])),
-        html.Tbody([_structure_row(r) for r in packet["rows"]]),
-    ], style={"width": "100%", "fontSize": "13px"})
-    return dbc.Card(dbc.CardBody([header, table]), className="mb-3", style={
-        "backgroundColor": COLORS["CARD_BG"], "border": f"1px solid {COLORS['BORDER_COLOR']}"})
+    title = dcc.Link(
+        packet["name"], href=f"/structures/{packet['structure_id']}",
+        style={"color": COLORS["TEXT_PRIMARY"], "fontWeight": "bold", "fontSize": "16px", "textDecoration": "none"},
+    )
+    stale = html.Span("  ⚠ stale price", style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "11px"}) if packet.get("is_stale") else ""
+    stats = html.Div([
+        _stat("Side", html.Span(packet["side"], style={"color": _side_color(packet["side"]), "fontWeight": "bold"})),
+        _stat("Lots", f"{packet['lots']:,g}"), _stat("Entry", _price(packet["entry"])), _stat("Live", _price(packet["live"])),
+        _stat("Target", _price(packet.get("target"))), _stat("Stop", _price(packet.get("stop"))),
+        _stat("Risk (1d VaR 95%)", _risk(packet["risk"])), _stat("Unrealized", _pnl_span(packet["unrealized"])),
+    ], style={"display": "flex", "flexWrap": "wrap", "margin": "8px 0 10px"})
+    legs = html.Table([
+        html.Thead(html.Tr([html.Th(c, style={**_HEAD, "textAlign": "left" if c == "Contract" else "right"}) for c in _LEG_COLUMNS])),
+        html.Tbody([_leg_row(leg) for leg in packet["legs"]]),
+    ], style={"width": "100%", "fontSize": "12px"})
+    return dbc.Card(dbc.CardBody([html.Div([title, stale]), stats, legs]), style={
+        "backgroundColor": COLORS["CARD_BG"], "border": f"1px solid {COLORS['BORDER_COLOR']}",
+        "borderLeft": f"4px solid {_side_color(packet['side'])}", "height": "100%",
+    })
 
 
 def update_home_table(portfolio_pnl):
-    """Live structures as packets (product + shape), each a table of its structures; click a name to open it."""
+    """Live structures: one packet (card) per open structure with its legs; click the name to open the structure."""
     packets = (portfolio_pnl or {}).get("packets") or []
     if not packets:
         return [html.Div("No open structures.", style={"color": COLORS["TEXT_SECONDARY"]})]
-    return [_packet_card(p) for p in packets]
+    return dbc.Row([dbc.Col(_packet_card(p), xl=4, lg=6, className="mb-3") for p in packets])
 
 
 def register_home_callbacks(app) -> None:

@@ -454,3 +454,13 @@ def test_price_alert_callback_ignores_trades_without_levels(env, repo):
     _alert_setup(repo)  # no stop or target on the trade
     with pytest.raises(cb.PreventUpdate):
         cb.check_price_alerts({"CLZ26": {"price": 1.0}}, None)
+
+
+def test_every_component_library_a_lazily_loaded_page_uses_is_imported_at_startup():
+    """Dash raises ImportedInsideCallbackError if a component library is first imported by a page loaded in a callback."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    startup = (root / "ui" / "app.py").read_text(encoding="utf-8")
+    for library in ("dash_ag_grid", "dash_bootstrap_components"):
+        assert f"import {library}" in startup, library

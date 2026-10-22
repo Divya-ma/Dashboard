@@ -103,15 +103,22 @@ class PairHedge:
     unhedged_window: float  # daily SD (points of A) of A alone, window
     first_day: date | None
     last_day: date | None
+    size_ratio: float = 1.0  # contract size of A / contract size of B ($ per point per lot); the lot ratios above include it
 
 
-def pair_hedge(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, window: int) -> PairHedge | None:
+def pair_hedge(
+    a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, window: int, size_ratio: float = 1.0,
+) -> PairHedge | None:
     """Hedge a position in A with B. Frames are indexed by date with columns close and atr (core.atr_calc.atr_frame).
 
     Daily changes are the changes of the close between the days BOTH traded (a day either skipped is left out for
     both, so the two changes always cover the same span). The minimum-variance hedge is the beta of A's changes on
     B's: hold -beta lots of B per lot of A (long A, short beta of B). Its effectiveness is the correlation squared.
-    The ATR ratio is the cruder alternative that only matches the size of the daily moves, not their direction."""
+    The ATR ratio is the cruder alternative that only matches the size of the daily moves, not their direction.
+
+    `size_ratio` = A's dollars per point per lot / B's: the beta is in points of A per point of B, so a LOT of B (say
+    gasoil, 100 tonnes, against 1,000 barrels of Brent) hedges size_ratio x beta lots per lot of A. The residual risk
+    is worked out in points with the raw beta, so it does not change."""
     both = pd.concat([a["close"].rename("a"), b["close"].rename("b")], axis=1, join="inner").dropna()
     atr_a, atr_b = a["atr"].dropna(), b["atr"].dropna()
     if len(both) < 3 or atr_a.empty or atr_b.empty:
@@ -125,8 +132,8 @@ def pair_hedge(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, windo
     last_a, last_b = float(atr_a.iloc[-1]), float(atr_b.iloc[-1])
     return PairHedge(
         a_name, b_name, int(len(change)), int(len(tail)), last_a, last_b, atr_a.index[-1].date(), atr_b.index[-1].date(),
-        last_a / last_b if last_b > 0 else np.nan, beta_w, corr_w, beta_all, corr_all, residual, unhedged,
-        change.index[0].date(), change.index[-1].date(),
+        last_a / last_b if last_b > 0 else np.nan, beta_w * size_ratio, corr_w, beta_all * size_ratio, corr_all, residual, unhedged,
+        change.index[0].date(), change.index[-1].date(), size_ratio,
     )
 
 

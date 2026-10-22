@@ -180,13 +180,11 @@ def test_stale_banner_also_reports_symbols_with_no_price():
 # ---------- update_home_table (packets) ----------
 
 
-def packet(name, rows, unrealized=0.0, risk=None):
-    return {"name": name, "rows": rows, "unrealized": unrealized, "risk": risk}
-
-
-def packet_row(name="BRN Z26-F27-G27", side="BUY", unrealized=100.0, risk=250.0, live=0.35):
+def packet(name="BRN Z26-F27-G27", side="BUY", unrealized=100.0, risk=250.0, live=0.35, legs=None):
+    legs = legs if legs is not None else [
+        {"symbol": "BRNZ26", "side": "BUY", "lots": 5.0, "entry": 76.0, "live": 77.0, "risk": 900.0, "unrealized": 5000.0}]
     return {"structure_id": "abc", "name": name, "side": side, "lots": 5.0, "entry": 0.3, "live": live,
-            "risk": risk, "unrealized": unrealized, "total": unrealized, "is_stale": False}
+            "risk": risk, "unrealized": unrealized, "total": unrealized, "is_stale": False, "legs": legs, "target": 0.5, "stop": -0.2}
 
 
 def test_table_empty_store_says_there_are_no_structures():
@@ -194,17 +192,18 @@ def test_table_empty_store_says_there_are_no_structures():
     assert "No open structures" in str(hc.update_home_table({"packets": []}))
 
 
-def test_table_shows_a_card_per_packet_with_the_structure_columns():
-    text = str(hc.update_home_table({"packets": [packet("BRN flies", [packet_row()], 100.0, 250.0)]}))
-    for expected in ("BRN flies", "Packet risk $250", "BRN Z26-F27-G27", "BUY", "0.30", "0.35", "$250", "+$100", "/structures/abc"):
+def test_table_shows_a_packet_per_structure_with_its_legs():
+    text = str(hc.update_home_table({"packets": [packet(), packet(name="second")]}))
+    assert text.count("Risk (1d VaR 95%)") == 2 and "second" in text
+    for expected in ("BRN Z26-F27-G27", "BUY", "0.30", "0.35", "0.50", "-0.20", "$250", "+$100", "/structures/abc", "BRNZ26", "77.00", "$900", "+$5,000"):
         assert expected in text, expected
-    for header in ("Side", "Lots", "Entry", "Live", "Risk (1d VaR 95%)", "Unrealized PnL"):
+    for header in ("Target", "Stop", "Contract", "Side", "Lots", "Entry", "Live", "Risk", "Unrealized"):
         assert header in text
 
 
 def test_table_marks_missing_live_price_and_risk_with_a_dash():
-    row = packet_row(live=None, risk=None, side="SELL")
-    text = str(hc.update_home_table({"packets": [packet("CL spreads", [row])]}))
+    leg = {"symbol": "CLZ26", "side": "SELL", "lots": 1.0, "entry": 70.0, "live": None, "risk": None, "unrealized": None}
+    text = str(hc.update_home_table({"packets": [packet(side="SELL", live=None, risk=None, legs=[leg])]}))
     assert "SELL" in text and "'—'" in text
 
 

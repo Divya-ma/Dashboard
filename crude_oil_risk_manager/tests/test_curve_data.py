@@ -236,3 +236,15 @@ def test_an_empty_answer_is_not_an_error_when_the_series_is_already_up_to_date(t
     store.refresh("BRN", years=1, today=TODAY)
     report = store.refresh("BRN", years=1, today=TODAY)  # only today's unfinished bar comes back, which is dropped
     assert report.ok and report.rows_added == 0
+
+
+def test_one_store_serves_two_pages_without_overwriting_each_other(tmp_path):
+    store = PrevSettlementStore(tmp_path / "prev.json")
+    symbols = [s.symbol for s in build_structures("BRN", TODAY)[OUTRIGHT]]
+    few, many = symbols[:5], symbols
+    store.fetch(FakeApi(), few, TODAY, TODAY)
+    assert store.attempted(few) and not store.attempted(many)  # the wider page still has to fetch
+    store.fetch(FakeApi(), many, TODAY, TODAY)
+    assert store.attempted(few) and store.attempted(many) and set(few) <= set(store.prices())
+    store.fetch(FakeApi(), few, TODAY, TODAY)  # the narrower page fetching again keeps the wider data
+    assert set(many) <= set(store.prices())

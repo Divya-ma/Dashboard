@@ -132,6 +132,10 @@ class AtrStore:
     def has_data(self) -> bool:
         return any(self._path(p).exists() for p in PRODUCTS)
 
+    def has_every_product(self) -> bool:
+        """False while a product in PRODUCTS has never been downloaded (one added after the last daily update)."""
+        return all(self._path(p).exists() for p in PRODUCTS)
+
     # -- planning -------------------------------------------------------
 
     def plan(self, product: str, history_days: int, today: date) -> list[tuple[AtrInstrument, date, bool]]:

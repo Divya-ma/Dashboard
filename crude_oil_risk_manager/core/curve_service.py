@@ -32,6 +32,7 @@ from core.curve_calendar import (
     FAMILY_LABELS,
     N_MONTHS,
     OUTRIGHT,
+    PRODUCTS,
     CurveStructure,
     buffer_rolls,
     build_structures,
@@ -123,7 +124,7 @@ class CurveService:
         settlements: PrevSettlementStore,
         snapshots: SnapshotStore,
         alert_manager,
-        products: tuple[str, ...] = ("CL", "BRN"),
+        products: tuple[str, ...] = tuple(PRODUCTS),
         n: int = N_MONTHS,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         run_in_background: bool = True,
@@ -221,7 +222,7 @@ class CurveService:
 
         today = now.date().isoformat()
         if (
-            self._repository.get_setting(KEY_HISTORY_REFRESHED_ON) != today
+            (self._repository.get_setting(KEY_HISTORY_REFRESHED_ON) != today or self._products_without_history())
             and not self._job_running("history")
             and now >= self._retry_after.get("history", now)
         ):
@@ -230,10 +231,15 @@ class CurveService:
         open_time, zone = load_open_time(self._repository)
         local = now.astimezone(zone)
         due = self.settlements.fetched_on is None or (
-            local.time() >= open_time and self.settlements.fetched_on != local.date().isoformat()
+            local.time() >= open_time
+            and (self.settlements.fetched_on != local.date().isoformat() or not self.settlements.attempted(self.outright_symbols()))
         )
         if due and not self._job_running("settlement") and now >= self._retry_after.get("settlement", now):
             self._start_job("settlement", lambda: self._refresh_settlements(now.date(), local.date()))
+
+    def _products_without_history(self) -> list[str]:
+        """Products with no stored generic history at all (a product added since the last daily refresh is fetched at once)."""
+        return [p for p in self.products if self.history.last_date(p, generic_code(p, OUTRIGHT, 1)) is None]
 
     def _refresh_history(self, years: int, today: date) -> None:
         failed = []
@@ -248,6 +254,8 @@ class CurveService:
         else:
             self.job_messages["history"] = f"History refreshed {self._clock().strftime('%Y-%m-%d %H:%M')} UTC"
             self._repository.set_setting(KEY_HISTORY_REFRESHED_ON, today.isoformat())
+            if self._products_without_history():  # the API answered but sent nothing: do not ask again every poll
+                self._retry_after["history"] = self._clock() + RETRY_AFTER_FAILURE
 
     def _refresh_settlements(self, today: date, local_today: date) -> None:
         try:

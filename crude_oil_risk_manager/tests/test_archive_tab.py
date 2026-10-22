@@ -1,12 +1,13 @@
-"""Tests for core.archive, the Archive layout builders and its (read-only) callbacks."""
+"""Tests for core.archive, the Archive layout builders and its callbacks (read-only apart from deleting closed trades)."""
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from dash.exceptions import PreventUpdate
 
 from core.archive import build_archive_rows, filter_archive_rows, summarize
 from core.models import Contract, Leg, Structure, StructureStatus, StructureType, Trade, TradeEventType
+from core.pnl import calculate_todays_realized_pnl
 from db.repository import Repository
 from ui.callbacks import archive_callbacks as ac
 from ui.container import Container
@@ -211,7 +212,7 @@ def test_layout_controls_and_table_configuration():
     assert colors['{result} = "Win"'] == COLORS["ACCENT_GREEN"] and colors['{result} = "Loss"'] == COLORS["ACCENT_RED"]
 
 
-# ---------- callbacks (read-only) ----------
+# ---------- callbacks (read-only apart from deleting) ----------
 
 
 class ReadOnlyRepository:
@@ -256,7 +257,7 @@ def seed(repo, *items):
 
 def refresh(monkeypatch, source="archive-apply-btn", **filters):
     trigger(monkeypatch, source)
-    args = dict(pathname="/archive", apply_clicks=1, clear_clicks=None, start=None, end=None,
+    args = dict(pathname="/archive", apply_clicks=1, clear_clicks=None, deleted=0, start=None, end=None,
                 structure_type="all", symbol="", pnl_filter="all")
     args.update(filters)
     return ac.refresh_archive(**args)
@@ -300,7 +301,7 @@ def test_clear_filters_resets_controls_and_reloads_everything(monkeypatch, repo)
 def test_other_paths_do_not_refresh_and_archive_only_lists_closed(monkeypatch, repo):
     trigger(monkeypatch, "url")
     with pytest.raises(PreventUpdate):
-        ac.refresh_archive("/structures", None, None, None, None, "all", "", "all")
+        ac.refresh_archive("/structures", None, None, 0, None, None, "all", "", "all")
     open_structure = closed("still open", [("CLZ25", 1, "buy")])[0].model_copy(update={"status": StructureStatus.OPEN})
     seed(repo, (open_structure, []), closed("done", [("CLZ25", 1, "buy")]))
     assert [r["name"] for r in refresh(monkeypatch, "url")[0]] == ["done"]
@@ -324,3 +325,87 @@ def test_detail_panel_shows_for_selected_row_and_hides_otherwise():
     assert "Detail me" in str(children) and style["display"] == "block"
     assert ac.render_detail("gone", [row])[1]["display"] == "none"  # filtered out of the current set
     assert ac.render_detail(None, [row]) == (None, ac.render_detail(None, [])[1])
+
+
+# ---------- deleting archived structures ----------
+
+
+def closed_with_pnl(repo, name, pnl, tc=2.0):
+    """A closed structure whose trades book `pnl` gross and `tc` of transaction costs."""
+    from core.models import Trade, TradeEventType
+
+    structure = closed(name, [("CLZ25", 1, "buy")])[0]
+    seed(repo, (structure, []))
+    now = datetime.now(timezone.utc)
+    repo.save_trade(Trade(structure_id=structure.structure_id, leg_id=structure.legs[0].leg_id, event_type=TradeEventType.TRADE, lots=1,
+                          price=70.0, direction="buy", timestamp=now - timedelta(days=2), transaction_cost=tc))
+    repo.save_trade(Trade(structure_id=structure.structure_id, leg_id=structure.legs[0].leg_id, event_type=TradeEventType.FULL_EXIT, lots=1,
+                          price=71.0, direction="sell", timestamp=now, realized_pnl=pnl, transaction_cost=0.0))
+    return structure.structure_id
+
+
+def home_realized(repo):
+    from core.pnl import calculate_portfolio_pnl
+
+    closed_all = repo.get_all_structures(status_filter=[StructureStatus.CLOSED])
+    trades = {s.structure_id: repo.get_trades_for_structure(s.structure_id) for s in closed_all}
+    summary = calculate_portfolio_pnl([], {}, {}, [], closed_all, trades)
+    return summary["total_realized_all_time"], calculate_todays_realized_pnl([t for ts in trades.values() for t in ts])
+
+
+def test_deleting_an_archived_trade_takes_its_pnl_out_of_homes_realized(repo):
+    from core.archive import delete_archived_structures
+
+    keep = closed_with_pnl(repo, "real", 500.0)
+    junk = closed_with_pnl(repo, "test", 1000.0)
+    assert home_realized(repo) == (pytest.approx(500.0 + 1000.0 - 4.0), pytest.approx(1500.0))
+    report = delete_archived_structures(repo, [junk])
+    assert report["deleted"] == ["test"] and report["removed_pnl"] == pytest.approx(998.0)
+    assert home_realized(repo) == (pytest.approx(498.0), pytest.approx(500.0))  # all-time and today's both lose it
+    assert repo.get_structure(junk) is None and repo.get_trades_for_structure(junk) == [] and repo.get_structure(keep) is not None
+
+
+def test_only_closed_structures_are_deleted(repo):
+    from core.archive import delete_archived_structures
+
+    open_one = closed("still open", [("CLZ25", 1, "buy")])[0].model_copy(update={"status": StructureStatus.OPEN})
+    seed(repo, (open_one, []))
+    report = delete_archived_structures(repo, [open_one.structure_id, "no-such-id"])
+    assert report["deleted"] == [] and "still open" in report["skipped"] and repo.get_structure(open_one.structure_id) is not None
+
+
+def test_the_reset_baseline_can_move_with_a_trade_that_was_closed_before_the_reset(repo):
+    from core.archive import delete_archived_structures
+    from core.pnl import apply_pnl_reset_baseline
+    from core.user_settings import KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE
+
+    junk = closed_with_pnl(repo, "test", 1000.0)
+    repo.set_setting(KEY_PNL_BASELINE, 998.0)  # an Account Reset taken when only that trade existed
+    repo.set_setting(KEY_PNL_REALIZED_BASELINE, 998.0)
+    new = closed_with_pnl(repo, "after the reset", 300.0)
+
+    def shown():
+        total, _ = home_realized(repo)
+        summary = apply_pnl_reset_baseline({"total_pnl": total, "total_realized_all_time": total}, repo.get_setting(KEY_PNL_BASELINE, 0.0), repo.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0))
+        return summary["total_realized_all_time"]
+
+    assert shown() == pytest.approx(298.0)
+    delete_archived_structures(repo, [junk], shift_reset_baseline=True)
+    assert shown() == pytest.approx(298.0)  # the shown figure did not drop below what was earned since the reset
+    assert repo.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0) == pytest.approx(0.0)
+
+
+def test_the_delete_dialog_names_the_ticked_rows_and_the_pnl_that_leaves(repo, monkeypatch):
+    a = closed_with_pnl(repo, "test A", 100.0)
+    b = closed_with_pnl(repo, "test B", 50.0)
+    rows = [{"id": b}, {"id": a}]  # as displayed (sorted), not in storage order
+    is_open, body, ids, baseline_style, disabled = ac.open_delete(1, rows, [0])
+    assert is_open and ids == [b] and disabled is False and "test B" in str(body) and "$48" in str(body) and baseline_style == {"display": "none"}
+    is_open, body, ids, _, disabled = ac.open_delete(1, rows, [])
+    assert disabled is True and ids == [] and "Tick the trades" in str(body)
+    repo.set_setting("pnl_reset_realized_baseline", 10.0)
+    assert ac.open_delete(1, rows, [1])[3]["display"] == "block"  # the reset question only appears when a reset is active
+    monkeypatch.setattr(ac, "container", Container(repository=repo))  # deleting is the one write this tab does
+    closed_modal, status, selected, detail, counter = ac.confirm_delete(1, [a], False, 3)
+    assert closed_modal is False and "Deleted 1" in status and selected == [] and counter == 4
+    assert repo.get_structure(a) is None and repo.get_structure(b) is not None

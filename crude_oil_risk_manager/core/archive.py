@@ -9,7 +9,7 @@ trades (entry) and the structure's closed_at (exit); prices from core.structure_
 
 from datetime import date, datetime
 
-from core.models import Structure, Trade, TradeEventType
+from core.models import Structure, StructureStatus, Trade, TradeEventType
 from core.pnl import calculate_net_realized_pnl, calculate_structure_transaction_costs
 from core.structure_view import structure_entry_price, structure_exit_price
 
@@ -17,7 +17,7 @@ RESULT_WIN, RESULT_LOSS, RESULT_FLAT = "Win", "Loss", "Flat"
 PNL_ALL, PNL_WINNERS, PNL_LOSERS = "all", "winners", "losers"
 
 _ENTRY_EVENTS = {TradeEventType.TRADE, TradeEventType.ADD}
-_EXIT_EVENTS = {TradeEventType.PARTIAL_EXIT, TradeEventType.FULL_EXIT}
+_EXIT_EVENTS = {TradeEventType.PARTIAL_EXIT, TradeEventType.STRUCTURE_PARTIAL_EXIT, TradeEventType.FULL_EXIT, TradeEventType.DISSOLVE}
 
 
 def _leg_side(leg) -> str:
@@ -139,3 +139,43 @@ def summarize(rows: list[dict]) -> dict:
         "best": max(pnls) if pnls else 0.0,
         "worst": min(pnls) if pnls else 0.0,
     }
+
+
+# ----------------------------------------------------------------------
+# Deleting archived structures
+# ----------------------------------------------------------------------
+
+
+def delete_archived_structures(repository, structure_ids: list[str], shift_reset_baseline: bool = False) -> dict:
+    """Permanently delete closed structures (with their legs, trades and PnL history).
+
+    Home's realized PnL is the sum over the open and the CLOSED structures' trades, so deleting a closed structure takes its
+    net realized PnL (after transaction costs) out of it; so do today's realized PnL and the archive. Only structures that
+    are CLOSED are deleted; anything else is skipped and named.
+
+    An Account Reset (Settings) shows the totals RELATIVE to a baseline captured at the reset, so a structure that was
+    already closed at the reset is in that baseline: deleting it would push the shown figure below zero. With
+    `shift_reset_baseline` both baselines move by the same amount, so the shown figures are unchanged by that deletion.
+
+    Returns {"deleted": [names], "skipped": [names], "removed_pnl": net realized PnL taken out}.
+    """
+    from core.user_settings import KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE
+
+    deleted, skipped, removed = [], [], 0.0
+    for structure_id in structure_ids:
+        structure = repository.get_structure(structure_id)
+        if structure is None:
+            skipped.append(structure_id)
+            continue
+        if structure.status != StructureStatus.CLOSED:
+            skipped.append(structure.name)
+            continue
+        removed += calculate_net_realized_pnl(repository.get_trades_for_structure(structure_id))
+        repository.delete_structure(structure_id)
+        deleted.append(structure.name)
+    if shift_reset_baseline and deleted:
+        for key in (KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE):
+            current = repository.get_setting(key, 0.0) or 0.0
+            if current:
+                repository.set_setting(key, current - removed)
+    return {"deleted": deleted, "skipped": skipped, "removed_pnl": removed}

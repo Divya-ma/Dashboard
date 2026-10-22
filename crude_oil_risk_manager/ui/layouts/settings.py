@@ -116,7 +116,7 @@ def _defaults_section() -> dbc.AccordionItem:
 CURVE_TRADE_FIELDS = [
     ("risk_per_trade", "Risk per trade ($)", "Most you will lose at the stop on the whole entry; sets the number of lots", 100),
     ("risk_per_lot", "Risk per lot ($)", "Most you will lose per lot at the stop; caps how far the stop can be", 50),
-    ("point_value", "Point value ($ per point per lot)", "1,000 for CL and Brent (1,000 barrels)", 1),
+    ("point_value", "Point value ($ per point per lot)", "1,000 for CL and Brent (1,000 barrels); gasoil (100 tonnes) uses a tenth of it", 1),
     ("max_lots", "Max lots", "Never suggest more than this, however tight the stop", 1),
     ("vol_stop_mult", "Volatility stop (x daily move)", "Stop distance is this many daily moves, but never beyond the per-lot cap", 0.1),
     ("vol_window", "Volatility window (days)", "Days of daily moves behind that volatility", 5),

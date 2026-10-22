@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 import numpy as np
 from dash import Input, Output, State, html, no_update
 
+from core.contract_specs import spec_for_product
 from core.corr_matrix import (
     as_of_for, build_structure_set, correlation_matrix, daily_history, default_beta_window, key_label, lookback_value,
     pair_daily, parse_key, rolling_beta, validate_range,
@@ -170,6 +171,8 @@ def render_hedge(target_label, base_label, days, beta_window_days, params):
         if target_label == base_label and params["target"] == params["base"]:
             return html.Div("Pick two different structures.", style=_MUTED), build_hedge_figure(None, "", "Pick two different structures")
         frame = rolling_beta(target_set.changes[target_label], base_set.changes[base_label], window)
+        # the beta is in points of the target per point of the base; a lot of gasoil (100 tonnes) is not a lot of Brent (1,000 bbl)
+        frame = frame.assign(beta=frame["beta"] * spec_for_product(parse_key(params["target"])[0]).multiplier / spec_for_product(parse_key(params["base"])[0]).multiplier)
     except (ValueError, TypeError) as exc:
         return html.Div(f"⚠️ {exc}", style=_ERROR), build_hedge_figure(None, "", "")
     except Exception:  # noqa: BLE001

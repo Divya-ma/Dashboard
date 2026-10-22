@@ -12,7 +12,7 @@ from datetime import date, datetime, timezone
 from core.positions import net_lots_by_product_and_symbol, signed_lots
 from core.models import Leg, PnLRecord, Structure, StructureStatus, Trade, TradeEventType
 
-_EXIT_EVENT_TYPES = {TradeEventType.PARTIAL_EXIT, TradeEventType.FULL_EXIT, TradeEventType.ROLL}
+_EXIT_EVENT_TYPES = {TradeEventType.PARTIAL_EXIT, TradeEventType.STRUCTURE_PARTIAL_EXIT, TradeEventType.FULL_EXIT, TradeEventType.DISSOLVE, TradeEventType.ROLL}
 
 
 # ----------------------------------------------------------------------
@@ -175,6 +175,39 @@ def calculate_structure_transaction_costs(trades: list[Trade]) -> float:
     return sum(trade.transaction_cost for trade in trades)
 
 
+_ENTRY_EVENT_TYPES = {TradeEventType.TRADE, TradeEventType.ADD}
+
+
+def _entered_lots_and_cost(trades: list[Trade]) -> tuple[float, float]:
+    entries = [t for t in trades if t.event_type in _ENTRY_EVENT_TYPES]
+    return sum(t.lots for t in entries), sum(t.transaction_cost for t in entries)
+
+
+def entry_cost_for_lots(trades: list[Trade], lots: float) -> float:
+    """The entry/add transaction cost that belongs to `lots` of the structure: the average entry cost per entered lot x lots.
+
+    Exiting (or dissolving) only part of a position takes only this share of the entry cost with it; the rest stays with
+    the lots that remain."""
+    entered, cost = _entered_lots_and_cost(trades)
+    return cost * min(max(lots, 0.0) / entered, 1.0) if entered > 0 else 0.0
+
+
+def split_transaction_costs(trades: list[Trade], open_lots: float) -> tuple[float, float]:
+    """(realized_cost, open_cost): the transaction cost of what has been exited, and of the `open_lots` still held.
+
+    open_cost is the entry cost of the lots still open (average per entered lot x open_lots); realized_cost is every exit
+    cost plus the entry cost of the lots that have been exited. Their sum is always the structure's total cost, so a partial
+    exit charges only its own lots, and the rest stays with the remaining lots until they are exited too."""
+    total = calculate_structure_transaction_costs(trades)
+    open_cost = entry_cost_for_lots(trades, open_lots)
+    return total - open_cost, open_cost
+
+
+def open_lots_of(legs: list[Leg]) -> float:
+    """Lots still open on a structure: the average over its legs (they are equal unless a per-leg exit happened)."""
+    return sum(leg.lots for leg in legs) / len(legs) if legs else 0.0
+
+
 def calculate_net_realized_pnl(trades: list[Trade]) -> float:
     """Realized P&L net of every transaction cost incurred on the structure so far.
 
@@ -257,18 +290,21 @@ def calculate_portfolio_pnl(
     structures with the highest/lowest total P&L (unrealized + realized,
     net of transaction costs), or None if there are no open structures.
 
-    Every per-structure "total" (and total_pnl / total_realized_all_time) is NET of
-    transaction costs already incurred — see calculate_structure_transaction_costs.
-    `total_unrealized` itself stays GROSS (no transaction costs) so it always equals the
-    sum of open positions' mark-to-market; `total_unrealized_net_of_tc` is that figure
-    minus total_transaction_costs, for callers that want unrealized P&L net of costs
-    already booked against the open legs (entry/add costs — not a future exit cost).
+    Every per-structure "total" and total_pnl is NET of all the transaction costs incurred
+    — see calculate_structure_transaction_costs. Those costs are split by lots (see
+    split_transaction_costs): the cost of the lots already EXITED (exit costs plus the entry
+    cost of those lots) is deducted from total_realized_all_time, and the entry cost of the
+    lots still OPEN stays with them (total_unrealized_net_of_tc), so a partial exit charges
+    only the lots it exited. `total_unrealized` itself stays GROSS (no transaction costs) so
+    it always equals the sum of open positions' mark-to-market.
     """
     open_structures = [s for s in structures if s.status in _OPEN_STATUSES]
 
     total_unrealized = 0.0
     total_realized = 0.0
     total_transaction_costs = 0.0
+    total_realized_costs = 0.0  # costs of the lots already exited
+    total_open_costs = 0.0  # entry costs of the lots still open
     per_structure: dict[str, dict] = {}
     open_leg_count = 0
     net_lots_by_product: dict[str, float] = {}
@@ -279,6 +315,7 @@ def calculate_portfolio_pnl(
         unrealized, _, missing_prices = calculate_structure_unrealized_pnl(structure.legs, live_prices)
         realized = calculate_structure_realized_pnl(trades)
         transaction_costs = calculate_structure_transaction_costs(trades)
+        realized_costs, open_costs = split_transaction_costs(trades, open_lots_of(structure.legs))
         total = unrealized + realized - transaction_costs
 
         leg_symbols = {leg.contract.symbol for leg in structure.legs}
@@ -288,6 +325,8 @@ def calculate_portfolio_pnl(
             "unrealized": unrealized,
             "realized": realized,
             "transaction_costs": transaction_costs,
+            "realized_costs": realized_costs,
+            "open_costs": open_costs,
             "total": total,
             "is_stale": is_stale,
             "missing_prices": missing_prices,
@@ -297,6 +336,8 @@ def calculate_portfolio_pnl(
         total_unrealized += unrealized
         total_realized += realized
         total_transaction_costs += transaction_costs
+        total_realized_costs += realized_costs
+        total_open_costs += open_costs
         open_leg_count += structure.leg_count
 
         for leg in structure.legs:
@@ -322,10 +363,12 @@ def calculate_portfolio_pnl(
 
     return {
         "total_unrealized": total_unrealized,
-        "total_unrealized_net_of_tc": total_unrealized - total_transaction_costs,
+        "total_unrealized_net_of_tc": total_unrealized - total_open_costs,
         "total_realized": total_realized,
-        "total_realized_all_time": total_realized + closed_realized - total_transaction_costs,
+        "total_realized_all_time": total_realized + closed_realized - total_realized_costs,
         "total_transaction_costs": total_transaction_costs,
+        "total_realized_costs": total_realized_costs,
+        "total_open_costs": total_open_costs,
         "total_pnl": total_unrealized + total_realized - total_transaction_costs,
         "per_structure": per_structure,
         "open_structure_count": len(open_structures),
@@ -410,14 +453,14 @@ def calculate_todays_realized_pnl(
 ) -> float:
     """Realized P&L booked on `reference_date` (default: today, UTC).
 
-    Sums realized_pnl of FULL_EXIT trades whose timestamp falls on that UTC date.
+    Sums realized_pnl of FULL_EXIT, STRUCTURE_PARTIAL_EXIT and DISSOLVE trades (exits at a structure price) whose timestamp falls on that UTC date.
     Returns 0.0 if there were no exits that day.
     """
     ref_date = reference_date if reference_date is not None else datetime.now(timezone.utc).date()
     return sum(
         trade.realized_pnl
         for trade in all_trades
-        if trade.event_type == TradeEventType.FULL_EXIT
+        if trade.event_type in (TradeEventType.FULL_EXIT, TradeEventType.STRUCTURE_PARTIAL_EXIT, TradeEventType.DISSOLVE)
         and trade.realized_pnl is not None
         and trade.timestamp.astimezone(timezone.utc).date() == ref_date
     ) or 0.0

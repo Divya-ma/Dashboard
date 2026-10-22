@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 from config.settings import settings
+from core.contract_specs import spec_for_product
 from core.correlation import lookback_average_correlation
 from core.curve_calendar import FAMILIES, FLY, CurveStructure, parse_contract
 from core.curve_history import CurveHistoryStore, generic_code
@@ -39,7 +40,12 @@ from core.curve_settings import CurveParams
 from core.exceptions import InsufficientDataError
 from core.hedge import slope_and_corr
 
-MIN_TICK = 0.01
+
+
+def point_value_for(params: CurveParams, product: str) -> float:
+    """$ per 1.0 point per lot for this product: the Settings point value is for a 1,000-unit contract (CL, Brent) and
+    scales with the product's own contract size (gasoil, 100 tonnes, is a tenth of it)."""
+    return params.point_value * spec_for_product(product).multiplier / 1000.0
 MIN_HEDGE_ROWS = 30
 MIN_VOL_ROWS = 10
 MIN_REVERSION_EVENTS = 5
@@ -262,7 +268,8 @@ def build_plan(
     family, k0 = structure.family, structure.position - 1
     warnings: list[str] = []
     sigma = daily_move(frame, family, k0, params.vol_window) if len(frame) else None
-    cap = params.risk_per_lot / params.point_value
+    point_value = point_value_for(params, product)
+    cap = params.risk_per_lot / point_value
     if sigma is None:
         distance, basis = cap, "per-lot risk cap (no volatility history)"
     elif params.vol_stop_mult * sigma <= cap:
@@ -273,10 +280,10 @@ def build_plan(
             f"The per-lot risk cap puts the stop at {cap:.2f}, tighter than the {params.vol_stop_mult:g}-sigma "
             f"volatility stop ({params.vol_stop_mult * sigma:.2f}): normal noise may stop this trade out"
         )
-    distance = max(distance, MIN_TICK)
+    distance = max(distance, spec_for_product(product).tick_size)
     stop = live - distance if side == "BUY" else live + distance
 
-    loss_per_lot = distance * params.point_value
+    loss_per_lot = distance * point_value
     lots = int(params.risk_per_trade // loss_per_lot)
     if lots < 1:
         warnings.append(
@@ -308,7 +315,7 @@ def build_plan(
         else:
             plan.target, plan.target_distance = target, abs(target - live)
             plan.rr = plan.target_distance / distance
-            plan.dollar_reward = lots * plan.target_distance * params.point_value
+            plan.dollar_reward = lots * plan.target_distance * point_value
             if plan.rr < 1.0:
                 warnings.append(f"Reward:risk is {plan.rr:.2f}, below 1")
 

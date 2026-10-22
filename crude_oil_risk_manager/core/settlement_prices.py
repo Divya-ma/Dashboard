@@ -1,13 +1,13 @@
 """Daily settlement closes of outright contracts, for the analyses that need a long, gap-free history.
 
-Source: the OI page's store (core.oi_data.OiStore): the /common/dailymarketdata/ settlement of every CL and BRN
+Source: the OI page's store (core.oi_data.OiStore): the /common/dailymarketdata/ settlement of every CL, BRN and gasoil (G)
 outright, every trading day, from 2019. The per-contract price files read by core.data_loader.DataLoader hold
 candles that only exist on days a contract traded, so a back-month outright can have a handful of rows; joining
 several of those leaves almost no shared days. Settlements have no such holes.
 
 BZ (NYMEX Brent) has no stored settlements. Its contract converges to the ICE Brent contract of the same month, so a BZ
 outright is priced here from the BRN outright of that month, and the caller is told (`proxied`) so it can say so.
-Anything else (WBS, G, a symbol that does not parse) returns None and the caller falls back to the DataLoader.
+Anything else (WBS, a symbol that does not parse) returns None and the caller falls back to the DataLoader.
 """
 
 import pandas as pd
@@ -33,6 +33,8 @@ def settlement_code(symbol: str) -> tuple[str, str, bool] | None:
         return "BRN", "CO" + api[3:], True
     if api.startswith("CO"):
         return "BRN", api, False
+    if api.startswith("GO"):
+        return "G", api, False
     return None
 
 
@@ -79,10 +81,10 @@ class SettlementFirstLoader(DataLoader):
     """The app's one price-history source: official settlements where the store has them, stored candles otherwise.
 
     Every page that reads daily history through a DataLoader (the Correlation tab, the Monte Carlo and historical VaR, the
-    New Structure builder's legs, the beta panels) gets a CL or BRN symbol's series from the settlements: an outright is its
+    New Structure builder's legs, the beta panels) gets a CL, BRN or G symbol's series from the settlements: an outright is its
     settlement; a spread, fly or condor is built from its outrights' settlements (the structure's PRICE on the dates every
     outright settled, as in core.correlation.structure_series), so a quoted fly has a settlement history on every trading
-    day instead of only the days it printed. Anything else (WBS, G, BZ, or a CL/BRN contract the store does not hold) is
+    day instead of only the days it printed. Anything else (WBS, BZ, or a CL/BRN/G contract the store does not hold) is
     read from the candles exactly as before, and a symbol is never half settlement and half candle. BZ is NOT proxied here:
     its basis to Brent is real risk, so it keeps its own candles (the builder's beta panel may still proxy it, and says so).
 

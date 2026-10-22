@@ -70,7 +70,7 @@ def corr_matrix_section(rolling: int, lookback: int) -> html.Div:
                      dbc.Row([_field("Days shown", dbc.Input(id="cm-chart-days", type="number", value=DEFAULT_CHART_DAYS, min=5, step=10, debounce=True, size="sm"), 2)], className="g-2"),
                      dcc.Graph(id="cm-chart", figure=empty_figure("Click a cell of the matrix"), config={"displayModeBar": False}, style={"height": "380px"}),
                  ])),
-        _section("Hedge ratio of two structures", "Pick one structure of the target list and one of the base list: lots of the base per lot of the target (minimum variance: the beta of the target's daily changes on the base's).",
+        _section("Hedge ratio of two structures", "Pick one structure of the target list and one of the base list: lots of the base per lot of the target (minimum variance: the beta of the target's daily changes on the base's, scaled for contract size across products).",
                  html.Div([
                      dbc.Row([
                          _field("Target structure (held)", dcc.Dropdown(id="cm-hedge-target", options=[], clearable=False), 3),

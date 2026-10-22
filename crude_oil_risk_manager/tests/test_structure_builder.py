@@ -161,7 +161,7 @@ def test_build_supports_spread_symbol_legs_and_reuses_saved_contracts(repo):
 
 def test_build_collects_all_errors(repo):
     with pytest.raises(sb.StructureBuildError) as exc:
-        sb.build_shell_structure(**spread_inputs(name=" ", symbols=["CLZ26", "bad"], ratios=[1, 0], multiplier=None, tick_size=-1),
+        sb.build_shell_structure(**spread_inputs(name=" ", symbols=["CLZ26", "bad"], ratios=[1, 0], multiplier=0, tick_size=-1),
                                  get_contract=repo.get_contract)
     text = " ".join(exc.value.errors)
     for expected in ("name is required", "Leg 2", "Multiplier", "Tick size"):

@@ -136,33 +136,6 @@ def calculate_correlation(
     return value
 
 
-def calculate_rolling_correlation(
-    symbol_a: str,
-    symbol_b: str,
-    window: int,
-    data_loader: DataLoader,
-    start: date | None = None,
-    end: date | None = None,
-) -> pd.Series:
-    """Rolling `window`-day Pearson correlation of price differences over aligned dates.
-
-    Leading NaN values (the first window-1 observations) and any undefined
-    windows (e.g. zero variance) are dropped. Raises InsufficientDataError if
-    no values remain.
-    """
-    _validate_window(window)
-    aligned_a, aligned_b = _load_aligned(symbol_a, symbol_b, window, data_loader, start, end)
-    rolling = aligned_a.rolling(window).corr(aligned_b)
-    rolling = rolling.replace([np.inf, -np.inf], np.nan).dropna().clip(-1.0, 1.0)
-    if rolling.empty:
-        raise InsufficientDataError(
-            f"Insufficient data for rolling correlation of {symbol_a} and {symbol_b}: "
-            f"{len(aligned_a)} aligned observations, window is {window}."
-        )
-    rolling.name = f"{symbol_a}|{symbol_b}"
-    return rolling
-
-
 def build_correlation_matrix(
     symbols: list[str],
     rolling: int,
@@ -284,7 +257,7 @@ def structure_series(weights: dict[str, float], data_loader: DataLoader, settlem
     one, so a leg without history makes the whole series None and is named in `missing`. Fewer than
     _MIN_CORRELATION_OBSERVATIONS differences also gives None.
 
-    `settlements` (core.settlement_prices.SettlementPrices) supplies gap-free settlement closes for CL and BRN
+    `settlements` (core.settlement_prices.SettlementPrices) supplies gap-free settlement closes for CL, BRN and G
     outrights (BZ from the ICE Brent contract of the same month); anything it does not have is read from `data_loader`.
     """
     levels, missing, proxied = {}, [], []

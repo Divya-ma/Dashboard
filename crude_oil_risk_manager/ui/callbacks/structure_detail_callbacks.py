@@ -16,7 +16,7 @@ from dash import ALL, MATCH, Input, Output, State, callback_context, html, no_up
 from dash.exceptions import PreventUpdate
 
 from core.models import StructureStatus
-from core.pnl import calculate_structure_transaction_costs
+from core.pnl import entry_cost_for_lots
 from core.structure_builder import StructureBuildError
 from core.structure_edit import apply_leg_edits
 from core.structure_view import prices_from_store, structure_entry_price, structure_live_price
@@ -270,15 +270,19 @@ def open_exit_confirmation(n_clicks, exit_price, lots, structure_id):
     except TradeError as exc:
         body = [html.Div(f"⛔ {message}", style={"color": COLORS["ACCENT_RED"]}) for message in exc.errors]
         return True, body, True
-    prior_tc = calculate_structure_transaction_costs(container.repository.get_trades_for_structure(structure_id))
-    total_tc = prior_tc + result.trade.transaction_cost
+    entry_tc = entry_cost_for_lots(container.repository.get_trades_for_structure(structure_id), lots)  # only the lots being exited
+    total_tc = entry_tc + result.trade.transaction_cost
     net_pnl = result.realized_pnl - total_tc
+    question = (
+        f"Are you sure you want to close this structure at {exit_price:g}?" if result.closed
+        else f"Are you sure you want to exit {lots:g} lots at {exit_price:g}? {result.remaining_lots:g} lots will stay open."
+    )
     body = [
-        html.P(f"Are you sure you want to close this structure at {exit_price:g}?"),
+        html.P(question),
         html.P(["Realized PnL (before transaction costs): ", pnl_span(result.realized_pnl, fontWeight="bold")]),
     ]
     if total_tc:
-        body.append(html.P(f"Total transaction cost (entry + exit): -${total_tc:,.0f}", style={"color": COLORS["ACCENT_YELLOW"]}))
+        body.append(html.P(f"Transaction cost of these {lots:g} lots (entry + exit): -${total_tc:,.0f}", style={"color": COLORS["ACCENT_YELLOW"]}))
         body.append(html.P(["Net realized PnL: ", pnl_span(net_pnl, fontWeight="bold")]))
     body.append(html.P("This cannot be undone.", style={"color": COLORS["ACCENT_YELLOW"]}))
     return True, body, False
@@ -294,17 +298,18 @@ def execute_full_exit(
     n_clicks, exit_price, lots, notes, structure_id,
     status_filter, product_filter, sort_by, portfolio_pnl, live_prices,
 ):
-    """Close the structure: exit trade, zeroed legs, status CLOSED (manual). No partial exits."""
+    """Exit lots of the structure at one price: all of them closes it (status CLOSED, manual); fewer leaves the rest open."""
     if not n_clicks:
         raise PreventUpdate
     repository = container.repository
     structure = _load(structure_id)
-    prior_tc = calculate_structure_transaction_costs(repository.get_trades_for_structure(structure_id))
+    prior_tc = entry_cost_for_lots(repository.get_trades_for_structure(structure_id), lots or 0)  # entry cost of the exited lots only
     try:
         result = exit_structure(structure, exit_price, lots, notes)
         repository.update_structure_legs(structure_id, result.legs, result.audit_note)
         repository.save_trade(result.trade)
-        repository.update_structure_status(structure_id, StructureStatus.CLOSED, close_trigger="manual")
+        if result.closed:
+            repository.update_structure_status(structure_id, StructureStatus.CLOSED, close_trigger="manual")
     except TradeError as exc:
         return (no_update, no_update, *_toast(exc.errors, ok=False, header="Exit not executed"), False)
     except Exception:  # noqa: BLE001
@@ -313,8 +318,12 @@ def execute_full_exit(
 
     rows = _grid_rows(status_filter, product_filter, sort_by, portfolio_pnl, live_prices)
     net_pnl = result.realized_pnl - prior_tc - result.trade.transaction_cost
-    message = f"{structure.name} closed at {exit_price:g}. Realized PnL (net of TC): {format_pnl(net_pnl)}"
     # The portfolio PnL stop is re-checked on the next 5s PnL refresh (shell_callbacks.check_alerts).
+    if not result.closed:
+        message = (f"{structure.name}: exited {lots:g} lots at {exit_price:g}, {result.remaining_lots:g} lots remain. "
+                   f"Realized PnL (net of TC for these lots): {format_pnl(net_pnl)}")
+        return (False, rows, *_toast(message, header="Lots exited"), False)  # the detail window closes; the grid shows the lots left
+    message = f"{structure.name} closed at {exit_price:g}. Realized PnL (net of TC): {format_pnl(net_pnl)}"
     return (False, rows, *_toast(message, header="Structure closed"), False)
 
 

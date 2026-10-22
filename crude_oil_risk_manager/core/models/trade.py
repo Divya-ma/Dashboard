@@ -14,8 +14,10 @@ class TradeEventType(str, Enum):
 
     TRADE = "trade"
     ADD = "add"
-    PARTIAL_EXIT = "partial_exit"
+    PARTIAL_EXIT = "partial_exit"  # one leg (or some of its lots) exited at its own price
+    STRUCTURE_PARTIAL_EXIT = "structure_partial_exit"  # some of the structure's lots exited at ONE structure price
     FULL_EXIT = "full_exit"
+    DISSOLVE = "dissolve"  # closed against other structures (core.dissolve): no exit cost, P&L booked for the group
     ROLL = "roll"
 
 

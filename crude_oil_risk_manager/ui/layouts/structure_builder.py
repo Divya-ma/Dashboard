@@ -428,9 +428,9 @@ def _step_3() -> html.Div:
             _field("Structure Name", dbc.Input(id="builder-name", placeholder="e.g. CL Dec26-Jan27 Spread", maxLength=100)),
             dbc.Row(
                 [
-                    dbc.Col(_field("Multiplier ($/point)", dbc.Input(id="builder-multiplier", type="number", placeholder="e.g. 1000 for CL")), md=4),
-                    dbc.Col(_field("Tick Size", dbc.Input(id="builder-tick-size", type="number", placeholder="e.g. 0.01")), md=4),
-                    dbc.Col(_field("Tick Value ($)", dbc.Input(id="builder-tick-value", type="number", placeholder="e.g. 10")), md=4),
+                    dbc.Col(_field("Multiplier ($/point)", dbc.Input(id="builder-multiplier", type="number", placeholder="blank = product default (CL, Brent 1000; Gasoil 100)")), md=4),
+                    dbc.Col(_field("Tick Size", dbc.Input(id="builder-tick-size", type="number", placeholder="blank = default (0.01; Gasoil 0.25)")), md=4),
+                    dbc.Col(_field("Tick Value ($)", dbc.Input(id="builder-tick-value", type="number", placeholder="blank = default ($10; Gasoil $25)")), md=4),
                 ]
             ),
             _field("Notes (optional)", dbc.Textarea(id="builder-notes", placeholder="Optional trade notes", rows=3, maxLength=500)),

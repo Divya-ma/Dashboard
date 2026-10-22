@@ -60,7 +60,7 @@ class CurveParams:
     # --- trade plan: risk appetite and sizing (dollars; the alert structure is traded in lots) ---
     risk_per_trade: float = 5000.0  # max $ loss at the stop for the whole entry
     risk_per_lot: float = 1000.0  # max $ loss per lot at the stop: caps how far the stop can be
-    point_value: float = 1000.0  # $ per 1.0 price point per lot (1,000 bbl)
+    point_value: float = 1000.0  # $ per 1.0 price point per lot of a 1,000-unit contract (CL, Brent); other sizes scale from it (gasoil x 0.1)
     max_lots: int = 100  # never suggest more than this, however tight the stop
     vol_stop_mult: float = 1.5  # volatility stop = this x the structure's daily move
     vol_window: int = 60  # days of daily moves for that volatility

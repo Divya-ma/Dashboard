@@ -8,6 +8,7 @@ import pytest
 from dash import no_update
 
 from adapters.base import APIError
+from core.curve_calendar import PRODUCTS, product_of_symbol
 from core import oi_data
 from core.oi_data import OiStore, contract_universe
 from core.oi_research import build_daily, build_research, last_month_table, month_contracts, open_table, threshold_table
@@ -58,7 +59,7 @@ class FakeOiApi:
 
     def _series(self, symbol: str) -> pd.DataFrame:
         if symbol not in self._cache:
-            product = "BRN" if symbol.startswith("CO") else "CL"
+            product = product_of_symbol(symbol)
             contract = next(c for c in contract_universe(product, self.today) if c.symbol == symbol)
             self._cache[symbol] = synthetic_oi(contract.expiry, self.today, seed=sum(map(ord, symbol)))
         return self._cache[symbol]
@@ -152,10 +153,10 @@ def test_finished_contracts_are_never_requested_again_and_live_ones_are_topped_u
     tomorrow = TODAY + timedelta(days=1)
     store.update(api, 900, tomorrow)
     asked = {code for call in api.calls for code in call["qhcode"].split(",")}
-    live = {c.symbol for p in ("CL", "BRN") for c in contract_universe(p, tomorrow) if c.expiry >= tomorrow - timedelta(days=3)}
+    live = {c.symbol for p in PRODUCTS for c in contract_universe(p, tomorrow) if c.expiry >= tomorrow - timedelta(days=3)}
     assert asked <= live  # nothing that had already expired and been fetched
     assert all(call["start"] >= (TODAY - timedelta(days=oi_data.OVERLAP_DAYS)).isoformat() for call in api.calls)
-    assert len(api.calls) <= 2  # one small top-up request per product
+    assert len(api.calls) <= 3  # one small top-up request per product
 
 
 def test_a_longer_history_setting_downloads_the_extra_days(tmp_path, small_universe):
@@ -182,7 +183,7 @@ def test_a_failed_download_keeps_what_was_saved_and_resumes(tmp_path, small_univ
     api.calls.clear()
     store.update(api, 900, TODAY)
     asked = {code for call in api.calls for code in call["qhcode"].split(",")}
-    finished_before = {s for s in saved if next(c for p in ("CL", "BRN") for c in contract_universe(p, TODAY) if c.symbol == s).expiry < TODAY - timedelta(days=3)}
+    finished_before = {s for s in saved if next(c for p in PRODUCTS for c in contract_universe(p, TODAY) if c.symbol == s).expiry < TODAY - timedelta(days=3)}
     assert not asked & finished_before  # what was already saved and finished is not downloaded again
     assert store.updated_on == "2026-10-13"
     # a second store object reads the same files
@@ -388,6 +389,15 @@ def test_ensure_fresh_downloads_once_per_day(service):
     assert service.needs_update()
 
 
+def test_a_product_added_after_todays_update_is_downloaded_at_once(service):
+    service.ensure_fresh()
+    assert not service.needs_update() and service.store.has_every_product()
+    (service.store._dir / "G.parquet").unlink()  # as if gasoil had been added to PRODUCTS after today's download
+    assert service.needs_update() and not service.store.has_every_product()
+    service.ensure_fresh()
+    assert not service.needs_update() and (service.store._dir / "G.parquet").exists()
+
+
 def test_a_longer_setting_makes_the_data_stale(service):
     service.ensure_fresh()
     service._repository.set_setting(KEY_OI_HISTORY_DAYS, 1200)
@@ -420,7 +430,7 @@ def test_research_is_cached_until_the_data_changes(service, monkeypatch):
     monkeypatch.setattr("core.oi_service.build_research", lambda *a, **k: built.append(a[1]) or real(*a, **k))
     first = service.research()
     second = service.research()
-    assert first["CL"] is second["CL"] and first["BRN"] is second["BRN"] and built == ["CL", "BRN"]  # each built once
+    assert all(first[p] is second[p] for p in ("CL", "BRN", "G")) and built == ["CL", "BRN", "G"]  # each built once
 
 
 def test_page_callbacks(service, monkeypatch):
@@ -521,4 +531,4 @@ def test_research_is_built_for_the_product_asked_for_only(service, monkeypatch):
     occ.render_research(service.store.version, "BRN", "research", 5)  # another month of the same product: no rebuild
     assert built == ["BRN"]
     service.research()
-    assert built == ["BRN", "CL"]
+    assert built == ["BRN", "CL", "G"]

@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from dash import no_update
 
+from core.curve_calendar import PRODUCTS
 from core import atr_data, oi_data
 from core.atr_calc import atr_frame, true_range
 from core.atr_data import AtrStore, instrument_universe
@@ -97,7 +98,7 @@ class FakeOhlcApi:
         self.calls.append({"instruments": list(instruments), "start": start, "end": end, "interval": interval})
         if self.fail_after is not None and len(self.calls) > self.fail_after:
             raise RuntimeError("boom")
-        lookup = {i.symbol: i for p in ("CL", "BRN") for i in instrument_universe(p, self.today)}
+        lookup = {i.symbol: i for p in PRODUCTS for i in instrument_universe(p, self.today)}
         candles = []
         for symbol in instruments:
             expiry = pd.Timestamp(lookup[symbol].expiry)
@@ -145,7 +146,7 @@ def test_finished_instruments_are_not_requested_again_and_live_ones_are_topped_u
     tomorrow = TODAY + timedelta(days=1)
     store.update(api, HISTORY, tomorrow)
     asked = {s for c in api.calls for s in c["instruments"]}
-    live = {i.symbol for p in ("CL", "BRN") for i in instrument_universe(p, tomorrow) if i.expiry >= tomorrow - timedelta(days=3)}
+    live = {i.symbol for p in PRODUCTS for i in instrument_universe(p, tomorrow) if i.expiry >= tomorrow - timedelta(days=3)}
     assert asked and asked <= live
 
 
@@ -348,6 +349,9 @@ class StubAtrStore:
     def frame(self, product):
         return self.frames.get(product, pd.DataFrame(columns=atr_data.COLUMNS))
 
+    def has_every_product(self):
+        return True
+
 
 @pytest.fixture
 def service(tmp_path, frames):
@@ -363,6 +367,9 @@ def service(tmp_path, frames):
 
         def frame(self, product):
             return pd.DataFrame(columns=["contract", "date", "oi", "close", "volume"])
+
+        def has_every_product(self):
+            return True
 
         def has_data(self):
             return True

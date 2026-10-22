@@ -25,7 +25,12 @@ LOOKBACK_CALENDAR_DAYS = 10  # enough to span a long weekend plus a holiday
 
 
 class PrevSettlementStore:
-    """Previous settlements by outright API symbol, persisted as JSON."""
+    """Previous settlements by outright API symbol, persisted as JSON.
+
+    ONE store serves Curve Kinks (15 months of each product) and Curve Compare (36 months): a fetch adds its symbols to
+    what the same day already holds instead of replacing it, and `attempted` tells a caller whether today's fetch
+    already covered the symbols it needs, so neither page re-downloads what the other fetched.
+    """
 
     def __init__(self, path: str | Path):
         self._path = Path(path)
@@ -41,6 +46,10 @@ class PrevSettlementStore:
     def fetched_on(self) -> str | None:
         """Local (opening-time-zone) date the settlements were last fetched for, ISO string."""
         return self._state.get("fetched_on")
+
+    def attempted(self, symbols: list[str]) -> bool:
+        """True if the stored day's fetch(es) asked for every one of `symbols` (found or reported missing)."""
+        return set(symbols) <= set(self._state.get("tried", []))
 
     def prices(self) -> dict[str, float]:
         return {symbol: row["close"] for symbol, row in self._state.get("data", {}).items()}
@@ -74,7 +83,10 @@ class PrevSettlementStore:
             if symbol not in latest or row_date > date.fromisoformat(latest[symbol]["date"]):
                 latest[symbol] = {"date": row_date.isoformat(), "close": float(row["close"]), "gd_code": row.get("gd_code", "")}
         with self._lock:
-            self._state = {"fetched_on": fetched_on.isoformat(), "data": latest}
+            same_day = self._state.get("fetched_on") == fetched_on.isoformat()
+            kept = self._state.get("data", {}) if same_day else {}
+            tried = set(self._state.get("tried", [])) if same_day else set()
+            self._state = {"fetched_on": fetched_on.isoformat(), "data": {**kept, **latest}, "tried": sorted(tried | set(symbols))}
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps(self._state), encoding="utf-8")
         return {"fetched": len(latest), "missing": [s for s in symbols if s not in latest]}

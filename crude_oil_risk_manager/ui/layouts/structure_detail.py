@@ -26,13 +26,15 @@ _MUTED = {"color": COLORS["TEXT_SECONDARY"], "fontSize": "13px"}
 _TEXT = {"color": COLORS["TEXT_PRIMARY"]}
 
 EMPTY = "—"
-EXIT_CONFIRM_TITLE = "Confirm Full Exit"
+EXIT_CONFIRM_TITLE = "Confirm Exit"
 
 _EVENT_COLORS = {
     TradeEventType.TRADE: COLORS["ACCENT_GREEN"],
     TradeEventType.ADD: COLORS["ACCENT_GREEN"],
     TradeEventType.FULL_EXIT: COLORS["ACCENT_RED"],
     TradeEventType.PARTIAL_EXIT: COLORS["ACCENT_YELLOW"],
+    TradeEventType.STRUCTURE_PARTIAL_EXIT: COLORS["ACCENT_YELLOW"],
+    TradeEventType.DISSOLVE: COLORS["ACCENT_BLUE"],
     TradeEventType.ROLL: COLORS["ACCENT_YELLOW"],
 }
 
@@ -456,7 +458,7 @@ def _exit_form(structure: Structure, live: float | None) -> html.Div:
             ),
             html.Div(id="exit-pnl-preview", style={**_MUTED, "marginBottom": "12px"}),
             _field("Notes", dbc.Textarea(id="trade-exit-notes", rows=2, maxLength=200)),
-            dbc.Button("🚪 Confirm Full Exit", id="btn-confirm-exit", color="danger", size="lg"),
+            dbc.Button("🚪 Exit", id="btn-confirm-exit", color="danger", size="lg"),
         ]
         if uniform
         else [

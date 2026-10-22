@@ -1,7 +1,7 @@
 """Archive tab: filters, summary stats and the table of closed structures (read-only).
 
 The layout is static; ui/callbacks/archive_callbacks.py fills it. All colours come
-from COLORS. Nothing on this tab writes to the database.
+from COLORS. The only write is deleting closed structures the user ticked and confirmed.
 """
 
 import dash_bootstrap_components as dbc
@@ -234,6 +234,8 @@ def _table() -> dash_table.DataTable:
         id="archive-table",
         columns=TABLE_COLUMNS,
         data=[],
+        row_selectable="multi",
+        selected_rows=[],
         page_size=PAGE_SIZE,
         page_action="native",
         sort_action="native",
@@ -260,12 +262,43 @@ def _table() -> dash_table.DataTable:
     )
 
 
+def _delete_modal() -> dbc.Modal:
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("Delete from the archive")),
+            dbc.ModalBody(
+                [
+                    html.Div(id="archive-delete-body"),
+                    html.Div(
+                        dbc.Checkbox(
+                            id="archive-delete-baseline", value=False,
+                            label="These were closed before the Account Reset: keep the Home figure unchanged (move the reset baseline with them)",
+                        ),
+                        id="archive-delete-baseline-wrap", style={"display": "none", "marginTop": "10px"},
+                    ),
+                ]
+            ),
+            dbc.ModalFooter(
+                [
+                    dbc.Button("Cancel", id="archive-delete-cancel", color="secondary", outline=True),
+                    dbc.Button("Delete permanently", id="archive-delete-confirm", color="danger"),
+                ]
+            ),
+        ],
+        id="archive-delete-modal",
+        is_open=False,
+    )
+
+
 def archive_layout() -> html.Div:
     """Filter bar, summary stats row and the archive table with an expandable detail panel."""
     return html.Div(
         [
             dcc.Store(id="archive-rows", data=[]),
             dcc.Store(id="archive-selected", data=None),
+            dcc.Store(id="archive-delete-ids", data=[]),
+            dcc.Store(id="archive-deleted", data=0),
+            _delete_modal(),
             html.H3("📁 Archive", style={**_HEADING, "marginBottom": "16px"}),
             _filter_bar(),
             _stats_row(),
@@ -273,6 +306,14 @@ def archive_layout() -> html.Div:
                 dbc.CardBody(
                     [
                         html.Div(NO_ARCHIVE_TEXT, id="archive-message", style={**_MUTED, "marginBottom": "8px", "fontSize": "15px"}),
+                        html.Div(
+                            [
+                                dbc.Button("🗑 Delete selected", id="archive-delete-btn", color="danger", outline=True, size="sm"),
+                                html.Span("Tick the boxes of the trades to delete (test trades, say).", style={**_MUTED, "marginLeft": "12px"}),
+                                html.Span(id="archive-delete-status", style={"marginLeft": "12px", "fontSize": "13px"}),
+                            ],
+                            style={"marginBottom": "8px"},
+                        ),
                         _table(),
                     ]
                 ),

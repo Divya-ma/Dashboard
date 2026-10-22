@@ -344,7 +344,7 @@ def refresh_portfolio_pnl(n_intervals, live_prices):
     all_trades = [t for group in (*trades.values(), *closed_trades.values()) for t in group]
     summary["todays_realized_pnl"] = calculate_todays_realized_pnl(all_trades)
     _add_structure_details(summary, structures, stale)
-    summary["packets"] = build_packets(structures, summary["per_structure"], prices, _risk_cache)
+    summary["packets"] = build_packets(structures, summary["per_structure"], prices, _risk_cache, trades)
     summary["todays_pnl"] = _todays_pnl(structures, trades, prices, stale, summary)
     summary["calculated_at"] = summary["calculated_at"].isoformat()
     summary["has_missing_prices"] = bool(summary["missing_price_symbols"])

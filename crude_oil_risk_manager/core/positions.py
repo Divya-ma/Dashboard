@@ -19,6 +19,7 @@ Dollar weights multiply by the leg's contract multiplier: dollars of P&L per 1.0
 import logging
 from typing import Callable, Iterator
 
+from core.contract_specs import spec_for_symbol
 from core.models import Leg, Structure, StructureStatus
 from core.structure_utils import decompose_to_outrights, normalize_symbol
 
@@ -26,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 OPEN_STATUSES = {StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED}
 
-# Dollars per point of one lot when a contract has not been saved and no multiplier has been typed in yet (1,000 barrels).
-FALLBACK_MULTIPLIER = 1000.0
+# Dollars per point of one lot when a contract has not been saved and no multiplier has been typed in yet: the product's own
+# (core.contract_specs: 1,000 barrels for CL and Brent, 100 tonnes for gasoil).
 _EPSILON = 1e-9
 
 
@@ -108,7 +109,7 @@ def candidate_dollar_weights(
     """Dollar P&L per 1.0-point move, per symbol, for 1 lot BOUGHT of a structure that has not been saved yet.
 
     `legs` are the builder's rows [{"symbol", "ratio"}, ...]. The multiplier is the saved contract's, else the one typed in
-    the builder, else FALLBACK_MULTIPLIER. Same two views as `dollar_weights`; symbols that cancel are dropped.
+    the builder, else the product's own. Same two views as `dollar_weights`; symbols that cancel are dropped.
     """
     weights: dict[str, float] = {}
     for row in legs:
@@ -120,7 +121,7 @@ def candidate_dollar_weights(
         if not symbol or ratio == 0:
             continue
         contract = get_contract(symbol)
-        multiplier = contract.multiplier if contract is not None else (default_multiplier or FALLBACK_MULTIPLIER)
+        multiplier = contract.multiplier if contract is not None else (default_multiplier or spec_for_symbol(symbol).multiplier)
         if decompose:
             try:
                 parts = decompose_to_outrights(symbol, ratio)
@@ -130,6 +131,6 @@ def candidate_dollar_weights(
             parts = {symbol: ratio}
         for name, amount in parts.items():
             part_contract = get_contract(name) if decompose else contract
-            part_multiplier = part_contract.multiplier if part_contract is not None else multiplier
+            part_multiplier = part_contract.multiplier if part_contract is not None else (default_multiplier or spec_for_symbol(name).multiplier)
             weights[name] = weights.get(name, 0.0) + amount * part_multiplier
     return {symbol: weight for symbol, weight in weights.items() if abs(weight) > _EPSILON}

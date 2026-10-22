@@ -1,6 +1,6 @@
 """Churn page (route /churn): which contracts offer the best intraday small-target churning, from five-minute candles.
 
-For every live outright, spread, fly and d-fly of CL and BRN and both sides the page simulates the trade you describe
+For every live outright, spread, fly and d-fly of CL, BRN and gasoil and both sides the page simulates the trade you describe
 (cross the spread to enter, a target that covers the transaction cost with a few dollars over, flat by the end of the
 trading day) and ranks them by the churn score of core.churn_service. ONE table holds the ranking and the live part: the
 live price, the number of oscillations of that price level in the chosen range, and the score; the GO / WAIT verdict of the
@@ -81,7 +81,7 @@ def churn_controls(params: ChurnParams) -> html.Div:
         for component_id, name, field, step, hint in PARAM_INPUTS
     ]
     filters = dbc.Row([
-        _field("Product", dcc.Dropdown(id="churn-product", options=[{"label": "All", "value": "all"}, {"label": "CL", "value": "CL"}, {"label": "BRN", "value": "BRN"}], value="all", clearable=False), 2),
+        _field("Product", dcc.Dropdown(id="churn-product", options=[{"label": "All", "value": "all"}, {"label": "CL", "value": "CL"}, {"label": "BRN", "value": "BRN"}, {"label": "Gasoil", "value": "G"}], value="all", clearable=False), 2),
         _field("Curve", dcc.Dropdown(id="churn-family", options=[{"label": "All", "value": "all"}, *({"label": FAMILY_NAMES[f], "value": f} for f in FAMILIES)], value="all", clearable=False), 2),
         _field("Direction", dcc.Dropdown(id="churn-direction", options=[{"label": "Both", "value": "all"}, {"label": "Long", "value": "long"}, {"label": "Short", "value": "short"}], value="all", clearable=False), 2),
     ], className="g-2")
@@ -243,7 +243,7 @@ def churn_layout() -> html.Div:
         dcc.Store(id="churn-params"),
         dcc.Store(id="churn-costs-version", data=0),
         html.H3("♻️ Churn", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "4px"}),
-        html.Div("Which contracts give the best chance of many small, cost-covering wins within a trading day. Simulated from five-minute candles of every live CL and BRN outright, spread, fly and d-fly; the live price and the oscillation count are in the same table.", style={**_MUTED, "marginBottom": "10px"}),
+        html.Div("Which contracts give the best chance of many small, cost-covering wins within a trading day. Simulated from five-minute candles of every live CL, BRN and gasoil outright, spread, fly and d-fly; the live price and the oscillation count are in the same table.", style={**_MUTED, "marginBottom": "10px"}),
         dbc.Row([
             dbc.Col(html.Div(id="churn-status", style={**_MUTED, "minHeight": "20px"}), md=10, className="pt-1"),
             dbc.Col(dbc.Button("Download / update data", id="churn-update-btn", size="sm", color="secondary", outline=True), md=2, className="text-end"),

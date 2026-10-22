@@ -11,6 +11,9 @@ Expiry rules
       delivery month; if the 25th is not a business day, 3 business days before the business
       day preceding the 25th.
   BRN (ICE Brent): the last business day of the second month preceding the delivery month.
+  G   (ICE Low Sulphur Gasoil, API code GO): 2 business days before the 14th calendar day of the DELIVERY month
+      (12:00 London), so a gasoil contract trades through the first half of its own delivery month, whereas CL and
+      Brent expire in the month(s) before it.
 
 Business days use an approximate holiday calendar per exchange (NYMEX: US holidays + Good
 Friday; ICE Brent: UK bank holidays). One-off closures are not modelled.
@@ -43,12 +46,16 @@ class ProductSpec:
     api_code: str  # API code, e.g. "CO"
     name: str
     calendar: str  # "nymex" | "ice_uk"
-    expiry_rule: str  # "cl" | "brent"
+    expiry_rule: str  # "cl" | "brent" | "gasoil"
+    multiplier: float = 1000.0  # dollars per 1.0 price point per lot (CL, Brent: 1,000 barrels; gasoil: 100 tonnes)
+    tick_size: float = 0.01
+    tick_value: float = 10.0  # dollars per tick per lot
 
 
 PRODUCTS: dict[str, ProductSpec] = {
     "CL": ProductSpec("CL", "CL", "WTI (CL)", "nymex", "cl"),
     "BRN": ProductSpec("BRN", "CO", "Brent (BRN)", "ice_uk", "brent"),
+    "G": ProductSpec("G", "GO", "Gasoil (G)", "ice_uk", "gasoil", multiplier=100.0, tick_size=0.25, tick_value=25.0),
 }
 
 
@@ -163,6 +170,8 @@ def contract_expiry(product: str, month: int, year: int) -> date:
         prev_year, prev_month = _shift_month(year, month, -1)
         reference = _previous_business_day(date(prev_year, prev_month, 25), spec.calendar)
         return add_business_days(reference, -3, spec.calendar)
+    if spec.expiry_rule == "gasoil":
+        return add_business_days(date(year, month, 14), -2, spec.calendar)
     exp_year, exp_month = _shift_month(year, month, -2)
     last_day = date(exp_year + (exp_month == 12), exp_month % 12 + 1, 1) - timedelta(days=1)
     return _previous_business_day(last_day, spec.calendar)
@@ -183,7 +192,7 @@ def month_token(month: int, year: int) -> str:
 
 
 def product_of_symbol(symbol: str | None) -> str | None:
-    """CL or BRN from an API-form contract symbol (BRN contracts are CO...), or None for anything else."""
+    """CL, BRN or G from an API-form contract symbol (Brent contracts are CO..., gasoil GO...), or None for anything else."""
     if not symbol:
         return None
     return next((code for code, spec in PRODUCTS.items() if symbol.startswith(spec.api_code)), None)

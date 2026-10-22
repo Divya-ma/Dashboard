@@ -270,6 +270,9 @@ class FakeSettlements:
     def settlement_date(self):
         return date(2026, 10, 5)
 
+    def attempted(self, symbols):
+        return self.fetches > 0
+
     def fetch(self, api, symbols, today, fetched_on):
         self.fetches += 1
         self.fetched_on = fetched_on.isoformat()

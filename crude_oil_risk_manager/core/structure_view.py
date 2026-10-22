@@ -42,7 +42,7 @@ _SORTS = {
     SORT_NAME: ("name", False),
 }
 
-_EXIT_EVENTS = {TradeEventType.PARTIAL_EXIT, TradeEventType.FULL_EXIT}
+_EXIT_EVENTS = {TradeEventType.PARTIAL_EXIT, TradeEventType.STRUCTURE_PARTIAL_EXIT, TradeEventType.FULL_EXIT, TradeEventType.DISSOLVE}
 _ENTRY_EVENTS = {TradeEventType.TRADE, TradeEventType.ADD}
 
 

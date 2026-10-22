@@ -12,8 +12,7 @@ and a round trip is two sides. Quoted CL/BZ structures on NYMEX pay a higher reb
 when `combo` is set.
 
 TICKS. A target is set in ticks; `tick_value` is the dollar value of one tick of one lot (CL and Brent:
-0.01 x 1,000 barrels = $10; Gasoil: 0.25 x 100 tonnes = $25, which is an ASSUMED contract size, change it in
-the table if it is different). The rates are kept in the settings table and edited on the Churn page.
+0.01 x 1,000 barrels = $10; Gasoil: 0.25 x 100 tonnes = $25, as in core.contract_specs). The rates are kept in the settings table and edited on the Churn page.
 """
 
 from dataclasses import dataclass

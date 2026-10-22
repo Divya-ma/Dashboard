@@ -440,7 +440,9 @@ class CurveCompare:
             self._fetching = False
 
     def _ensure_settlements(self, as_of: date) -> None:
-        if self.settlements.fetched_on == as_of.isoformat() or self._fetching or self._clock() < self._retry_after:
+        if (
+            self.settlements.fetched_on == as_of.isoformat() and self.settlements.attempted(self._all_outrights(as_of))
+        ) or self._fetching or self._clock() < self._retry_after:
             return
         with self._fetch_lock:
             if self._fetching:

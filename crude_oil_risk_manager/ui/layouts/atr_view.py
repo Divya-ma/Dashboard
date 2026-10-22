@@ -289,12 +289,14 @@ def hedge_calculator_result(result, lots: float, window: int) -> html.Div:
     ratio = result.atr_ratio
     pieces.append(html.Div(
         (f"ATR basis (matches the size of the daily moves only, not their direction): ATR of {a} {result.atr_a:.3f} (as of {result.atr_date_a}) ÷ ATR of {b} {result.atr_b:.3f} "
-         f"(as of {result.atr_date_b}) = {ratio:.2f}, so {ratio * lots:.2f} lot(s) of {b} per {lots:g} of {a}.") if np.isfinite(ratio) else "ATR basis not available.",
+         f"(as of {result.atr_date_b}) = {ratio:.2f}, so {ratio * lots:.2f} lot(s) of {b} per {lots:g} of {a}"
+         + (" (not scaled for contract size)." if result.size_ratio != 1 else ".")) if np.isfinite(ratio) else "ATR basis not available.",
         style={**_MUTED, "marginTop": "6px"},
     ))
     pieces.append(html.Div(
         f"Window: the last {window} shared trading days (data {result.first_day} to {result.last_day}). Changes are close to close on days both contracts traded. "
-        "Lots are exchange lots (one lot of a spread or fly is one lot of each leg); CL and BRN are both 1,000 barrels, so a lot of either is the same size. "
+        "Lots are exchange lots (one lot of a spread or fly is one lot of each leg). CL and Brent are 1,000 barrels a lot and gasoil 100 tonnes, so across products the lot ratio is scaled by contract size"
+        + (f" (here {result.size_ratio:g} x)" if result.size_ratio != 1 else "") + ". "
         "A hedge with a different contract is never perfect: the hedged daily risk above is what is left.",
         style={**_MUTED, "marginTop": "4px"},
     ))
@@ -302,10 +304,10 @@ def hedge_calculator_result(result, lots: float, window: int) -> html.Div:
 
 
 def hedge_calculator() -> html.Div:
-    """Pick any two contracts (outright, spread or fly, CL or BRN) and get the hedge ratio of one against the other."""
+    """Pick any two contracts (outright, spread or fly, CL, BRN or gasoil) and get the hedge ratio of one against the other."""
     return html.Div([
         html.H6("Hedge calculator: any two contracts", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "26px", "marginBottom": "2px"}),
-        html.Div("Pick the contract you hold and the contract you would hedge it with. Live contracts within 'Contracts to watch' are listed, CL and BRN.", style={**_MUTED, "marginBottom": "8px"}),
+        html.Div("Pick the contract you hold and the contract you would hedge it with. Live contracts within 'Contracts to watch' are listed, CL, BRN and gasoil.", style={**_MUTED, "marginBottom": "8px"}),
         dbc.Row([
             dbc.Col([html.Div("Position held (A)", style=_LABEL), dcc.Dropdown(id="atr-hedge-a", options=[], clearable=False)], md=3, className="mb-2"),
             dbc.Col([html.Div("Hedge with (B)", style=_LABEL), dcc.Dropdown(id="atr-hedge-b", options=[], clearable=False)], md=3, className="mb-2"),

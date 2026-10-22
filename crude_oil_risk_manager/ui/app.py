@@ -17,6 +17,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import dash  # noqa: E402
+import dash_ag_grid  # noqa: E402,F401  - Dash refuses a component library first imported inside a callback (the Structures page is loaded lazily)
 import dash_auth  # noqa: E402
 import dash_bootstrap_components as dbc  # noqa: E402
 from dash import dcc, html  # noqa: E402
@@ -56,6 +57,7 @@ from ui.callbacks.churn_callbacks import register_churn_callbacks  # noqa: E402
 from ui.callbacks.archive_callbacks import register_archive_callbacks  # noqa: E402
 from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
+from ui.callbacks.dissolve_callbacks import register_dissolve_callbacks  # noqa: E402
 from ui.container import container  # noqa: E402
 from ui.layouts.shell import (  # noqa: E402
     build_alert_container,
@@ -120,9 +122,9 @@ container.excel_store = ExcelCorrelationStore(_resolve_path(settings.CORRELATION
 container.qh_api = qh_api
 
 _curve_dir = _resolve_path(settings.CURVE_DATA_DIR)
+_prev_settlements = PrevSettlementStore(Path(_curve_dir) / "prev_settlement.json")  # shared by Curve Kinks and Curve Compare
 container.curve_service = CurveService(
-    repository, qh_api, CurveHistoryStore(_curve_dir, qh_api),
-    PrevSettlementStore(Path(_curve_dir) / "prev_settlement.json"), SnapshotStore(_curve_dir), alert_manager,
+    repository, qh_api, CurveHistoryStore(_curve_dir, qh_api), _prev_settlements, SnapshotStore(_curve_dir), alert_manager,
 )
 # The curve ladder (outrights, spreads, flies of CL and BRN) is priced in the same /fairvalue/
 # request as the position prices, so it costs no extra call.
@@ -130,7 +132,7 @@ live_adapter.set_curve_symbols_provider(container.curve_service.symbols_to_poll)
 # Curve Compare polls /taq/ quotes only while its page is open; /fairvalue/ prices from the poll above
 # fill in any symbol that has no quote.
 container.curve_compare = CurveCompare(
-    QuoteStore(qh_api), PrevSettlementStore(Path(_curve_dir) / "compare_prev_settlement.json"), qh_api,
+    QuoteStore(qh_api), _prev_settlements, qh_api,
     fallback_prices=live_adapter.curve_prices, fair_values=FairValueStore(qh_api),
 )
 # OI / Volume / ATR page: daily OI of every outright; downloads only while that page is open.
@@ -251,6 +253,7 @@ register_settings_callbacks(app)
 register_structures_callbacks(app)
 register_structure_builder_callbacks(app)
 register_structure_detail_callbacks(app)
+register_dissolve_callbacks(app)
 register_correlation_callbacks(app)
 register_corr_matrix_callbacks(app)
 register_exposure_callbacks(app)

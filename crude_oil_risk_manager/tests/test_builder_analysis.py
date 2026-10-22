@@ -63,7 +63,8 @@ def test_settlement_codes_map_outrights_and_proxy_bz():
     assert settlement_code("CLZ26") == ("CL", "CLZ26", False)
     assert settlement_code("BRNM27") == ("BRN", "COM27", False)
     assert settlement_code("BZM27") == ("BRN", "COM27", True)  # BZ converges to ICE Brent of the same month
-    for symbol in ("CLZ26-F27", "BRNM27-N27-Q27", "WBSZ26", "GF27", "", "XYZ"):
+    assert settlement_code("GF27") == ("G", "GOF27", False)  # ICE gasoil is stored like CL and Brent
+    for symbol in ("CLZ26-F27", "BRNM27-N27-Q27", "WBSZ26", "", "XYZ"):
         assert settlement_code(symbol) is None
 
 

@@ -112,10 +112,10 @@ def test_exit_short_structure_direction():
     assert result.realized_pnl == pytest.approx(1000.0) and result.trade.direction == "sell"  # closes a buy
 
 
-def test_exit_rejects_partial_and_wrong_status():
+def test_exit_rejects_more_than_open_and_wrong_status():
     s = outright(StructureStatus.OPEN, lots=10, entry=75.0)
-    with pytest.raises(TradeError, match="Partial exits are not supported"):
-        exit_structure(s, 77.0, 4, None)
+    with pytest.raises(TradeError, match="only 10 are open"):
+        exit_structure(s, 77.0, 11, None)
     with pytest.raises(TradeError, match="open structure"):
         exit_structure(outright(), 77.0, 10, None)
     with pytest.raises(TradeError, match="Exit price"):
@@ -277,7 +277,7 @@ def test_recompute_lot_mismatch_before_a_surviving_exit_raises():
     s = outright()
     entry = _mk_trade(s, TradeEventType.TRADE, 10, 70.0, timestamp=_T1)  # only 10 lots survive
     exit_trade = _mk_trade(s, TradeEventType.FULL_EXIT, 20, 90.0, direction="sell", timestamp=_T2)  # expects 20 lots
-    with pytest.raises(TradeError, match="Partial exits are not supported"):
+    with pytest.raises(TradeError, match="only 10 are open"):
         recompute_structure_from_trades(s, [entry, exit_trade])
 
 
@@ -595,7 +595,9 @@ def test_exit_confirmation_and_execution(repo):
     is_open, body, disabled = dc.open_exit_confirmation(1, 77.0, 10, sid)
     assert is_open is True and disabled is False and "+$20,000" in str(body) and "cannot be undone" in str(body)
     is_open, body, disabled = dc.open_exit_confirmation(1, 77.0, 4, sid)
-    assert disabled is True and "Partial exits" in str(body)
+    assert disabled is False and "exit 4 lots" in str(body) and "6 lots will stay open" in str(body) and "+$8,000" in str(body)
+    is_open, body, disabled = dc.open_exit_confirmation(1, 77.0, 11, sid)
+    assert disabled is True and "only 10 are open" in str(body)
     assert repo.get_structure(sid).status == StructureStatus.OPEN  # confirmation alone never exits
 
     detail_open, rows, toast_open, message, icon, header, confirm_open = dc.execute_full_exit(1, 77.0, 10, "bye", sid, *GRID)
@@ -607,9 +609,22 @@ def test_exit_confirmation_and_execution(repo):
     assert detail_open is False and confirm_open is False and rows == [] and "+$20,000" in message
 
 
-def test_execute_full_exit_rejects_partial(repo):
+def test_exiting_some_lots_keeps_the_structure_open_with_the_rest(repo):
     sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
     detail_open, rows, toast_open, message, icon, header, confirm_open = dc.execute_full_exit(1, 77.0, 3, None, sid, *GRID)
+    assert detail_open is False and confirm_open is False and icon != "danger" and "7 lots remain" in message and header == "Lots exited"
+    after = repo.get_structure(sid)
+    assert after.status == StructureStatus.OPEN and after.legs[0].lots == 7.0 and after.closed_at is None
+    (trade,) = repo.get_trades_for_structure(sid)
+    assert trade.event_type == TradeEventType.STRUCTURE_PARTIAL_EXIT and trade.lots == 3 and trade.realized_pnl == pytest.approx(6000.0)
+    # then the rest
+    dc.execute_full_exit(1, 78.0, 7, None, sid, *GRID)
+    assert repo.get_structure(sid).status == StructureStatus.CLOSED and len(repo.get_trades_for_structure(sid)) == 2
+
+
+def test_exiting_more_than_is_open_is_refused(repo):
+    sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
+    detail_open, rows, toast_open, message, icon, header, confirm_open = dc.execute_full_exit(1, 77.0, 30, None, sid, *GRID)
     assert detail_open is dc.no_update and icon == "danger" and confirm_open is False
     assert repo.get_structure(sid).status == StructureStatus.OPEN and repo.get_trades_for_structure(sid) == []
 
@@ -1045,3 +1060,48 @@ def test_closed_grid_reuse_action_refreshes_active_grid(repo):
         {"value": {"action": "reuse", "structure_id": "missing"}}, "active", "all", "name", {}, {}
     )
     assert rows is sc.no_update and icon == "danger"
+
+
+# ---------- exiting some of the structure's lots at one structure price ----------
+
+
+def test_a_structure_can_be_exited_in_part_and_the_rest_stays_open():
+    s = outright(StructureStatus.OPEN, lots=10, entry=75.0)
+    result = exit_structure(s, 77.0, 4, None)
+    assert not result.closed and result.remaining_lots == 6
+    assert result.trade.event_type == TradeEventType.STRUCTURE_PARTIAL_EXIT and result.trade.lots == 4 and result.trade.direction == "sell"
+    assert result.realized_pnl == pytest.approx(8000.0)  # (77-75) x 4 lots x 1,000
+    assert [leg.lots for leg in result.legs] == [6.0] and not any(leg.is_naked for leg in result.legs)
+    assert result.legs[0].entry_price == 75.0  # the open lots keep their entry
+    assert "6 lots remain" in result.audit_note
+    full = exit_structure(s, 77.0, 10, None)
+    assert full.closed and full.trade.event_type == TradeEventType.FULL_EXIT and full.legs[0].lots == 0
+
+
+def test_a_spread_loses_the_same_lots_on_every_leg_when_exited_in_part():
+    legs = [Leg(contract=contract("CLZ26"), ratio=1, lots=10.0, entry_price=75.0, direction="buy"),
+            Leg(contract=contract("CLF27", month=1), ratio=-1, lots=10.0, entry_price=74.0, direction="buy")]
+    s = Structure(name="spr", structure_type=StructureType.SPREAD, products=["CL"], legs=legs, status=StructureStatus.OPEN)
+    result = exit_structure(s, 1.5, 3, None)
+    assert [leg.lots for leg in result.legs] == [7.0, 7.0] and result.realized_pnl == pytest.approx(0.5 * 3 * 1000)
+    uneven = s.model_copy(update={"legs": [legs[0].model_copy(update={"lots": 6.0}), legs[1]]})
+    with pytest.raises(TradeError, match="no longer at equal lots"):
+        exit_structure(uneven, 1.5, 3, None)
+
+
+def test_a_partial_structure_exit_is_replayed_when_an_earlier_trade_is_deleted():
+    s = outright()
+    entry = _mk_trade(s, TradeEventType.TRADE, 10, 70.0, timestamp=_T1)
+    partial = _mk_trade(s, TradeEventType.STRUCTURE_PARTIAL_EXIT, 4, 80.0, direction="sell", timestamp=_T2)
+    result = recompute_structure_from_trades(s, [entry, partial])
+    assert result.structure.status == StructureStatus.OPEN and result.structure.legs[0].lots == 6.0
+    assert result.exit_trade_updates[partial.trade_id][0] == pytest.approx(40000.0)  # (80-70) x 4 x 1,000
+
+
+def test_a_partial_exit_counts_as_realized_pnl_today():
+    from core.pnl import calculate_todays_realized_pnl
+
+    s = outright()
+    partial = _mk_trade(s, TradeEventType.STRUCTURE_PARTIAL_EXIT, 4, 80.0, direction="sell")
+    partial = partial.model_copy(update={"realized_pnl": 123.0})
+    assert calculate_todays_realized_pnl([partial]) == 123.0

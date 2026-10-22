@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pydantic import ValidationError
 
 from adapters.base import LETTER_TO_MONTH
+from core.contract_specs import spec_for_symbol
 from core.correlation import classify_correlation, correlate_structures, outright_weights
 from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError
@@ -88,9 +89,16 @@ def next_leg_rows(
 # ----------------------------------------------------------------------
 
 
-def _contract_for_symbol(symbol: str, multiplier: float, tick_size: float, tick_value: float) -> Contract:
-    """New Contract for an instrument the app has not seen; month/year come from the front leg."""
+def _contract_for_symbol(symbol: str, multiplier: float | None, tick_size: float | None, tick_value: float | None) -> Contract:
+    """New Contract for an instrument the app has not seen; month/year come from the front leg.
+
+    A blank multiplier, tick size or tick value is the product's own (core.contract_specs: CL and Brent 1,000 / 0.01 / $10,
+    gasoil 100 / 0.25 / $25), so a cross-product structure gets each leg's right size."""
     front = parse_symbol(symbol)[0]
+    default = spec_for_symbol(symbol)
+    multiplier = default.multiplier if multiplier is None else multiplier
+    tick_size = default.tick_size if tick_size is None else tick_size
+    tick_value = default.tick_value if tick_value is None else tick_value
     return Contract(
         product=front["product"],
         contract_month=LETTER_TO_MONTH[front["letter"]],
@@ -152,6 +160,9 @@ def build_shell_structure(
         ("Tick size", tick_size, "tick_size"),
         ("Tick value", tick_value, "tick_value"),
     ):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            numbers[key] = None  # blank: the product's own
+            continue
         try:
             numbers[key] = parse_number(value, label, minimum=0)
             if numbers[key] <= 0:
@@ -170,7 +181,7 @@ def build_shell_structure(
                 continue
             existing = get_contract(symbol)
             if existing is not None:
-                if existing.multiplier != numbers["multiplier"]:
+                if numbers["multiplier"] is not None and existing.multiplier != numbers["multiplier"]:
                     warnings.append(
                         f"{symbol} is already saved with multiplier {existing.multiplier:g}; "
                         f"its saved specs are kept."

@@ -29,7 +29,7 @@ from ui.layouts.oi_monitor_view import monitor_controls
 from ui.layouts.shell import COLORS
 
 REFRESH_MS = 3000
-PRODUCT_COLORS = {"CL": "#4da3ff", "BRN": "#f5a623"}
+PRODUCT_COLORS = {"CL": "#4da3ff", "BRN": "#f5a623", "G": "#3ecf8e"}
 MONTH_NAMES = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun", 7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
 YEAR_COLORS = ["#4da3ff", "#f5a623", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "#95a5a6", "#f1c40f", "#34495e"]
 

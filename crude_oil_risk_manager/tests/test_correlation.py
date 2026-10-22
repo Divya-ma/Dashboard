@@ -10,7 +10,6 @@ from adapters.mock.mock_historical import MockHistoricalAdapter
 from core.correlation import (
     build_correlation_matrix,
     calculate_correlation,
-    calculate_rolling_correlation,
     classify_correlation,
     beta_window,
     correlate_structures,
@@ -144,25 +143,6 @@ def test_a_flat_stretch_is_left_out_of_the_average_not_counted_as_zero():
 def test_beta_window_is_the_correlation_span_but_at_least_30():
     assert beta_window(5, 20) == 30
     assert beta_window(10, 100) == 109
-
-
-# ---------- calculate_rolling_correlation ----------
-
-
-def test_rolling_correlation_length(tmp_path, loader, create_synthetic_parquet):
-    create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(100, seed=1))
-    create_synthetic_parquet(tmp_path, "CLF27", closes=random_closes(100, seed=2))
-    result = calculate_rolling_correlation("CLZ26", "CLF27", 20, loader)
-    # 100 closes -> 99 diffs -> 99 - 20 + 1 rolling values
-    assert len(result) == 80
-
-
-def test_rolling_correlation_has_no_nan(tmp_path, loader, create_synthetic_parquet):
-    create_synthetic_parquet(tmp_path, "CLZ26", closes=random_closes(100, seed=1))
-    create_synthetic_parquet(tmp_path, "CLF27", closes=random_closes(100, seed=2))
-    result = calculate_rolling_correlation("CLZ26", "CLF27", 20, loader)
-    assert not result.isna().any()
-    assert result.between(-1.0, 1.0).all()
 
 
 # ---------- build_correlation_matrix ----------

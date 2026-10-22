@@ -1,32 +1,26 @@
-"""Home page packets: the open structures grouped by product and shape, each with side, lots, prices and risk.
+"""Home page packets: one per open structure, with the structure's side, lots, prices and risk and a row per leg.
 
-A packet is "BRN flies", "CL spreads", "BRN/CL spreads" ...: every open structure of the same products and
-type. Per structure:
+Per structure:
 
     side        BUY / SELL = the direction its traded legs were entered on ("MIXED" if they differ)
     lots        the lots of its first traded leg (legs of one structure trade the same lots, scaled by their ratio)
     entry/live  the structure's quoted price = sum of ratio x leg price (average entry price / live price)
     risk        1-day historical VaR at 95% of that structure alone (same method and settlement history as the
-                VaR page), a positive dollar loss; a packet's risk is the VaR of its structures TOGETHER, so
-                offsetting structures net out.
+                VaR page), a positive dollar loss. A leg row shows the same for that leg alone, so the legs'
+                risks add up to MORE than the structure's: they offset each other inside it.
 """
 
 import logging
 
 from core.models.structure import Structure
-from core.positions import dollar_weights
+from core.pnl import calculate_structure_unrealized_pnl
+from core.positions import dollar_weights, signed_lots
 from core.var import historical_var
 
 logger = logging.getLogger(__name__)
 
 RISK_CONFIDENCE = 0.95
 RISK_LOOKBACK = 250
-_PLURAL = {"outright": "outrights", "spread": "spreads", "fly": "flies", "custom": "custom"}
-
-
-def packet_name(structure: Structure) -> str:
-    products = "/".join(sorted({leg.contract.product for leg in structure.legs}))
-    return f"{products} {_PLURAL.get(structure.structure_type.value, structure.structure_type.value)}"
 
 
 def structure_side(structure: Structure) -> str:
@@ -55,6 +49,12 @@ def live_price(structure: Structure, prices: dict[str, float]) -> float | None:
     return sum(leg.ratio * prices[leg.contract.symbol] for leg in traded)
 
 
+def latest_level(trades: list, field: str) -> float | None:
+    """The stop-loss or target price (`stop_loss_price` / `target_price`) of the most recent trade that set one."""
+    set_ones = [t for t in trades or [] if getattr(t, field, None) is not None]
+    return float(getattr(max(set_ones, key=lambda t: t.timestamp), field)) if set_ones else None
+
+
 class RiskCache:
     """Historical VaR per book, remembered until the book or the stored settlements change (so a poll costs nothing)."""
 
@@ -62,8 +62,7 @@ class RiskCache:
         self._loader, self._version = data_loader_getter, version_getter
         self._cache: dict[tuple, float | None] = {}
 
-    def var(self, structures: list[Structure]) -> float | None:
-        weights = dollar_weights(structures)
+    def var_of_weights(self, weights: dict[str, float]) -> float | None:
         if not weights:
             return 0.0
         key = (tuple(sorted((s, round(w, 6)) for s, w in weights.items())), self._version())
@@ -78,27 +77,44 @@ class RiskCache:
                 self._cache[key] = None
         return self._cache[key]
 
+    def var(self, structures: list[Structure]) -> float | None:
+        return self.var_of_weights(dollar_weights(structures))
 
-def build_packets(structures: list[Structure], per_structure: dict, prices: dict[str, float], risk: RiskCache) -> list[dict]:
-    """JSON-safe packets, biggest absolute unrealized PnL first. `per_structure` is calculate_portfolio_pnl's."""
-    groups: dict[str, list[Structure]] = {}
-    for structure in structures:
-        if structure.structure_id in per_structure:
-            groups.setdefault(packet_name(structure), []).append(structure)
+
+def _leg_rows(structure: Structure, prices: dict[str, float], risk: RiskCache) -> list[dict]:
+    _, breakdown, _ = calculate_structure_unrealized_pnl(structure.legs, prices)
+    rows = []
+    for leg in structure.legs:
+        if not leg.is_traded:
+            continue
+        signed = signed_lots(leg)
+        symbol = leg.contract.symbol
+        entry = leg.average_entry_price if leg.average_entry_price is not None else leg.entry_price
+        rows.append({
+            "symbol": symbol, "side": "BUY" if signed > 0 else "SELL", "lots": abs(signed), "entry": entry,
+            "live": prices.get(symbol), "risk": risk.var_of_weights({symbol: signed * leg.contract.multiplier}),
+            "unrealized": breakdown.get(leg.leg_id),
+        })
+    return rows
+
+
+def build_packets(
+    structures: list[Structure], per_structure: dict, prices: dict[str, float], risk: RiskCache, trades_by_structure: dict | None = None,
+) -> list[dict]:
+    """JSON-safe packets, one per open structure, biggest absolute unrealized PnL first. `per_structure` is calculate_portfolio_pnl's;
+    `trades_by_structure` supplies the stop and target (structure prices) last entered with a trade."""
     packets = []
-    for name, members in groups.items():
-        rows = []
-        for s in members:
-            info = per_structure[s.structure_id]
-            rows.append({
-                "structure_id": s.structure_id, "name": s.name, "side": structure_side(s), "lots": structure_lots(s),
-                "entry": entry_price(s), "live": live_price(s, prices), "risk": risk.var([s]),
-                "unrealized": info["unrealized"], "total": info["total"], "is_stale": info.get("is_stale", False),
-            })
-        rows.sort(key=lambda r: r["unrealized"], reverse=True)
+    for s in structures:
+        info = per_structure.get(s.structure_id)
+        if info is None:
+            continue
         packets.append({
-            "name": name, "rows": rows, "unrealized": sum(r["unrealized"] for r in rows),
-            "risk": risk.var(members),
+            "structure_id": s.structure_id, "name": s.name, "side": structure_side(s), "lots": structure_lots(s),
+            "entry": entry_price(s), "live": live_price(s, prices), "risk": risk.var([s]),
+            "target": latest_level((trades_by_structure or {}).get(s.structure_id), "target_price"),
+            "stop": latest_level((trades_by_structure or {}).get(s.structure_id), "stop_loss_price"),
+            "unrealized": info["unrealized"], "total": info["total"], "is_stale": info.get("is_stale", False),
+            "legs": _leg_rows(s, prices, risk),
         })
     packets.sort(key=lambda p: abs(p["unrealized"]), reverse=True)
     return packets
