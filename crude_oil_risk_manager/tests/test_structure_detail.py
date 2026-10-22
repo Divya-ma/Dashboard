@@ -1105,3 +1105,46 @@ def test_a_partial_exit_counts_as_realized_pnl_today():
     partial = _mk_trade(s, TradeEventType.STRUCTURE_PARTIAL_EXIT, 4, 80.0, direction="sell")
     partial = partial.model_copy(update={"realized_pnl": 123.0})
     assert calculate_todays_realized_pnl([partial]) == 123.0
+
+
+# ---------- a leg that is itself a spread or fly can trade at zero or below ----------
+
+
+def fly_of_flies():
+    legs = [Leg(contract=contract("BRNF29-G29-H29", product="BRN", month=1), ratio=1),
+            Leg(contract=contract("BRNH29-J29-K29", product="BRN", month=3), ratio=-1)]
+    return Structure(name="Jan29 fly - Mar29 fly", structure_type=StructureType.CUSTOM, products=["BRN"], legs=legs, status=StructureStatus.SHELL)
+
+
+def test_individual_leg_prices_of_fly_legs_may_be_negative_on_either_side():
+    for side in ("sell", "buy"):
+        result = enter_trade(fly_of_flies(), -0.10, 3, side, None, {}, leg_prices=[-0.35, -0.25])
+        assert [leg.entry_price for leg in result.legs] == [-0.35, -0.25] and result.status == StructureStatus.OPEN
+        assert all(leg.direction == side for leg in result.legs) and result.trade.price == -0.10
+    zero = enter_trade(fly_of_flies(), 0.0, 1, "sell", None, {}, leg_prices=[0.0, 0.05])
+    assert [leg.entry_price for leg in zero.legs] == [0.0, 0.05]
+
+
+def test_outright_legs_still_have_to_be_positive_and_all_legs_must_be_numbers():
+    with pytest.raises(TradeError, match="Leg 1 price must be a number greater than 0"):
+        enter_trade(spread(), 1.25, 5, "buy", None, LIVE, leg_prices=[-1.0, 74.0])
+    with pytest.raises(TradeError, match="Leg 2 price must be a number"):
+        enter_trade(fly_of_flies(), -0.10, 3, "sell", None, {}, leg_prices=[-0.35, float("nan")])
+
+
+def test_a_fly_leg_can_be_exited_and_edited_at_a_negative_price():
+    s = fly_of_flies()
+    entered = enter_trade(s, -0.10, 3, "sell", None, {}, leg_prices=[-0.35, -0.25])
+    open_s = s.model_copy(update={"legs": entered.legs, "status": entered.status})
+    leg = open_s.legs[0]
+    result = partial_exit_legs(open_s, {leg.leg_id: (-0.40, 3)}, None)
+    assert result.realized_pnl_by_leg[leg.leg_id] != 0
+    with pytest.raises(TradeError, match="exit price must be a number greater than 0"):
+        single = open_s_outright()
+        partial_exit_legs(single, {single.legs[0].leg_id: (-1.0, 1)}, None)
+    edited = apply_leg_edits(open_s, [l.contract.symbol for l in open_s.legs], [1, -1], lambda s_: None, [-0.5, None])
+    assert edited.legs[0].average_entry_price == -0.5
+
+
+def open_s_outright():
+    return outright(StructureStatus.OPEN, lots=1, entry=75.0)

@@ -9,6 +9,7 @@ trades (entry) and the structure's closed_at (exit); prices from core.structure_
 
 from datetime import date, datetime
 
+from core.journal import PRODUCT_LABELS, format_risk_reward, risk_reward, with_defaults
 from core.models import Structure, StructureStatus, Trade, TradeEventType
 from core.pnl import calculate_net_realized_pnl, calculate_structure_transaction_costs
 from core.structure_view import structure_entry_price, structure_exit_price
@@ -49,11 +50,55 @@ def result_for(pnl: float) -> str:
     return RESULT_WIN if pnl > 0 else RESULT_LOSS if pnl < 0 else RESULT_FLAT
 
 
-def build_archive_rows(structures: list[Structure], trades_by_structure: dict[str, list[Trade]]) -> list[dict]:
+# the journal columns: id prefix "e_" / "x_" for the entry / exit snapshot
+CURVE_PRODUCTS = ("CL", "BRN", "G")  # the curves are listed CL, BRN, GO
+SNAPSHOT_FIELDS = (
+    ("px_co", "prices", "CO"), ("px_cl", "prices", "CL"), ("px_go", "prices", "GO"),
+    ("move_day", "move_day", None), ("move_min", "move_min", None),
+    ("curve_cl", "curve", "CL"), ("curve_brn", "curve", "BRN"), ("curve_go", "curve", "G"),
+    ("atr", "atr", None),
+    ("vol_ratio", "vol_ratio", None), ("volume_ratio", "volume_ratio", None), ("spread_ticks", "spread_ticks", None),
+    ("brent_wti", "brent_wti", None), ("crack", "crack", None), ("kink_z", "kink_z", None),
+)
+
+
+def journal_columns(journal: dict | None, trades: list[Trade]) -> dict:
+    """The journal's part of an archive row: risk:reward, the entry and exit snapshots, trade ideas and payups.
+
+    Every figure the journal does not have is None. Payups are ticks typed by hand (entry and exit, whole structure; the
+    per-leg figures are kept in `payup_legs`)."""
+    journal = with_defaults(journal)
+    rr = risk_reward(trades)
+    out = {
+        "rr": rr["ratio"] if rr else None, "rr_text": format_risk_reward(rr), "rr_detail": rr,
+        "ideas": journal["ideas"], "ideas_text": ", ".join(journal["ideas"]),
+        "payup_entry": journal["payups"]["entry"]["total"], "payup_exit": journal["payups"]["exit"]["total"],
+        "payup_legs": {"entry": journal["payups"]["entry"]["legs"], "exit": journal["payups"]["exit"]["legs"]},
+        "snapshots": {"entry": journal["entry"], "exit": journal["exit"]},
+        "conviction": journal["conviction"], "exit_reason": journal["exit_reason"],
+        "mistakes": journal["mistakes"], "mistakes_text": ", ".join(journal["mistakes"]),
+        "mfe": (journal["excursion"] or {}).get("mfe"), "mae": (journal["excursion"] or {}).get("mae"),  # the intraday figures if there are any
+    }
+    exc = journal["excursion"] or {}
+    daily = exc.get("daily") or (exc if str(exc.get("basis", "")).startswith("daily") else None) or {}
+    intraday = exc.get("intraday") or {}
+    out.update(mfe_d=daily.get("mfe"), mae_d=daily.get("mae"), mfe_i=intraday.get("mfe"), mae_i=intraday.get("mae"))
+    for prefix, kind in (("e_", "entry"), ("x_", "exit")):
+        snap = journal[kind] or {}
+        for column, key, sub_key in SNAPSHOT_FIELDS:
+            value = snap.get(key)
+            out[prefix + column] = (value or {}).get(sub_key) if sub_key is not None else value
+    return out
+
+
+def build_archive_rows(
+    structures: list[Structure], trades_by_structure: dict[str, list[Trade]], journals: dict[str, dict] | None = None,
+) -> list[dict]:
     """One row per closed structure, most recently closed first.
 
     Missing entry/exit dates (data anomalies) stay None; days_held is then None too.
-    A structure without legs still gets a row (legs shown as a dash).
+    A structure without legs still gets a row (legs shown as a dash). `journals` (by structure id) adds the trade-journal
+    columns (see journal_columns).
     """
     rows = []
     for structure in structures:
@@ -66,6 +111,17 @@ def build_archive_rows(structures: list[Structure], trades_by_structure: dict[st
         pnl = calculate_net_realized_pnl(trades)
         transaction_costs = calculate_structure_transaction_costs(trades)
         legs = _legs_detail(structure, entered_lots)
+        extra = journal_columns((journals or {}).get(structure.structure_id), trades)
+        entry_at = entries[0].timestamp.isoformat() if entries else None
+        exit_at = (structure.closed_at or (exits[-1].timestamp if exits else None))
+        rr = extra["rr_detail"]
+        multiplier = structure.legs[0].contract.multiplier if structure.legs else 1000.0
+        risk_usd = rr["risk"] * (entered_lots or 0.0) * multiplier if rr and entered_lots else None
+        z = extra.get("e_kink_z")
+        long_curve = bool(structure.legs) and ((structure.legs[0].direction == "buy") == (structure.legs[0].ratio > 0))
+        extra["kink_edge"] = None if z is None else (-z if long_curve else z)  # a long structure that was cheap (z < 0), or a short one that was rich
+        extra["risk_usd"] = risk_usd if risk_usd and risk_usd > 0 else None
+        extra["r_multiple"] = pnl / extra["risk_usd"] if extra["risk_usd"] else None
         rows.append(
             {
                 "structure_id": structure.structure_id,
@@ -84,6 +140,10 @@ def build_archive_rows(structures: list[Structure], trades_by_structure: dict[st
                 "transaction_costs": transaction_costs,
                 "result": result_for(pnl),
                 "notes": structure.notes or "",
+                "products": list(structure.products),
+                "entry_at": entry_at,
+                "exit_at": exit_at.isoformat() if exit_at else None,
+                **extra,
             }
         )
     rows.sort(key=lambda r: r["exit_date"] or "", reverse=True)

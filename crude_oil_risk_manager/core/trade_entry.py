@@ -185,12 +185,17 @@ def _validate_alert_levels(price, direction: str, stop_loss, target) -> list[str
     return errors
 
 
+def leg_price_must_be_positive(leg: Leg) -> bool:
+    """Only a leg that is a single outright contract month has to trade above zero. A leg may itself be a spread or a
+    fly (a structure of flies, say), and those legitimately trade at zero or below."""
+    return get_structure_type_from_symbol(leg.contract.symbol) == "outright"
+
+
 def _validate_leg_prices(legs: list[Leg], leg_prices: list | None) -> list[str]:
     """All-or-nothing per-leg price override: every leg filled, or none.
 
-    Each filled price must be finite and > 0 — every leg is itself always a single
-    outright contract month, so the same positivity rule as a single-leg structure
-    price applies (see _validate_price_and_lots).
+    Each filled price must be finite, and > 0 for a leg that is an outright contract month (the same rule as a
+    single-leg structure price, see _validate_price_and_lots); a spread or fly leg can be zero or negative.
     """
     if leg_prices is None:
         return []
@@ -202,8 +207,10 @@ def _validate_leg_prices(legs: list[Leg], leg_prices: list | None) -> list[str]:
     if len(filled) != len(legs):
         return ["Enter a price for every leg, or leave all leg prices blank to auto-allocate."]
     errors = []
-    for number, price in enumerate(leg_prices, start=1):
-        if not _finite(price) or price <= 0:
+    for number, (leg, price) in enumerate(zip(legs, leg_prices), start=1):
+        if not _finite(price):
+            errors.append(f"Leg {number} price must be a number.")
+        elif price <= 0 and leg_price_must_be_positive(leg):
             errors.append(f"Leg {number} price must be a number greater than 0.")
     return errors
 
@@ -353,8 +360,7 @@ def partial_exit_legs(
 
     `leg_exits` is {leg_id: (price, lots)}. Each leg is validated independently: lots
     must be > 0 and <= that leg's currently open lots; price must be finite and > 0
-    (a leg is always a single contract month, so the same positivity rule as a
-    single-leg outright structure price applies). Realized P&L is computed per leg via
+    (positive for an outright contract month; a spread or fly leg may be zero or negative). Realized P&L is computed per leg via
     core.pnl.calculate_leg_realized_pnl against that leg's current average/entry price
     — genuinely per-leg, unlike exit_structure's single structure-level formula. One
     Trade row (event_type PARTIAL_EXIT) is produced per leg acted on. Entry prices are
@@ -380,7 +386,9 @@ def partial_exit_legs(
             errors.append(f"Leg {leg.contract.symbol}: lots to exit must be greater than 0.")
         elif lots - leg.lots > _LOT_TOLERANCE:
             errors.append(f"Leg {leg.contract.symbol}: cannot exit more than its open {leg.lots:g} lots.")
-        if not _finite(price) or price <= 0:
+        if not _finite(price):
+            errors.append(f"Leg {leg.contract.symbol}: exit price must be a number.")
+        elif price <= 0 and leg_price_must_be_positive(leg):
             errors.append(f"Leg {leg.contract.symbol}: exit price must be a number greater than 0.")
     if errors:
         raise TradeError(errors)

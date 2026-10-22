@@ -168,6 +168,23 @@ class CurveService:
     def state(self) -> CurveState:
         return self._state  # replaced atomically by on_prices
 
+    def kink_z(self, leg_symbols: tuple[str, ...], ratios: tuple[int, ...]) -> dict | None:
+        """The Curve Kinks z-scores of the curve structure made of these consecutive outright legs (API symbols) and ratios,
+        right now: {"z": the largest |z| of the four methods, signed (+ rich, - cheap against its curve), "methods": {name: z}}.
+        None when the structure is not on the page's ladder or has no scores yet (no history, or a price missing)."""
+        wanted = tuple(ratios)
+        for view in self._state.families.values():
+            for position in view.positions:
+                s = position.structure
+                if tuple(s.legs) != tuple(leg_symbols) or tuple(s.leg_weights) not in (wanted, tuple(-r for r in wanted)):
+                    continue
+                zs = {m: z for m, z in ((position.result.z if position.result else None) or {}).items() if z is not None}
+                if not zs:
+                    return None
+                strongest = max(zs.values(), key=abs)
+                return {"z": strongest, "methods": zs}
+        return None
+
     def ladder(self, product: str, today: date) -> dict[str, list[CurveStructure]]:
         key = (product, today)
         if key not in self._ladders:

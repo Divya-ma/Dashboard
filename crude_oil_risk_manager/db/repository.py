@@ -433,6 +433,7 @@ class Repository:
         history). Contracts are shared across structures and are never deleted."""
         with self._engine.begin() as conn:
             conn.execute(text("DELETE FROM pnl_records WHERE structure_id = :sid"), {"sid": structure_id})
+            conn.execute(text("DELETE FROM trade_journal WHERE structure_id = :sid"), {"sid": structure_id})
             conn.execute(text("DELETE FROM trades WHERE structure_id = :sid"), {"sid": structure_id})
             conn.execute(text("DELETE FROM legs WHERE structure_id = :sid"), {"sid": structure_id})
             conn.execute(text("DELETE FROM structures WHERE structure_id = :sid"), {"sid": structure_id})
@@ -869,6 +870,33 @@ class Repository:
     # ------------------------------------------------------------------
     # Settings methods
     # ------------------------------------------------------------------
+
+    def get_journal(self, structure_id: str) -> dict | None:
+        """The structure's trade-journal document (core.journal), or None if it has none yet."""
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT data FROM trade_journal WHERE structure_id = :sid"), {"sid": structure_id}
+            ).mappings().first()
+        return None if row is None else json.loads(row["data"])
+
+    def get_journals(self) -> dict[str, dict]:
+        """Every trade-journal document by structure id."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("SELECT structure_id, data FROM trade_journal")).mappings().all()
+        return {row["structure_id"]: json.loads(row["data"]) for row in rows}
+
+    def save_journal(self, structure_id: str, journal: dict) -> None:
+        """Replace the structure's trade-journal document."""
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT OR REPLACE INTO trade_journal (structure_id, data, updated_at)
+                    VALUES (:sid, :data, :updated_at)
+                    """
+                ),
+                {"sid": structure_id, "data": json.dumps(journal), "updated_at": datetime.now(timezone.utc).isoformat()},
+            )
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         """Fetch a JSON-decoded setting value; return default if key not found."""

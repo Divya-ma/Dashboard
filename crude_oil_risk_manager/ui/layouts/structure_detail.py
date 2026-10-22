@@ -9,8 +9,9 @@ renders it into the detail modal body. Every form component is always present
 from datetime import datetime
 
 import dash_bootstrap_components as dbc
-from dash import html
+from dash import dcc, html
 
+from core.journal import CONVICTIONS, EXIT_REASONS
 from core.models import Leg, PnLRecord, Structure, StructureStatus, Trade, TradeEventType
 from core.pnl import (
     calculate_structure_realized_pnl,
@@ -19,6 +20,7 @@ from core.pnl import (
 )
 from core.structure_utils import net_outright_equivalent
 from core.structure_view import prices_from_store, structure_entry_price, structure_live_price
+from ui.container import container
 from ui.layouts.shell import COLORS
 
 _HIDDEN = {"display": "none"}
@@ -376,6 +378,37 @@ def _leg_prices_section(structure: Structure, prices: dict[str, float]) -> html.
     )
 
 
+def _payups_section(structure: Structure, kind: str) -> html.Div:
+    """Ticks paid up before the fill ("entry" or "exit"): one number for the structure, and optionally one per leg.
+
+    A payup is the number of ticks a fill came through your order price (ordered 0.08, filled 0.09 = 1). It is only recorded,
+    for the journal; it changes no price or P&L."""
+    leg_rows = [
+        _field(
+            f"Leg {i + 1}: {leg.contract.symbol}",
+            dbc.Input(id={"type": f"{kind}-leg-payup", "index": i}, type="number", step="any", placeholder="Optional", style={"width": "160px"}),
+        )
+        for i, leg in enumerate(structure.legs)
+    ] if len(structure.legs) > 1 else []
+    return html.Div(
+        [
+            _field(
+                f"Payups in {kind} (ticks paid up before the fill; optional)",
+                dbc.Input(id=f"trade-{kind}-payups", type="number", step="any", placeholder="e.g. 1", style={"width": "220px"}),
+            ),
+            *(
+                [
+                    dbc.Button(f"Payups per leg ({kind}, optional)", id=f"btn-toggle-{kind}-leg-payups", color="secondary", outline=True, size="sm", className="mb-2"),
+                    dbc.Collapse(html.Div(leg_rows, style={"maxWidth": "480px"}), id=f"{kind}-leg-payups-collapse", is_open=False),
+                ]
+                if leg_rows
+                else []
+            ),
+        ],
+        className="mb-2",
+    )
+
+
 def _entry_form(structure: Structure, live: float | None, prices: dict[str, float]) -> html.Div:
     is_open = structure.status != StructureStatus.SHELL
     title = "Add to Position" if is_open else "Enter Trade"
@@ -417,6 +450,15 @@ def _entry_form(structure: Structure, live: float | None, prices: dict[str, floa
                 dbc.RadioItems(id="trade-direction", options=[{"label": "Buy", "value": "buy"}, {"label": "Sell", "value": "sell"}], value="buy", inline=True),
             ),
             html.Div(id="trade-pnl-preview", style={**_MUTED, "marginBottom": "12px"}),
+            _field(
+                "Trade ideas (optional; the list is in Settings)",
+                dcc.Dropdown(id="trade-entry-ideas", options=_idea_options(), value=[], multi=True, placeholder="Pick any number"),
+            ),
+            _field(
+                "Conviction at entry (1 = low, 5 = high; optional)",
+                dcc.Dropdown(id="trade-entry-conviction", options=[{"label": str(c), "value": c} for c in CONVICTIONS], value=None, placeholder="—", style={"width": "220px"}),
+            ),
+            _payups_section(structure, "entry"),
             _field("Notes", dbc.Textarea(id="trade-entry-notes", rows=2, placeholder="Optional notes", maxLength=200)),
             dbc.Button("✅ Confirm Trade Entry", id="btn-confirm-trade", color="success", size="lg"),
         ]
@@ -432,6 +474,16 @@ def _entry_form(structure: Structure, live: float | None, prices: dict[str, floa
         id="trade-entry-form",
         style={"marginBottom": "20px"} if visible else _HIDDEN,
     )
+
+
+def _exit_reason_options() -> list[dict]:
+    reasons = container.journal.exit_reason_options() if container.journal is not None else list(EXIT_REASONS)
+    return [{"label": r, "value": r} for r in reasons]
+
+
+def _idea_options() -> list[dict]:
+    ideas = container.journal.idea_options() if container.journal is not None else []
+    return [{"label": idea, "value": idea} for idea in ideas]
 
 
 def _legs_uniform(structure: Structure) -> bool:
@@ -457,6 +509,11 @@ def _exit_form(structure: Structure, live: float | None) -> html.Div:
                 dbc.Button("Exit All", id="btn-exit-all-lots", size="sm", color="warning", className="ms-2"),
             ),
             html.Div(id="exit-pnl-preview", style={**_MUTED, "marginBottom": "12px"}),
+            _field(
+                "Why you are exiting (optional)",
+                dcc.Dropdown(id="trade-exit-reason", options=_exit_reason_options(), value=None, placeholder="—", style={"width": "320px"}),
+            ),
+            _payups_section(structure, "exit"),
             _field("Notes", dbc.Textarea(id="trade-exit-notes", rows=2, maxLength=200)),
             dbc.Button("🚪 Exit", id="btn-confirm-exit", color="danger", size="lg"),
         ]

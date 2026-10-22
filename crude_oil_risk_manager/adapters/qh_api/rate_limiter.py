@@ -102,6 +102,14 @@ class EndpointRateLimiter:
         if remaining <= 0:
             self.block_for(reset - self._wall_clock() + 0.5)
 
+    def spare(self) -> int:
+        """Requests that can go out right now without waiting: the least room left in the minute, hour and day windows."""
+        with self._lock:
+            now = self._clock()
+            if now < self._blocked_until:
+                return 0
+            return max(0, min(cap - sum(1 for t in self._stamps if now - t < span) for span, cap in self._windows))
+
     def remaining_this_minute(self) -> int:
         """Requests still available in the minute window (for status displays)."""
         with self._lock:

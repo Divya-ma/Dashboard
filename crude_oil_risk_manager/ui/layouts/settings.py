@@ -12,7 +12,7 @@ from core.curve_settings import DEFAULT_OPEN_TIME, DEFAULT_OPEN_TZ, TIMEZONE_CHO
 from core.oi_settings import (
     DEFAULT_ATR_HISTORY_DAYS, DEFAULT_OI_HISTORY_DAYS, MAX_ATR_HISTORY_DAYS, MAX_OI_HISTORY_DAYS, MIN_ATR_HISTORY_DAYS, MIN_OI_HISTORY_DAYS,
 )
-from core.user_settings import KEY_API_TOKEN
+from core.user_settings import KEY_API_TOKEN, KEY_REQUIRE_STOP_TARGET
 from ui.container import container
 from ui.layouts.shell import COLORS
 
@@ -211,6 +211,38 @@ def _oi_section() -> dbc.AccordionItem:
     )
 
 
+def _ideas_section() -> dbc.AccordionItem:
+    ideas = container.journal.idea_options() if container.journal is not None else []
+    return dbc.AccordionItem(
+        [
+            _field(
+                "Trade ideas",
+                dbc.Textarea(id="settings-trade-ideas", value="\n".join(ideas), rows=8, placeholder="One trade idea per line, e.g.\nMean reversion\nBreakout\nCarry"),
+                "The choices offered when you enter a trade and in the Archive, where any number can be picked for one trade. "
+                "Taking an idea off this list does not remove it from trades that already have it.",
+            ),
+            _field(
+                "Exit reasons",
+                dbc.Textarea(id="settings-exit-reasons", value="\n".join(container.journal.exit_reason_options() if container.journal is not None else []), rows=6),
+                "One per line. Offered on the exit form and in the Archive.",
+            ),
+            _field(
+                "Mistake tags",
+                dbc.Textarea(id="settings-mistakes", value="\n".join(container.journal.mistake_options() if container.journal is not None else []), rows=6),
+                "One per line. Picked in the Archive when you review a trade.",
+            ),
+            dbc.Switch(
+                id="settings-require-stop-target", label="A first entry must have a stop and a target (so every trade has a risk:reward and an R)",
+                value=bool(container.repository.get_setting(KEY_REQUIRE_STOP_TARGET, False)) if container.repository is not None else False, className="mb-3",
+            ),
+            dbc.Button("Save Trade Ideas", id="settings-save-trade-ideas", color="primary"),
+            html.Div("", id="settings-trade-ideas-feedback", style=_STATUS_STYLE),
+        ],
+        title="💡 Trade Journal lists",
+        item_id="ideas",
+    )
+
+
 def _teams_section() -> dbc.AccordionItem:
     return dbc.AccordionItem(
         [
@@ -280,7 +312,7 @@ def settings_layout() -> html.Div:
         [
             html.H4("⚙️ Settings", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "20px"}),
             dbc.Accordion(
-                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _oi_section(), _teams_section(), _account_reset_section(), _data_section()],
+                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _oi_section(), _ideas_section(), _teams_section(), _account_reset_section(), _data_section()],
                 id="settings-accordion",
                 always_open=True,
                 active_item=["thresholds"] if token_configured else ["api"],

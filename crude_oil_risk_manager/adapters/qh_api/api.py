@@ -137,6 +137,14 @@ class QHApi:
     def __init__(self, client: QHClient):
         self.client = client
 
+    def spare_requests(self, name: str = "ohlc") -> int:
+        """Requests this endpoint can take right now without waiting (0 for a public endpoint, which has no budget to read).
+
+        Background work that is nice to have (the journal's intraday excursions) checks this first, so it only uses what
+        the live pages are not using."""
+        limiter = self.client.limiter_for(ENDPOINTS[name])
+        return 0 if limiter is None else limiter.spare()
+
     # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------

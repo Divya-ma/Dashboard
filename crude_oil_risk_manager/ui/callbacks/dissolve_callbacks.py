@@ -166,6 +166,8 @@ def execute(n_clicks, selected, lots_values, lots_ids, price_values, price_ids, 
             repository.save_trade(item.trade)
             if item.status == StructureStatus.CLOSED:
                 repository.update_structure_status(sid, StructureStatus.CLOSED, close_trigger=CLOSE_TRIGGER)
+            if container.journal is not None:
+                container.journal.record(repository.get_structure(sid), "exit", overwrite=True)
     except DissolveError as exc:
         return (no_update, no_update, *_toast(exc.errors, ok=False, header="Not dissolved"))
     except Exception:  # noqa: BLE001

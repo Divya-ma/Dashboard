@@ -8,7 +8,9 @@ import dash_bootstrap_components as dbc
 from dash import dash_table, dcc, html
 from dash.dash_table.Format import Format, Group, Scheme, Symbol
 
-from core.archive import RESULT_LOSS, RESULT_WIN
+from core.archive import RESULT_LOSS, RESULT_WIN, SNAPSHOT_FIELDS
+from core.journal import CONVICTIONS, EXIT_REASONS, MISTAKES
+from ui.layouts.archive_analysis import analysis_tab
 from ui.layouts.shell import COLORS
 
 EMPTY = "—"
@@ -86,6 +88,30 @@ def _or_dash(value, fmt=None):
     return fmt(value) if fmt else value
 
 
+def _journal_cells(row: dict) -> dict:
+    """The trade-journal cells of a table row (a dash where the journal has nothing)."""
+    cells = {
+        "rr": row.get("rr_text", EMPTY),
+        "ideas": row.get("ideas_text") or EMPTY,
+        "payup_entry": _or_dash(row.get("payup_entry"), lambda v: f"{v:g}"),
+        "payup_exit": _or_dash(row.get("payup_exit"), lambda v: f"{v:g}"),
+        "conviction": _or_dash(row.get("conviction")),
+        "exit_reason": row.get("exit_reason") or EMPTY,
+        "mistakes": row.get("mistakes_text") or EMPTY,
+        "risk_usd": _or_dash(row.get("risk_usd"), lambda v: round(v)),
+        "r_multiple": _or_dash(row.get("r_multiple"), lambda v: round(v, 2)),
+        "mfe_i": _or_dash(row.get("mfe_i"), lambda v: round(v)),
+        "mae_i": _or_dash(row.get("mae_i"), lambda v: round(v)),
+        "mfe_d": _or_dash(row.get("mfe_d"), lambda v: round(v)),
+        "mae_d": _or_dash(row.get("mae_d"), lambda v: round(v)),
+    }
+    for prefix in ("e_", "x_"):
+        for column, _key, _sub in SNAPSHOT_FIELDS:
+            value = row.get(prefix + column)
+            cells[prefix + column] = EMPTY if value is None else round(value, 4) if isinstance(value, float) else value
+    return cells
+
+
 def build_table_rows(rows: list[dict]) -> list[dict]:
     """Scalar DataTable rows (the row `id` is what a click reports back)."""
     return [
@@ -103,9 +129,54 @@ def build_table_rows(rows: list[dict]) -> list[dict]:
             "transaction_costs": row["transaction_costs"],
             "realized_pnl": row["realized_pnl"],
             "result": row["result"],
+            **_journal_cells(row),
         }
         for row in rows
     ]
+
+
+def journal_detail(row: dict) -> list:
+    """The journal part of the detail panel: risk:reward, the market at entry and at exit, ideas and per-leg payups."""
+    parts = [html.Div("Trade journal", style=_LABEL)]
+    rr = row.get("rr_detail")
+    if rr:
+        parts.append(html.Div(
+            f"Risk : Reward {row['rr_text']} — average entry {rr['entry']:,.2f}, average stop {rr['stop']:,.2f}, average target {rr['target']:,.2f}",
+            style={**_MUTED, "marginBottom": "6px"},
+        ))
+    else:
+        parts.append(html.Div("Risk : Reward — needs a stop and a target typed with the entry.", style={**_MUTED, "marginBottom": "6px"}))
+    snaps = row.get("snapshots") or {}
+    if snaps.get("entry") or snaps.get("exit"):
+        head = html.Thead(html.Tr([html.Th("Market"), html.Th("At entry"), html.Th("At exit")]))
+        body = html.Tbody([
+            html.Tr([html.Td(_SNAPSHOT_LABELS[column]), html.Td(_cell(row.get("e_" + column))), html.Td(_cell(row.get("x_" + column)))])
+            for column, _key, _sub in SNAPSHOT_FIELDS
+        ] + [html.Tr([html.Td("Taken at"), html.Td(_when(snaps.get("entry"))), html.Td(_when(snaps.get("exit")))])])
+        parts.append(dbc.Table([head, body], color="dark", striped=True, size="sm"))
+    else:
+        parts.append(html.Div("No market snapshot yet: use 'Fill market data for old trades' above the table.", style={**_MUTED, "marginBottom": "6px"}))
+    if row.get("mfe_i") is not None or row.get("mfe_d") is not None:
+        def fmt(a, b):
+            return "—" if a is None else f"best {a:+,.0f}, worst {b:+,.0f}"
+
+        parts.append(html.Div(
+            f"Open PnL at the size entered — intraday candles: {fmt(row.get('mfe_i'), row.get('mae_i'))}; daily closes: {fmt(row.get('mfe_d'), row.get('mae_d'))}",
+            style={**_MUTED, "marginBottom": "6px"},
+        ))
+    legs = row.get("payup_legs") or {}
+    leg_text = "; ".join(f"{kind}: " + ", ".join(f"{s} {v:g}" for s, v in legs.get(kind, {}).items()) for kind in ("entry", "exit") if legs.get(kind))
+    if leg_text:
+        parts.append(html.Div(f"Payups per leg (ticks) — {leg_text}", style={**_MUTED, "marginBottom": "6px"}))
+    return parts
+
+
+def _cell(value) -> str:
+    return EMPTY if value is None else f"{value:,.2f}" if isinstance(value, float) else str(value)
+
+
+def _when(snapshot) -> str:
+    return (snapshot or {}).get("at", EMPTY)[:16].replace("T", " ") if snapshot else EMPTY
 
 
 def build_detail(row: dict | None) -> html.Div | None:
@@ -143,6 +214,7 @@ def build_detail(row: dict | None) -> html.Div | None:
         html.Div("Legs", style=_LABEL),
         legs_table,
         facts,
+        *journal_detail(row),
     ]
     if row["notes"].strip():
         parts += [
@@ -207,6 +279,19 @@ def _stats_row() -> dbc.Row:
     )
 
 
+_SNAPSHOT_LABELS = {
+    "px_co": "CO price", "px_cl": "CL price", "px_go": "GO price", "move_day": "Day move", "move_min": "1-min move",
+    "curve_cl": "CL curve", "curve_brn": "BRN curve", "curve_go": "GO curve", "atr": "ATR",
+    "vol_ratio": "Volatility vs normal", "volume_ratio": "Volume vs normal", "spread_ticks": "Bid-ask (ticks)",
+    "brent_wti": "Brent-WTI", "crack": "Gasoil crack", "kink_z": "Curve z-score",
+}
+# entry columns first, then the same for the exit
+JOURNAL_COLUMNS = [
+    {"id": prefix + column, "name": f"{'Entry' if prefix == 'e_' else 'Exit'} {_SNAPSHOT_LABELS[column]}", "type": "any"}
+    for prefix in ("e_", "x_")
+    for column, _key, _sub in SNAPSHOT_FIELDS
+]
+
 TABLE_COLUMNS = [
     {"id": "name", "name": "Structure Name"},
     {"id": "type", "name": "Type"},
@@ -226,6 +311,20 @@ TABLE_COLUMNS = [
         "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, symbol=Symbol.yes, symbol_prefix="$"),
     },
     {"id": "result", "name": "Result"},
+    {"id": "rr", "name": "Risk : Reward"},
+    {"id": "ideas", "name": "Trade Ideas"},
+    {"id": "payup_entry", "name": "Payups in Entry", "type": "any"},
+    {"id": "payup_exit", "name": "Payups in Exit", "type": "any"},
+    {"id": "conviction", "name": "Conviction", "type": "any"},
+    {"id": "exit_reason", "name": "Exit Reason"},
+    {"id": "mistakes", "name": "Mistakes"},
+    {"id": "risk_usd", "name": "Risk at Stop ($)", "type": "any"},
+    {"id": "r_multiple", "name": "Result in R", "type": "any"},
+    {"id": "mfe_i", "name": "MFE Intraday ($)", "type": "any"},
+    {"id": "mae_i", "name": "MAE Intraday ($)", "type": "any"},
+    {"id": "mfe_d", "name": "MFE Daily ($)", "type": "any"},
+    {"id": "mae_d", "name": "MAE Daily ($)", "type": "any"},
+    *JOURNAL_COLUMNS,
 ]
 
 
@@ -259,6 +358,34 @@ def _table() -> dash_table.DataTable:
             {"if": {"column_id": "result", "filter_query": f'{{result}} = "{RESULT_WIN}"'}, "color": COLORS["ACCENT_GREEN"]},
             {"if": {"column_id": "result", "filter_query": f'{{result}} = "{RESULT_LOSS}"'}, "color": COLORS["ACCENT_RED"]},
         ],
+    )
+
+
+def _journal_editor() -> html.Div:
+    """Trade ideas and payups of the selected trade (filled by a callback; saved with one button)."""
+    return html.Div(
+        [
+            html.Div("Edit the journal of this trade", style={**_LABEL, "marginTop": "10px"}),
+            dbc.Row(
+                [
+                    dbc.Col([html.Div("Trade ideas", style=_MUTED), dcc.Dropdown(id="archive-ideas", options=[], value=[], multi=True, placeholder="Pick any number (the list is in Settings)")], md=6),
+                    dbc.Col([html.Div("Payups in entry (ticks)", style=_MUTED), dbc.Input(id="archive-payup-entry", type="number", step="any", size="sm")], md=2),
+                    dbc.Col([html.Div("Payups in exit (ticks)", style=_MUTED), dbc.Input(id="archive-payup-exit", type="number", step="any", size="sm")], md=2),
+                    dbc.Col(dbc.Button("Save", id="archive-journal-save", color="primary", size="sm"), md=2, className="d-flex align-items-end"),
+                ],
+                className="g-2 mb-1",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col([html.Div("Conviction at entry (1 to 5)", style=_MUTED), dcc.Dropdown(id="archive-conviction", options=[{"label": str(c), "value": c} for c in CONVICTIONS], value=None, placeholder="—")], md=2),
+                    dbc.Col([html.Div("Why it was closed", style=_MUTED), dcc.Dropdown(id="archive-exit-reason", options=[{"label": r, "value": r} for r in EXIT_REASONS], value=None, placeholder="—")], md=4),
+                    dbc.Col([html.Div("Mistakes (what went wrong)", style=_MUTED), dcc.Dropdown(id="archive-mistakes", options=[{"label": m, "value": m} for m in MISTAKES], value=[], multi=True, placeholder="None")], md=6),
+                ],
+                className="g-2 mb-1",
+            ),
+            html.Div(id="archive-journal-status", style={"fontSize": "13px", "minHeight": "20px"}),
+        ],
+        id="archive-journal-editor",
     )
 
 
@@ -302,15 +429,35 @@ def archive_layout() -> html.Div:
             html.H3("📁 Archive", style={**_HEADING, "marginBottom": "16px"}),
             _filter_bar(),
             _stats_row(),
+            dbc.Tabs(
+                [
+                    dbc.Tab(_trades_tab(), label="Trades", tab_id="trades"),
+                    dbc.Tab(analysis_tab(), label="Analysis", tab_id="analysis"),
+                ],
+                id="archive-tabs", active_tab="trades",
+            ),
+        ]
+    )
+
+
+def _trades_tab() -> html.Div:
+    return html.Div(
+        [
             dbc.Card(
                 dbc.CardBody(
                     [
                         html.Div(NO_ARCHIVE_TEXT, id="archive-message", style={**_MUTED, "marginBottom": "8px", "fontSize": "15px"}),
                         html.Div(
                             [
+                                dbc.Button("⬇ Export to Excel", id="archive-export-btn", color="success", outline=True, size="sm", className="me-2",
+                                           title="Every trade the table shows now (after the filters), with its legs and the summary"),
+                                dcc.Download(id="archive-export-download"),
                                 dbc.Button("🗑 Delete selected", id="archive-delete-btn", color="danger", outline=True, size="sm"),
+                                dbc.Button("📊 Fill market data for old trades", id="archive-backfill-btn", color="info", outline=True, size="sm", className="ms-2",
+                                           title="Market prices, movement, curve shape and ATR at the entry and exit of trades that have none (a few per click)"),
                                 html.Span("Tick the boxes of the trades to delete (test trades, say).", style={**_MUTED, "marginLeft": "12px"}),
                                 html.Span(id="archive-delete-status", style={"marginLeft": "12px", "fontSize": "13px"}),
+                                dcc.Loading(html.Span(id="archive-backfill-status", style={"marginLeft": "12px", "fontSize": "13px"}), type="dot"),
                             ],
                             style={"marginBottom": "8px"},
                         ),
@@ -324,6 +471,7 @@ def archive_layout() -> html.Div:
                 dbc.CardBody(
                     [
                         html.Div(id="archive-detail"),
+                        _journal_editor(),
                         # Always in the layout: a callback Input that is missing from the page never fires.
                         dbc.Button("Close Detail", id="archive-detail-close", color="secondary", outline=True, size="sm"),
                     ]

@@ -15,8 +15,9 @@ import logging
 from dash import ALL, MATCH, Input, Output, State, callback_context, html, no_update
 from dash.exceptions import PreventUpdate
 
-from core.models import StructureStatus
+from core.models import StructureStatus, TradeEventType
 from core.pnl import entry_cost_for_lots
+from core.user_settings import KEY_REQUIRE_STOP_TARGET
 from core.structure_builder import StructureBuildError
 from core.structure_edit import apply_leg_edits
 from core.structure_view import prices_from_store, structure_entry_price, structure_live_price
@@ -87,6 +88,39 @@ def _render_body(structure_id, live_prices, edit_mode: bool = False):
     return structure_detail_layout(
         structure, live_prices, trades, repository.get_latest_pnl(structure_id), edit_mode, active_alert_trade_ids
     )
+
+
+def _leg_payups(structure, values) -> dict:
+    """{leg symbol: ticks} from the per-leg payup boxes (aligned with the structure's legs; blanks left out)."""
+    return {leg.contract.symbol: v for leg, v in zip(structure.legs, values or []) if v not in (None, "")}
+
+
+def _journal_entry(structure_id, ideas, payups, leg_payups, first_entry: bool, conviction=None) -> None:
+    """After a saved entry: remember the ideas and payups, and take the market snapshot of the first entry (background)."""
+    journal = container.journal
+    if journal is None:
+        return
+    try:
+        structure = container.repository.get_structure(structure_id)
+        journal.add_entry_inputs(structure_id, ideas, payups, _leg_payups(structure, leg_payups), conviction)
+        if first_entry:
+            journal.record(structure, "entry")
+    except Exception:  # noqa: BLE001 - the journal never blocks a trade
+        logger.exception("Journal update failed after entry for %s", structure_id)
+
+
+def _journal_exit(structure_id, payups=None, leg_payups=None, exit_reason=None) -> None:
+    """After a saved exit: remember the payups and take the market snapshot of the exit (the last exit is the one kept)."""
+    journal = container.journal
+    if journal is None:
+        return
+    try:
+        structure = container.repository.get_structure(structure_id)
+        if payups not in (None, "") or any(v not in (None, "") for v in leg_payups or []) or exit_reason:
+            journal.add_exit_payups(structure_id, payups, _leg_payups(structure, leg_payups), exit_reason)
+        journal.record(structure, "exit", overwrite=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("Journal update failed after exit for %s", structure_id)
 
 
 def _grid_rows(status_filter, product_filter, sort_by, portfolio_pnl, live_prices):
@@ -225,7 +259,7 @@ def preview_exit_pnl(exit_price, lots, structure_id):
 
 def confirm_trade_entry(
     n_clicks, price, lots, direction, notes, stop_loss_price, target_price, leg_prices, structure_id, live_prices,
-    status_filter, product_filter, sort_by, portfolio_pnl, grid_live_prices,
+    status_filter, product_filter, sort_by, portfolio_pnl, grid_live_prices, ideas=None, payups=None, leg_payups=None, conviction=None,
 ):
     """Enter a trade at one structure price; the system derives the per-leg entries unless
     `leg_prices` (every slot filled in) gives real per-leg fills instead."""
@@ -234,6 +268,9 @@ def confirm_trade_entry(
     repository = container.repository
     structure = _load(structure_id)
     leg_prices = [p if p not in (None, "") else None for p in (leg_prices or [])] or None
+    first_entry = structure.status == StructureStatus.SHELL or not any(leg.lots > 0 for leg in structure.legs)
+    if first_entry and repository.get_setting(KEY_REQUIRE_STOP_TARGET, False) and any(v in (None, "") for v in (stop_loss_price, target_price)):
+        return (no_update, no_update, *_toast("Enter both a stop and a target: they are required for a new trade (Settings > Trade Journal lists).", ok=False, header="Trade not entered"))
     try:
         result = enter_trade(
             structure, price, lots, direction, notes, prices_from_store(live_prices),
@@ -244,6 +281,7 @@ def confirm_trade_entry(
         if structure.status != result.status:
             repository.update_structure_status(structure_id, result.status)
         repository.save_trade(result.trade)
+        _journal_entry(structure_id, ideas, payups, leg_payups, first_entry=result.trade.event_type == TradeEventType.TRADE, conviction=conviction)
     except TradeError as exc:
         return (no_update, no_update, *_toast(exc.errors, ok=False, header="Trade not entered"))
     except Exception:  # noqa: BLE001
@@ -296,7 +334,7 @@ def cancel_exit(n_clicks):
 
 def execute_full_exit(
     n_clicks, exit_price, lots, notes, structure_id,
-    status_filter, product_filter, sort_by, portfolio_pnl, live_prices,
+    status_filter, product_filter, sort_by, portfolio_pnl, live_prices, payups=None, leg_payups=None, exit_reason=None,
 ):
     """Exit lots of the structure at one price: all of them closes it (status CLOSED, manual); fewer leaves the rest open."""
     if not n_clicks:
@@ -310,6 +348,7 @@ def execute_full_exit(
         repository.save_trade(result.trade)
         if result.closed:
             repository.update_structure_status(structure_id, StructureStatus.CLOSED, close_trigger="manual")
+        _journal_exit(structure_id, payups, leg_payups, exit_reason)
     except TradeError as exc:
         return (no_update, no_update, *_toast(exc.errors, ok=False, header="Exit not executed"), False)
     except Exception:  # noqa: BLE001
@@ -393,6 +432,7 @@ def execute_leg_exit(
         if structure.status != result.status:
             close_trigger = "manual" if result.status == StructureStatus.CLOSED else None
             repository.update_structure_status(structure_id, result.status, close_trigger=close_trigger)
+        _journal_exit(structure_id)
     except TradeError as exc:
         return (no_update, no_update, *_toast(exc.errors, ok=False, header="Exit not executed"), False)
     except Exception:  # noqa: BLE001
@@ -753,8 +793,20 @@ def register_structure_detail_callbacks(app) -> None:
         State("store-live-prices", "data"),
         *_GRID_STATES[:4],
         State("store-live-prices", "data"),
+        State("trade-entry-ideas", "value"),
+        State("trade-entry-payups", "value"),
+        State({"type": "entry-leg-payup", "index": ALL}, "value"),
+        State("trade-entry-conviction", "value"),
         prevent_initial_call=True,
     )(confirm_trade_entry)
+
+    for kind in ("entry", "exit"):
+        app.callback(
+            Output(f"{kind}-leg-payups-collapse", "is_open"),
+            Input(f"btn-toggle-{kind}-leg-payups", "n_clicks"),
+            State(f"{kind}-leg-payups-collapse", "is_open"),
+            prevent_initial_call=True,
+        )(toggle_leg_prices)
 
     app.callback(
         Output("modal-confirm-exit", "is_open"),
@@ -784,6 +836,9 @@ def register_structure_detail_callbacks(app) -> None:
         State("trade-exit-notes", "value"),
         State("store-selected-structure-id", "data"),
         *_GRID_STATES,
+        State("trade-exit-payups", "value"),
+        State({"type": "exit-leg-payup", "index": ALL}, "value"),
+        State("trade-exit-reason", "value"),
         prevent_initial_call=True,
     )(execute_full_exit)
 

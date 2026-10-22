@@ -7,9 +7,12 @@ The row building, filtering and statistics live in core.archive.
 import logging
 from datetime import date
 
-from dash import Input, Output, State, callback_context, html, no_update
+from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
+from core.archive_export import archive_to_excel
+from core.journal_analysis import equity_curve, group_table, headline, trade_table
+from ui.layouts.archive_analysis import build_bar_figure, build_cards, build_equity_figure, table_records
 from core.archive import build_archive_rows, delete_archived_structures, filter_archive_rows, summarize
 from core.models import StructureStatus
 from core.pnl import calculate_net_realized_pnl
@@ -47,7 +50,7 @@ def _load_rows() -> list[dict]:
     repository = container.repository
     closed = repository.get_all_structures(status_filter=[StructureStatus.CLOSED])
     trades = {s.structure_id: repository.get_trades_for_structure(s.structure_id) for s in closed}
-    return build_archive_rows(closed, trades)
+    return build_archive_rows(closed, trades, repository.get_journals())
 
 
 def refresh_archive(pathname, apply_clicks, clear_clicks, deleted, start, end, structure_type, symbol, pnl_filter):
@@ -94,6 +97,68 @@ def render_detail(selected_id, rows):
     if row is None:
         return None, {**CARD_STYLE, "display": "none"}
     return build_detail(row), {**CARD_STYLE, "display": "block"}
+
+
+def render_analysis(rows, dimension):
+    """The Analysis tab for the trades the filters leave: headline cards, equity curve, and the results grouped by one column."""
+    frame = trade_table(rows or [])
+    table = group_table(frame, dimension or "type")
+    return build_cards(headline(frame)), build_equity_figure(equity_curve(frame)), build_bar_figure(table), table_records(table)
+
+
+def export_to_excel(n_clicks, rows):
+    """Download the trades the table shows (after its filters) as an Excel workbook."""
+    if not n_clicks:
+        raise PreventUpdate
+    if not rows:
+        raise PreventUpdate
+    return dcc.send_bytes(archive_to_excel(rows), f"archive_{date.today().isoformat()}.xlsx")
+
+
+BACKFILL_PER_CLICK = 3  # structures per click: each takes six /ohlc/ requests (three for the entry, three for the exit); 30 a minute are allowed
+
+
+def backfill_market_data(n_clicks):
+    """Fill the market columns of a few old trades from their own dates (call again for the rest)."""
+    if not n_clicks:
+        raise PreventUpdate
+    if container.journal is None:
+        return "The journal is not available."
+    report = container.journal.backfill(limit=BACKFILL_PER_CLICK)
+    if report["filled"] == 0 and report["left"] == 0:
+        return "Every closed trade already has its market data."
+    return f"Filled {report['filled']} trade(s); {report['left']} left. Click again for the rest, then reopen the tab to see them."
+
+
+def fill_journal_editor(selected_id):
+    """The selected trade's ideas, the ideas on offer (plus any the trade has that were later taken off the list) and payups."""
+    if not selected_id or container.journal is None:
+        return [], [], None, None, None, None, [], [], []
+    journal = container.journal.journal(selected_id)
+
+    def options(listed, kept):
+        return [{"label": i, "value": i} for i in dict.fromkeys([*listed, *kept])]  # a pick taken off the list later still shows
+
+    return (options(container.journal.idea_options(), journal["ideas"]), journal["ideas"], journal["payups"]["entry"]["total"], journal["payups"]["exit"]["total"],
+            journal["conviction"], journal["exit_reason"], journal["mistakes"],
+            options(container.journal.exit_reason_options(), [journal["exit_reason"]] if journal["exit_reason"] else []),
+            options(container.journal.mistake_options(), journal["mistakes"]))
+
+
+def save_journal_edits(n_clicks, selected_id, ideas, payup_entry, payup_exit, conviction=None, exit_reason=None, mistakes=None):
+    if not n_clicks:
+        raise PreventUpdate
+    if not selected_id or container.journal is None:
+        return "Select a trade first."
+    try:
+        container.journal.set_ideas(selected_id, ideas)
+        journal = container.journal.journal(selected_id)
+        container.journal.set_payups(selected_id, "entry", payup_entry, journal["payups"]["entry"]["legs"])
+        container.journal.set_payups(selected_id, "exit", payup_exit, journal["payups"]["exit"]["legs"])
+        container.journal.set_review(selected_id, conviction, exit_reason, mistakes)
+    except (ValueError, TypeError) as exc:
+        return f"Not saved: {exc}"
+    return "Saved. Reopen the tab (or click Apply Filters) to see it in the table."
 
 
 def _ticked_ids(virtual_data, selected_rows) -> list[str]:
@@ -218,3 +283,51 @@ def register_archive_callbacks(app) -> None:
         State("archive-deleted", "data"),
         prevent_initial_call=True,
     )(confirm_delete)
+
+    app.callback(
+        Output("archive-backfill-status", "children"),
+        Input("archive-backfill-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )(backfill_market_data)
+
+    app.callback(
+        Output("archive-ideas", "options"),
+        Output("archive-ideas", "value"),
+        Output("archive-payup-entry", "value"),
+        Output("archive-payup-exit", "value"),
+        Output("archive-conviction", "value"),
+        Output("archive-exit-reason", "value"),
+        Output("archive-mistakes", "value"),
+        Output("archive-exit-reason", "options"),
+        Output("archive-mistakes", "options"),
+        Input("archive-selected", "data"),
+    )(fill_journal_editor)
+
+    app.callback(
+        Output("archive-journal-status", "children"),
+        Input("archive-journal-save", "n_clicks"),
+        State("archive-selected", "data"),
+        State("archive-ideas", "value"),
+        State("archive-payup-entry", "value"),
+        State("archive-payup-exit", "value"),
+        State("archive-conviction", "value"),
+        State("archive-exit-reason", "value"),
+        State("archive-mistakes", "value"),
+        prevent_initial_call=True,
+    )(save_journal_edits)
+
+    app.callback(
+        Output("analysis-cards", "children"),
+        Output("analysis-equity", "figure"),
+        Output("analysis-bars", "figure"),
+        Output("analysis-table", "data"),
+        Input("archive-rows", "data"),
+        Input("analysis-dimension", "value"),
+    )(render_analysis)
+
+    app.callback(
+        Output("archive-export-download", "data"),
+        Input("archive-export-btn", "n_clicks"),
+        State("archive-rows", "data"),
+        prevent_initial_call=True,
+    )(export_to_excel)

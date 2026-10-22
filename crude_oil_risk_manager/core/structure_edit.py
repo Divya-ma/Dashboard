@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from core.models import Contract, Leg, Structure
 from core.structure_builder import StructureBuildError, _contract_for_symbol
-from core.structure_utils import normalize_symbol, split_validation_messages, validate_structure_legs
+from core.structure_utils import get_structure_type_from_symbol, normalize_symbol, split_validation_messages, validate_structure_legs
 
 
 @dataclass
@@ -47,8 +47,10 @@ def apply_leg_edits(
     for number, (leg, price) in enumerate(zip(structure.legs, entry_prices), start=1):
         if price in (None, ""):
             continue
-        if leg.is_traded and not (_finite(price) and price > 0):
-            errors.append(f"Leg {number} entry price must be a number greater than 0.")
+        if leg.is_traded and not _finite(price):
+            errors.append(f"Leg {number} entry price must be a number.")
+        elif leg.is_traded and price <= 0 and get_structure_type_from_symbol(leg.contract.symbol) == "outright":
+            errors.append(f"Leg {number} entry price must be a number greater than 0.")  # a spread or fly leg may be zero or negative
     if errors:
         raise StructureBuildError(errors, warnings)
 

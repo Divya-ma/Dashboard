@@ -109,6 +109,13 @@ CREATE TABLE IF NOT EXISTS curve_kink_events (
     detail TEXT NOT NULL DEFAULT '{}'      -- JSON: z-scores, value, residual at the peak
 );
 
+-- The trade journal: one JSON document per structure (market snapshots, trade ideas, payups). See core/journal.py
+CREATE TABLE IF NOT EXISTS trade_journal (
+    structure_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- Indexes: foreign keys and common query patterns
 
 CREATE INDEX IF NOT EXISTS idx_legs_structure_id ON legs(structure_id);

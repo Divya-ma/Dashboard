@@ -30,6 +30,7 @@ from core.pnl import calculate_portfolio_pnl
 from core.oi_settings import (
     KEY_ATR_HISTORY_DAYS, KEY_OI_HISTORY_DAYS, load_atr_history_days, load_history_days, validate_atr_history_days, validate_history_days,
 )
+from core.user_settings import KEY_REQUIRE_STOP_TARGET
 from core.user_settings import (
     KEY_API_TOKEN,
     KEY_CORRELATION_LOOKBACK,
@@ -273,6 +274,26 @@ def save_oi_settings(n_clicks, history_days, atr_days=None):
     if atr is not None:
         container.repository.set_setting(KEY_ATR_HISTORY_DAYS, atr)
     return f"✅ Saved: {days} days of OI" + (f" and {atr} days of ATR data" if atr is not None else "") + ". Any extra days download the next time you open the page."
+
+
+def save_trade_ideas(n_clicks, text, exit_reasons=None, mistakes=None, require_stop_target=None):
+    """Store the journal's lists (trade ideas, exit reasons, mistake tags; one per line) and the stop/target switch.
+
+    A list left out (None) is not touched."""
+    if not n_clicks:
+        raise PreventUpdate
+    if container.journal is None:
+        return "❌ The journal is not available."
+    ideas = container.journal.save_idea_options(text)
+    parts = [f"{len(ideas)} trade idea(s)"]
+    if exit_reasons is not None:
+        parts.append(f"{len(container.journal.save_exit_reason_options(exit_reasons))} exit reason(s)")
+    if mistakes is not None:
+        parts.append(f"{len(container.journal.save_mistake_options(mistakes))} mistake tag(s)")
+    if require_stop_target is not None:
+        container.repository.set_setting(KEY_REQUIRE_STOP_TARGET, bool(require_stop_target))
+        parts.append("stop and target " + ("required" if require_stop_target else "optional"))
+    return "✅ Saved: " + ", ".join(parts) + "."
 
 
 def _reset_label(label: str):
@@ -563,6 +584,16 @@ def register_settings_callbacks(app) -> None:
         State("settings-atr-history-days", "value"),
         prevent_initial_call=True,
     )(save_oi_settings)
+
+    app.callback(
+        Output("settings-trade-ideas-feedback", "children"),
+        Input("settings-save-trade-ideas", "n_clicks"),
+        State("settings-trade-ideas", "value"),
+        State("settings-exit-reasons", "value"),
+        State("settings-mistakes", "value"),
+        State("settings-require-stop-target", "value"),
+        prevent_initial_call=True,
+    )(save_trade_ideas)
 
     app.callback(
         Output("settings-save-defaults", "children"),

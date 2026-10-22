@@ -13,6 +13,10 @@ from core.alerts import ENABLED_SETTING_KEY, WEBHOOK_SETTING_KEY
 
 KEY_API_TOKEN = "api_access_token"
 KEY_PNL_BASELINE = "pnl_reset_baseline"
+KEY_TRADE_IDEAS = "trade_ideas"  # the list of trade ideas to pick from (one per line in Settings)
+KEY_EXIT_REASONS = "journal_exit_reasons"  # the exit reasons to pick from (the built-in list until edited)
+KEY_MISTAKES = "journal_mistakes"  # the mistake tags to pick from (the built-in list until edited)
+KEY_REQUIRE_STOP_TARGET = "require_stop_target"  # a first entry needs a stop and a target (switch in Settings)
 # total_realized_all_time needs its own baseline: it excludes live unrealized PnL, so
 # shifting it by the same baseline as total_pnl only reads zero right after a reset if
 # unrealized PnL happened to be zero at that moment. See core.pnl.apply_pnl_reset_baseline.
