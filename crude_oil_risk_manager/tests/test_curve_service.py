@@ -38,6 +38,7 @@ def api():
 @pytest.fixture
 def service(repo, tmp_path, clock, alerts, api, monkeypatch):
     monkeypatch.setattr(CurveService, "_reversion", lambda self, product, family, history, params: (0.8, 40))
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=list(ALERT_KEYS)))  # alert at once, on every curve type (the app's defaults are slower and d-fly only)
     return CurveService(
         repo, api, CurveHistoryStore(tmp_path / "curves", api),
         PrevSettlementStore(tmp_path / "curves" / "prev.json"), SnapshotStore(tmp_path / "curves"),
@@ -166,7 +167,7 @@ def test_related_kinks_are_batched_into_one_alert_per_product(service, clock, al
 
 def test_alerts_can_be_limited_to_chosen_products_and_curve_types(service, clock, alerts, repo):
     keep = [k for k in ALERT_KEYS if k not in ("BRN:outright", "CL:outright")]  # not trading outrights
-    save_params(repo, CurveParams(alert_structures=keep))
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=keep))
     state = feed(service, clock, kinks={"COG27": 0.4, "CLH27": -0.35})
     assert any(k["family"] == OUTRIGHT for k in state.kinks)  # still detected and shown
     assert alerts.sent  # spreads, flies and dflies still alert
@@ -176,19 +177,19 @@ def test_alerts_can_be_limited_to_chosen_products_and_curve_types(service, clock
 
 
 def test_one_product_can_be_silenced_while_the_other_alerts(service, clock, alerts, repo):
-    save_params(repo, CurveParams(alert_structures=[k for k in ALERT_KEYS if not k.startswith("CL:")]))
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=[k for k in ALERT_KEYS if not k.startswith("CL:")]))
     feed(service, clock, kinks={"COG27": 0.4, "CLH27": -0.35})
     assert alerts.sent and all("BRN" in title for _, title, _ in alerts.sent)
 
 
 def test_alerts_can_be_switched_off_but_kinks_still_show(service, clock, alerts, repo):
-    save_params(repo, CurveParams(alerts_enabled=False))
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=list(ALERT_KEYS), alerts_enabled=False))
     state = feed(service, clock, kinks={"COG27": 0.4})
     assert state.kinks and alerts.sent == []
 
 
 def test_minimum_priority_filters_alerts(service, clock, alerts, repo):
-    save_params(repo, CurveParams(alert_min_priority="HIGH", min_methods_high=4))  # HIGH needs all four methods
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=list(ALERT_KEYS), alert_min_priority="HIGH", min_methods_high=4))  # HIGH needs all four methods
     state = feed(service, clock, kinks={"COG27": 0.4})
     assert state.kinks and alerts.sent == []
 
@@ -318,3 +319,51 @@ def test_history_makes_the_pca_and_history_methods_available(service, clock, rep
     assert "pca" in state.families[("BRN", SPREAD)].methods_available
     assert "history" in state.families[("BRN", SPREAD)].methods_available
     assert "history" not in state.families[("BRN", OUTRIGHT)].methods_available
+
+
+# ---------- fewer false alerts: persistence, stale prices, d-flies only ----------
+
+
+def test_a_kink_must_persist_for_several_polls_before_it_alerts(service, clock, alerts, repo):
+    save_params(repo, CurveParams(persistence_polls=3, alert_structures=list(ALERT_KEYS)))
+    feed(service, clock, kinks={"COG27": 0.4})
+    feed(service, clock, kinks={"COG27": 0.4})
+    assert alerts.sent == []  # two polls: still only a flicker
+    feed(service, clock)  # it vanishes: the count starts again
+    feed(service, clock, kinks={"COG27": 0.4})
+    feed(service, clock, kinks={"COG27": 0.4})
+    assert alerts.sent == []
+    feed(service, clock, kinks={"COG27": 0.4})
+    assert len([1 for _, t, _b in alerts.sent if "BRN" in t]) == 1  # the third poll in a row alerts
+    feed(service, clock, kinks={"COG27": 0.4})
+    assert len([1 for _, t, _b in alerts.sent if "BRN" in t]) == 1  # and a kink that stays does not repeat
+
+
+def test_a_kink_resting_on_a_stale_price_never_alerts_but_is_still_shown(service, clock, alerts):
+    prices = make_prices(PRODUCTS, clock().date(), clock(), kinks={"COG27": 0.4})
+    old = clock().timestamp() - 600
+    prices = {s: ((p, old) if s == "COG27" else (p, ts)) for s, (p, ts) in prices.items()}
+    service.on_prices(prices)
+    state = service.state()
+    stale_row = next(k for k in state.kinks if k["product"] == "BRN" and k["family"] == OUTRIGHT)
+    assert stale_row["stale"] is True
+    assert not [1 for _, t, _b in alerts.sent if "BRN outright" in t]
+
+
+def test_alerts_default_to_the_dflies_and_the_old_everything_default_moves_there_once(service, repo, clock, alerts):
+    from core.curve_settings import DEFAULT_ALERT_KEYS, KEY_ALERT_DEFAULT_MIGRATED, load_params, migrate_alert_default
+
+    assert CurveParams().alert_structures == list(DEFAULT_ALERT_KEYS) and all(k.endswith(":dfly") for k in DEFAULT_ALERT_KEYS)
+    save_params(repo, CurveParams(alert_structures=list(ALERT_KEYS)))  # what the old default left in the settings
+    assert migrate_alert_default(repo) is True and load_params(repo).alert_structures == list(DEFAULT_ALERT_KEYS)
+    save_params(repo, CurveParams(alert_structures=list(ALERT_KEYS)))  # the user ticks everything again on purpose
+    assert migrate_alert_default(repo) is False and load_params(repo).alert_structures == list(ALERT_KEYS)  # it is not changed back
+    assert repo.get_setting(KEY_ALERT_DEFAULT_MIGRATED, False) is True
+
+
+def test_a_narrowed_choice_is_never_migrated(repo):
+    from core.curve_settings import load_params, migrate_alert_default
+
+    save_params(repo, CurveParams(alert_structures=["BRN:fly"]))
+    assert migrate_alert_default(repo) is False and load_params(repo).alert_structures == ["BRN:fly"]
+    assert migrate_alert_default(repo) is False

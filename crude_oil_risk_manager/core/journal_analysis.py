@@ -248,3 +248,89 @@ def group_table(frame: pd.DataFrame, dimension: str, min_sample: int = MIN_SAMPL
         })
     table = pd.DataFrame(rows, columns=columns)
     return table.sort_values("Expectancy $", ascending=False, kind="stable").reset_index(drop=True)
+
+
+# ----------------------------------------------------------------------
+# Two columns together
+# ----------------------------------------------------------------------
+
+_SINGLE_TAG_DIMENSIONS = [d for d in DIMENSIONS if d not in ("idea", "mistake")]  # a trade has one value of these, so groups do not overlap
+
+
+def _single_labels(frame: pd.DataFrame, dimension: str) -> pd.Series:
+    column = {"idea": "ideas"}.get(dimension, dimension)
+    return frame[column].where(frame[column].notna(), NONE_LABEL)
+
+
+def two_way(frame: pd.DataFrame, dim_a: str, dim_b: str, min_sample: int = MIN_SAMPLE) -> pd.DataFrame:
+    """Results for every pair of groups of two columns (a trade is in one cell per pair), best expectancy first.
+
+    Idea and mistake tags count a trade under each tag it has (see group_table), so a cell is that tag within that group."""
+    columns = ["Group A", "Group B", "Trades", "Win rate", "Expectancy $", "Expectancy R", "Profit factor", "Total $", "Sample"]
+    if frame.empty or dim_a not in DIMENSIONS or dim_b not in DIMENSIONS or dim_a == dim_b:
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for label_a, part_a in _groups(frame, dim_a):
+        for label_b, part in _groups(part_a, dim_b):
+            m = measures(part)
+            rows.append({
+                "Group A": label_a, "Group B": label_b, "Trades": m["trades"], "Win rate": m["win_rate"], "Expectancy $": m["expectancy"],
+                "Expectancy R": m["expectancy_r"], "Profit factor": m["profit_factor"], "Total $": m["total"],
+                "Sample": "ok" if m["trades"] >= min_sample else f"low ({m['trades']} of {min_sample})",
+            })
+    table = pd.DataFrame(rows, columns=columns)
+    return table.sort_values("Expectancy $", ascending=False, kind="stable").reset_index(drop=True)
+
+
+# ----------------------------------------------------------------------
+# What separates winners from losers
+# ----------------------------------------------------------------------
+
+RELIABLE_TRADES = 100  # below this the table below is only a pointer to where to look
+MIN_GROUP_FOR_TEST = 5  # a group needs this many trades to take part in the test of its column
+
+
+def separation(frame: pd.DataFrame, alpha: float = 0.05) -> tuple[pd.DataFrame, str]:
+    """Which journal columns line up with winning, and whether that could be chance. Returns (table, note).
+
+    Per column the trades are put into that column's groups (groups under MIN_GROUP_FOR_TEST trades are left out) and a
+    chi-squared test asks whether the win rate differs between them by more than luck would. The table gives the spread of
+    win rates, Cramer's V (0 = the column says nothing about winning, 1 = it decides it) and the p-value. Because many columns
+    are tried, one of them looks significant by luck about once in twenty tries: a column "stands out" only if its p-value also
+    beats alpha divided by the number of columns tested (Bonferroni); one that only beats alpha is "worth a look". Tags (ideas,
+    mistakes) overlap between trades and are not tested here; use the group table for them."""
+    from scipy.stats import chi2_contingency
+
+    note_short = f"Only {len(frame)} trades: treat this as a pointer to where to look, not a result. It becomes meaningful from about {RELIABLE_TRADES}."
+    note_ok = f"{len(frame)} trades. Columns are tested one at a time against winning; 'stands out' allows for the number of columns tried."
+    columns = ["Column", "Trades used", "Groups", "Best group", "Worst group", "Win rate spread", "Cramer's V", "p-value", "Reading"]
+    if len(frame) < 10:
+        return pd.DataFrame(columns=columns), "Fewer than 10 trades: nothing to compare yet."
+    results = []
+    won = frame["pnl"] > 0
+    for dimension in _SINGLE_TAG_DIMENSIONS:
+        labels = _single_labels(frame, dimension)
+        known = labels != NONE_LABEL
+        counts = labels[known].value_counts()
+        keep = counts[counts >= MIN_GROUP_FOR_TEST].index
+        used = labels.isin(keep)
+        if len(keep) < 2:
+            continue
+        table = pd.crosstab(labels[used], won[used]).reindex(columns=[True, False], fill_value=0)
+        if (table.sum(axis=0) == 0).any():
+            continue  # everything won, or everything lost: nothing to separate
+        chi2, p_value, _dof, _exp = chi2_contingency(table)
+        n = int(table.values.sum())
+        v = math.sqrt(chi2 / (n * (min(table.shape) - 1))) if n else 0.0
+        rates = table[True] / table.sum(axis=1)
+        results.append({
+            "Column": DIMENSIONS[dimension], "Trades used": n, "Groups": int(len(keep)), "Best group": str(rates.idxmax()), "Worst group": str(rates.idxmin()),
+            "Win rate spread": float(rates.max() - rates.min()), "Cramer's V": float(v), "p-value": float(p_value),
+        })
+    if not results:
+        return pd.DataFrame(columns=columns), note_short if len(frame) < RELIABLE_TRADES else note_ok + " No column has two groups with enough trades yet."
+    bonferroni = alpha / len(results)
+    for r in results:
+        r["Reading"] = "stands out" if r["p-value"] <= bonferroni else "worth a look" if r["p-value"] <= alpha else "no sign"
+    table = pd.DataFrame(results, columns=columns).sort_values("p-value", kind="stable").reset_index(drop=True)
+    return table, note_short if len(frame) < RELIABLE_TRADES else note_ok

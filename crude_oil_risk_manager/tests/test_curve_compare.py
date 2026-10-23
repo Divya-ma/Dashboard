@@ -641,3 +641,12 @@ def _walk(node):
     for child in children if isinstance(children, (list, tuple)) else [children]:
         if child is not None and not isinstance(child, str):
             yield from _walk(child)
+
+
+def test_the_widest_usable_quote_is_counted_in_ticks_so_gasoil_quotes_are_not_thrown_away():
+    from core.curve_compare import Quote, usable_quote
+
+    assert usable_quote("CLZ26", Quote(bid=70.0, ask=70.25, bid_size=1, ask_size=1, ts=0.0)) and not usable_quote("CLZ26", Quote(bid=70.0, ask=70.40, bid_size=1, ask_size=1, ts=0.0))
+    assert usable_quote("GOZ26", Quote(bid=1400.0, ask=1405.0, bid_size=1, ask_size=1, ts=0.0))  # 20 ticks of 0.25
+    assert not usable_quote("GOZ26", Quote(bid=1400.0, ask=1407.0, bid_size=1, ask_size=1, ts=0.0))  # 28 ticks: junk, as for the other products
+    assert usable_quote("GOZ26-F27", Quote(bid=40.0, ask=42.0, bid_size=1, ask_size=1, ts=0.0)) and not usable_quote("GOZ26-F27", Quote(bid=40.0, ask=43.0, bid_size=1, ask_size=1, ts=0.0))

@@ -6,11 +6,11 @@ first; validators raise ValueError with a message that is safe to show.
 """
 
 import json
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from core.curve_calendar import FAMILIES, PRODUCTS
+from core.curve_calendar import DFLY, FAMILIES, PRODUCTS
 from core.user_settings import parse_number
 
 KEY_CURVE_PARAMS = "curve_params"
@@ -23,6 +23,9 @@ TIMEZONE_CHOICES = ("UTC", "America/New_York", "America/Chicago", "Europe/London
 
 # One alert switch per product and curve type, as "PRODUCT:family" (e.g. "BRN:spread").
 ALERT_KEYS = tuple(f"{product}:{family}" for product in PRODUCTS for family in FAMILIES)
+
+# Alerts default to the d-flies only (the curve type that is traded); the other curve types are still shown and logged.
+DEFAULT_ALERT_KEYS = tuple(f"{product}:{DFLY}" for product in PRODUCTS)
 
 # Which curve types may hedge a kink of each type (the user can change this in Settings).
 DEFAULT_HEDGE_TYPES = {
@@ -55,7 +58,11 @@ class CurveParams:
     alert_min_priority: str = "MEDIUM"
     cooldown_minutes: int = 60
     alerts_enabled: bool = True
-    alert_structures: list[str] = field(default_factory=lambda: list(ALERT_KEYS))  # which product:curve types may alert
+    alert_structures: list[str] = field(default_factory=lambda: list(DEFAULT_ALERT_KEYS))  # which product:curve types may alert
+    persistence_polls: int = 3  # a kink must be there on this many polls in a row (10 s apart) before it alerts: a one-poll flicker never does
+    history_vs_curve: bool = True  # the history method judges each point against the curve's common move today, so a whole curve shifting is not N kinks
+    recent_scale_days: int = 60  # every z-score scale is at least that of the last N days, so a market that has got more volatile does not flag everything (0 = off)
+    ends_use_neighbour: bool = False  # the neighbour method at the first and last contract extrapolates (its weights amplify a bad price), so it is off there
 
     # --- trade plan: risk appetite and sizing (dollars; the alert structure is traded in lots) ---
     risk_per_trade: float = 5000.0  # max $ loss at the stop for the whole entry
@@ -91,7 +98,7 @@ _NUMERIC_BOUNDS = {
     "stale_seconds": (5, 3600, True), "snapshot_minutes": (1, 240, True), "history_years": (1, 10, True),
     "risk_per_trade": (1.0, 1e8, False), "risk_per_lot": (1.0, 1e7, False), "point_value": (0.01, 1e6, False),
     "max_lots": (1, 10000, True), "vol_stop_mult": (0.1, 10.0, False), "vol_window": (10, 500, True),
-    "reversion_horizon": (1, 60, True), "min_reversion_fraction": (0.05, 1.0, False),
+    "persistence_polls": (1, 60, True), "recent_scale_days": (0, 504, True), "reversion_horizon": (1, 60, True), "min_reversion_fraction": (0.05, 1.0, False),
     "min_reward_risk": (0.0, 20.0, False), "hedge_count": (1, 5, True), "hedge_min_corr": (0.0, 0.99, False),
     "hedge_lookback": (30, 1000, True),
 }
@@ -103,7 +110,7 @@ _LABELS = {
     "snapshot_minutes": "Snapshot interval", "history_years": "History years",
     "risk_per_trade": "Risk per trade", "risk_per_lot": "Risk per lot", "point_value": "Point value",
     "max_lots": "Max lots", "vol_stop_mult": "Volatility stop multiple", "vol_window": "Volatility window",
-    "reversion_horizon": "Reversion horizon", "min_reversion_fraction": "Minimum reversion share",
+    "persistence_polls": "Polls a kink must persist", "recent_scale_days": "Recent-volatility window", "reversion_horizon": "Reversion horizon", "min_reversion_fraction": "Minimum reversion share",
     "min_reward_risk": "Minimum reward:risk", "hedge_count": "Hedges shown", "hedge_min_corr": "Minimum hedge correlation",
     "hedge_lookback": "Hedge lookback",
 }
@@ -136,12 +143,14 @@ def validate_params(raw: dict) -> CurveParams:
     values["alert_min_priority"] = priority
     values["alerts_enabled"] = bool(raw.get("alerts_enabled"))
     chosen = raw.get("alert_structures")
-    chosen = list(ALERT_KEYS) if chosen is None else list(chosen)
+    chosen = list(DEFAULT_ALERT_KEYS) if chosen is None else list(chosen)
     unknown = [key for key in chosen if key not in ALERT_KEYS]
     if unknown:
         raise ValueError(f"Unknown alert structure(s): {', '.join(unknown)}")
     values["alert_structures"] = [key for key in ALERT_KEYS if key in chosen]
     values["hedge_exclude_overlap"] = bool(raw.get("hedge_exclude_overlap"))
+    values["ends_use_neighbour"] = bool(raw.get("ends_use_neighbour"))
+    values["history_vs_curve"] = bool(raw.get("history_vs_curve", True))
     values["hedge_types"] = _validate_hedge_types(raw.get("hedge_types"))
     return CurveParams(**values)
 
@@ -157,6 +166,27 @@ def load_params(repository) -> CurveParams:
         return validate_params(merged)
     except Exception:  # noqa: BLE001 - bad stored settings must not stop the page
         return CurveParams()
+
+
+KEY_ALERT_DEFAULT_MIGRATED = "curve_alert_default_dflies"
+
+
+def migrate_alert_default(repository) -> bool:
+    """ONCE: settings saved while every curve type alerted (the old default) move to the new default, the d-flies only.
+
+    Run at startup. It cannot tell a deliberate "everything" from the old default, so it changes it a single time and
+    then leaves the choice alone: tick the other curve types again on the Curve Kinks page and they stay ticked.
+    Returns whether it changed anything."""
+    if repository.get_setting(KEY_ALERT_DEFAULT_MIGRATED, False):
+        return False
+    repository.set_setting(KEY_ALERT_DEFAULT_MIGRATED, True)
+    saved = repository.get_setting(KEY_CURVE_PARAMS, None)
+    if isinstance(saved, str):
+        saved = json.loads(saved)
+    if not saved or sorted(saved.get("alert_structures") or []) != sorted(ALERT_KEYS):
+        return False
+    save_params(repository, replace(load_params(repository), alert_structures=list(DEFAULT_ALERT_KEYS)))
+    return True
 
 
 def save_params(repository, params: CurveParams) -> None:

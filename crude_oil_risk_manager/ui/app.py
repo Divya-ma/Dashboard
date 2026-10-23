@@ -38,6 +38,7 @@ from core.churn_data import ChurnStore  # noqa: E402
 from core.churn_service import ChurnService  # noqa: E402
 from core.oi_data import OiStore  # noqa: E402
 from core.oi_service import OiService  # noqa: E402
+from core.curve_settings import migrate_alert_default  # noqa: E402
 from core.journal_service import JournalService  # noqa: E402
 from core.journal_snapshot import MarketSnapshotter, intraday_price_path, structure_price_path  # noqa: E402
 from core.quote_store import FairValueStore, QuoteStore  # noqa: E402
@@ -168,6 +169,7 @@ def _kink_z(structure):
 
 
 # Trade journal: the market at each entry and exit (two /ohlc/ requests, on a background thread), trade ideas and payups.
+migrate_alert_default(repository)  # once: alerts that covered every curve type (the old default) now cover the d-flies
 if repository.get_setting(KEY_REQUIRE_STOP_TARGET, None) is None:  # first run with this feature: a new trade needs a stop and a target (Settings can turn it off)
     repository.set_setting(KEY_REQUIRE_STOP_TARGET, True)
 container.journal = JournalService(
@@ -194,7 +196,7 @@ container.churn_service = ChurnService(repository, qh_api, ChurnStore(_resolve_p
 def _run_morning_sync() -> None:
     try:
         extra_symbols = active_composite_symbols(repository)
-        historical_adapter.run_morning_sync(repository, extra_symbols=extra_symbols)
+        historical_adapter.run_morning_sync(repository, extra_symbols=extra_symbols, skip=container.data_loader.covered_by_settlements)
     except Exception:  # noqa: BLE001 - a background sync failure must never take the app down
         logger.exception("Morning sync crashed")
 

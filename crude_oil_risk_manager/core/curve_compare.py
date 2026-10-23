@@ -49,8 +49,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Callable
 
+from core.contract_specs import spec_for_product
 from core.curve_calendar import (
-    DFLY, FAMILY_WEIGHTS, FLY, OUTRIGHT, PRODUCTS, SPREAD, CurveContract, generic_contracts, month_token,
+    DFLY, FAMILY_WEIGHTS, FLY, OUTRIGHT, PRODUCTS, SPREAD, CurveContract, generic_contracts, month_token, product_of_symbol,
 )
 
 MAX_MONTHS = 36
@@ -58,7 +59,7 @@ FRESH_SECONDS = 86_400.0  # a direct price this young is used as it stands
 STALE_LIMIT_SECONDS = 7 * 86_400.0  # an older one is only a last resort, when nothing can be built from newer pieces
 CONSISTENT_SECONDS = 1_800.0  # the pieces of one built value must be priced within this of each other
 PREFER_DERIVED_SECONDS = 300.0  # a built price replaces an own price only if it is this much newer
-MAX_QUOTE_WIDTH = {"outright": 0.25, "spread": 0.10, "fly": 0.10}  # widest usable bid-ask gap, in price points
+MAX_QUOTE_WIDTH = {"outright": 0.25, "spread": 0.10, "fly": 0.10}  # widest usable bid-ask gap, in price points of a 0.01-tick contract (CL, Brent); scaled by tick for others
 QUOTE_LAG_WARNING_SECONDS = 1_800.0  # the page warns when the newest TAQ quote is older than this
 
 SOURCE_QUOTE, SOURCE_FAIR, SOURCE_DERIVED = "quote", "fair value", "derived"
@@ -122,7 +123,8 @@ def symbol_kind(symbol: str) -> str:
 def usable_quote(symbol: str, quote: "Quote") -> bool:
     """False for a crossed quote or one wider than MAX_QUOTE_WIDTH for its kind (see the module docstring)."""
     width = quote.ask - quote.bid
-    return 0.0 <= width <= MAX_QUOTE_WIDTH[symbol_kind(symbol)]
+    scale = spec_for_product(product_of_symbol(symbol)).tick_size / 0.01  # the limits are 25 / 10 / 10 ticks: a gasoil tick is 0.25 points
+    return 0.0 <= width <= MAX_QUOTE_WIDTH[symbol_kind(symbol)] * scale
 
 
 # symbol -> (price, unix seconds, source)

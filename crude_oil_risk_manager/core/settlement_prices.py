@@ -114,12 +114,19 @@ class SettlementFirstLoader(DataLoader):
         price.name = symbol
         return price
 
-    def _read_series(self, symbol: str) -> pd.Series | None:
+    def _derived_series(self, symbol: str) -> pd.Series | None:
         version = self._settlements.version
         cached = self._derived.get(symbol)
         if cached is None or cached[0] != version:
             if len(self._derived) > 600:
                 self._derived.clear()
             self._derived[symbol] = (version, self._from_settlements(symbol))
-        derived = self._derived[symbol][1]
+        return self._derived[symbol][1]
+
+    def covered_by_settlements(self, symbol: str) -> bool:
+        """True if this symbol's history is read from the stored settlements, so its candle file is never used."""
+        return self._derived_series(symbol) is not None
+
+    def _read_series(self, symbol: str) -> pd.Series | None:
+        derived = self._derived_series(symbol)
         return derived if derived is not None else super()._read_series(symbol)

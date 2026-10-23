@@ -11,8 +11,10 @@ from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from core.archive_export import archive_to_excel
-from core.journal_analysis import equity_curve, group_table, headline, trade_table
-from ui.layouts.archive_analysis import build_bar_figure, build_cards, build_equity_figure, table_records
+from core.journal_analysis import equity_curve, group_table, headline, separation, trade_table, two_way
+from ui.layouts.archive_analysis import (
+    build_bar_figure, build_cards, build_equity_figure, separation_records, table_records, two_way_records,
+)
 from core.archive import build_archive_rows, delete_archived_structures, filter_archive_rows, summarize
 from core.models import StructureStatus
 from core.pnl import calculate_net_realized_pnl
@@ -104,6 +106,17 @@ def render_analysis(rows, dimension):
     frame = trade_table(rows or [])
     table = group_table(frame, dimension or "type")
     return build_cards(headline(frame)), build_equity_figure(equity_curve(frame)), build_bar_figure(table), table_records(table)
+
+
+def render_two_way(rows, dim_a, dim_b):
+    """Results for every pair of groups of two journal columns, for the trades the filters leave."""
+    return two_way_records(two_way(trade_table(rows or []), dim_a or "curve", dim_b or "type"))
+
+
+def render_separation(rows):
+    """Which columns line up with winning (and whether that could be chance), for the trades the filters leave."""
+    table, note = separation(trade_table(rows or []))
+    return note, separation_records(table)
 
 
 def export_to_excel(n_clicks, rows):
@@ -331,3 +344,16 @@ def register_archive_callbacks(app) -> None:
         State("archive-rows", "data"),
         prevent_initial_call=True,
     )(export_to_excel)
+
+    app.callback(
+        Output("analysis-two-table", "data"),
+        Input("archive-rows", "data"),
+        Input("analysis-two-a", "value"),
+        Input("analysis-two-b", "value"),
+    )(render_two_way)
+
+    app.callback(
+        Output("analysis-sep-note", "children"),
+        Output("analysis-sep-table", "data"),
+        Input("archive-rows", "data"),
+    )(render_separation)

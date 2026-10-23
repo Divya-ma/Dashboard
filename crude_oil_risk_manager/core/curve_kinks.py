@@ -61,6 +61,18 @@ def historical_scale(values: np.ndarray, axis=0, floor: float = 0.0) -> np.ndarr
     return np.maximum(robust_scale(values, axis=axis, floor=floor), np.nanstd(values, axis=axis, ddof=1))
 
 
+def adaptive_scale(values: np.ndarray, params: CurveParams, axis=0) -> np.ndarray:
+    """historical_scale over the lookback, but never below the same measure over the last `recent_scale_days` rows.
+
+    A z-score divides a deviation by what is normal for that position. When the market has become more volatile than the long
+    history (gasoil in a rally, say) the long-run scale makes ordinary moves look like kinks all day; the recent scale catches up
+    within weeks. One new kink in 60 rows barely moves the recent scale, so real kinks still stand out."""
+    long_run = historical_scale(values, axis=axis, floor=params.min_scale)
+    if params.recent_scale_days and len(values) > params.recent_scale_days:
+        return np.maximum(long_run, historical_scale(values[-params.recent_scale_days:], axis=axis, floor=params.min_scale))
+    return long_run
+
+
 def neighbour_weights(n: int) -> np.ndarray:
     """W (n x n): row k holds the weights predicting point k from its neighbours (zero diagonal).
 
@@ -200,11 +212,10 @@ def prepare_history(
         values=values, dates=dates, months=months, n=n,
         center=np.median(window, axis=0),
         spread=historical_scale(window, axis=0, floor=params.min_scale),
-        resid_scale=historical_scale(resid_hist[-params.lookback_days:], axis=0, floor=params.min_scale),
+        resid_scale=adaptive_scale(resid_hist[-params.lookback_days:], params),
         resid_hist=resid_hist,
-        fit_scale=historical_scale(
-            fit_resid[-params.lookback_days:] if fit_resid is not None else fit_residuals(window, params.poly_degree),
-            axis=0, floor=params.min_scale,
+        fit_scale=adaptive_scale(
+            fit_resid[-params.lookback_days:] if fit_resid is not None else fit_residuals(window, params.poly_degree), params,
         ),
     )
     dates_d = np.asarray(dates, dtype="datetime64[D]")
@@ -220,7 +231,7 @@ def prepare_history(
         basis = vt[:components]
         leftover = centered - centered @ basis.T @ basis
         prepared.pca_mean, prepared.pca_components = mean, basis
-        prepared.pca_scale = historical_scale(leftover, axis=0, floor=params.min_scale)
+        prepared.pca_scale = adaptive_scale(leftover, params)
     return prepared
 
 
@@ -304,6 +315,31 @@ def seasonal_context(
     return out
 
 
+def _relative_to_curve(history_z: np.ndarray, params: CurveParams) -> np.ndarray:
+    """Take the curve's common move out of the history z-scores.
+
+    The history method asks whether a point is unusual against ITS OWN past. When the whole curve has moved (spreads blown out
+    in a rally, say) every point is unusual at once, which says nothing about one contract being out of line, and it flagged
+    most of a curve every day. Subtracting the median z across the curve leaves how far each point is from the others'
+    move, which is what a kink is. Needs five finite points; otherwise the z-scores are left as they are."""
+    finite = np.isfinite(history_z)
+    if not params.history_vs_curve or finite.sum() < 5:
+        return history_z
+    return history_z - np.median(history_z[finite])
+
+
+def _without_ends(neighbour_z: np.ndarray, params: CurveParams) -> np.ndarray:
+    """The neighbour method has no score at the first and last contract unless the setting allows it.
+
+    There it extrapolates from the next three contracts with weights (3, -3, 1) that magnify any error in them, so one stale
+    back-month price made the last contract look like a kink; the other methods still judge the ends."""
+    if params.ends_use_neighbour or len(neighbour_z) < 5:
+        return neighbour_z
+    out = np.array(neighbour_z, dtype=float)
+    out[0] = out[-1] = np.nan
+    return out
+
+
 def _detect_once(
     values: np.ndarray,
     prepared: PreparedHistory | None,
@@ -329,14 +365,16 @@ def _detect_once(
     residual = neighbour_residuals(values)
     if prepared is not None and prepared.n == n:
         neighbour_z = residual / prepared.resid_scale
+        neighbour_z = _without_ends(neighbour_z, params)
         pca_z, pca_implied = _pca_z(values, prepared)
         history_z = (values - prepared.center) / prepared.spread if use_history_method else np.full(n, np.nan)
+        history_z = _relative_to_curve(history_z, params)
         history_fair = prepared.center if use_history_method else np.full(n, np.nan)
     else:  # no usable history: cross-sectional fallback for the neighbour method, others unavailable
         prepared = None
         finite = residual[np.isfinite(residual)]
         scale = float(robust_scale(finite, floor=params.min_scale)) if len(finite) >= 3 else np.nan
-        neighbour_z = residual / scale
+        neighbour_z = _without_ends(residual / scale, params)
         pca_z = np.full(n, np.nan)
         pca_implied = np.full(n, np.nan)
         history_z = np.full(n, np.nan)

@@ -95,7 +95,9 @@ def test_a_kink_near_the_front_does_not_make_the_front_contract_a_kink():
     live[2] += 0.4
     results = detect(live, None, False, params)  # no history: cross-sectional scales
     assert [r.index for r in results if is_kink(r)] == [2]
-    assert results[0].echo_of == 2 and results[0].priority == "NONE"
+    assert results[0].n_flags == 0 and results[0].priority == "NONE"  # the neighbour method does not score the front at all
+    with_ends = detect(live, None, False, CurveParams(ends_use_neighbour=True))
+    assert with_ends[0].echo_of == 2 and with_ends[0].priority == "NONE"  # switched on, it is flagged first and then recognised as an echo
 
 
 def test_two_independent_kinks_are_both_found():
@@ -219,15 +221,15 @@ def test_validate_params_accepts_defaults_and_rejects_bad_values():
         validate_params({**defaults, "lookback_days": None})
 
 
-def test_alert_structures_default_to_everything_and_reject_unknown_keys():
+def test_alert_structures_default_to_the_dflies_and_reject_unknown_keys():
     defaults = CurveParams().__dict__
-    assert len(CurveParams().alert_structures) == 12 and "BRN:dfly" in CurveParams().alert_structures
+    assert CurveParams().alert_structures == ["CL:dfly", "BRN:dfly", "G:dfly"]
     assert validate_params({**defaults, "alert_structures": ["BRN:fly"]}).alert_structures == ["BRN:fly"]
     assert validate_params({**defaults, "alert_structures": []}).alert_structures == []
     with pytest.raises(ValueError):
         validate_params({**defaults, "alert_structures": ["WTI:fly"]})
     old_settings = {k: v for k, v in defaults.items() if k != "alert_structures"}  # saved before this option existed
-    assert len(validate_params(old_settings).alert_structures) == 12
+    assert validate_params(old_settings).alert_structures == ['CL:dfly', 'BRN:dfly', 'G:dfly']
 
 
 def test_params_roundtrip_through_the_settings_table(tmp_db_path):
@@ -259,3 +261,49 @@ def test_historical_scale_respects_fat_tails_that_the_mad_ignores():
     history = np.concatenate([calm, burst])[:, None]
     assert historical_scale(history)[0] > robust_scale(history, axis=0)[0] * 1.5
     assert historical_scale(history, floor=5.0)[0] == 5.0
+
+
+# ---------- fewer false kinks: the whole curve moving, a volatile market, the ends ----------
+
+
+def test_a_whole_curve_shifting_against_its_history_is_not_a_set_of_kinks():
+    """Spreads that have all blown out are unusual against their own past at every point, which says nothing about one point."""
+    values, dates, months = smooth_history()
+    spreads = values[:, :14] - values[:, 1:15]
+    prepared = prepare_history(spreads, dates, months, CurveParams())
+    live = spreads[-1] + 8.0 * prepared.spread  # every point 8 of its own standard deviations above its history
+    blunt = detect(live, prepared, True, CurveParams(history_vs_curve=False))
+    sensible = detect(live, prepared, True, CurveParams())
+    assert sum(1 for r in blunt if r.flags.get("history")) >= 10  # the old behaviour flagged most of the curve
+    assert not any(r.flags.get("history") for r in sensible)  # the common move is taken out
+    live[6] += 10 * prepared.spread[6]  # one point out of line with the others' move still is a kink
+    only = [r.index for r in detect(live, prepared, True, CurveParams()) if r.flags.get("history")]
+    assert only == [6]
+
+
+def test_a_more_volatile_recent_market_widens_the_scales_so_ordinary_moves_do_not_flag():
+    values, dates, months = smooth_history()
+    calm = values.copy()
+    rng = np.random.default_rng(9)
+    calm[-60:] += np.cumsum(rng.normal(0, 0.0, 60))[:, None]  # unchanged
+    wild = values.copy()
+    wild[-60:, :] += rng.normal(0, 0.35, (60, 15))  # the last 60 days: each contract jitters 0.35 around its curve
+    off, on = CurveParams(recent_scale_days=0), CurveParams(recent_scale_days=60)
+    p_off, p_on = prepare_history(wild, dates, months, off), prepare_history(wild, dates, months, on)
+    assert (p_on.resid_scale > p_off.resid_scale).all()  # never narrower, and wider once the market has got noisier
+    same = prepare_history(calm, dates, months, on)
+    assert np.allclose(same.resid_scale, prepare_history(calm, dates, months, off).resid_scale, rtol=0.6)  # a steady market is barely changed
+    live = wild[-1].copy()
+    live[5] += 0.5
+    z_off, z_on = detect(live, p_off, False, off)[5].z["neighbour"], detect(live, p_on, False, on)[5].z["neighbour"]
+    assert abs(z_on) < abs(z_off) / 1.5  # the same move scores much lower against the recent, noisier scale
+
+
+def test_the_neighbour_method_does_not_score_the_two_ends_unless_asked():
+    values, dates, months = smooth_history()
+    live = values[-1].copy()
+    live[-1] += 0.8  # the last contract far from where its neighbours say
+    on = detect(live, prepare_history(values, dates, months, CurveParams(ends_use_neighbour=True)), False, CurveParams(ends_use_neighbour=True))
+    off = detect(live, prepare_history(values, dates, months, CurveParams()), False, CurveParams())
+    assert on[-1].z["neighbour"] is not None and off[-1].z["neighbour"] is None
+    assert off[3].z["neighbour"] is not None  # the interior is scored as before

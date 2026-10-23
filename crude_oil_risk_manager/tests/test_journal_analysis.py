@@ -258,3 +258,69 @@ def test_the_backfill_also_fills_a_missing_excursion_without_the_api(repo, env):
     repo.save_journal(sid, journal)
     env.journal.backfill()
     assert repo.get_journal(sid)["excursion"] is not None
+
+
+# ---------- two columns together, and what separates winners from losers ----------
+
+
+def planted(n=160, seed=3):
+    """Trades whose result depends on the curve shape (contango wins 75%, backwardation 30%) and on nothing else."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for i in range(n):
+        curve = "Contango" if i % 2 == 0 else "Backwardation"
+        win = rng.random() < (0.75 if curve == "Contango" else 0.30)
+        rows.append(row(f"t{i}", 100.0 if win else -100.0, curve=curve, type_="Fly" if rng.random() < 0.5 else "Spread",
+                        day=("Bullish", "Bearish", "Stalemate")[int(rng.integers(0, 3))], day_index=i % 20, hour=int(rng.integers(8, 17)),
+                        held=int(rng.integers(0, 6)), conviction=int(rng.integers(1, 6))))
+    return rows
+
+
+def test_two_columns_together_give_a_cell_per_pair_of_groups():
+    from core.journal_analysis import two_way
+
+    table = two_way(trade_table(planted()), "curve", "type")
+    assert set(zip(table["Group A"], table["Group B"])) == {(c, t) for c in ("Contango", "Backwardation") for t in ("Fly", "Spread")}
+    assert table["Trades"].sum() == 160 and table.iloc[0]["Group A"] == "Contango"  # best expectancy first
+    assert two_way(trade_table(planted()), "curve", "curve").empty and two_way(trade_table([]), "curve", "type").empty
+    assert two_way(trade_table(planted()), "curve", "nonsense").empty
+
+
+def test_the_separation_table_finds_the_planted_column_and_calls_the_rest_noise():
+    from core.journal_analysis import separation
+
+    table, note = separation(trade_table(planted()))
+    curve = table[table["Column"] == "Curve shape at entry"].iloc[0]
+    assert curve["Reading"] == "stands out" and curve["Best group"] == "Contango" and curve["Worst group"] == "Backwardation" and curve["p-value"] < 0.001
+    assert curve["Win rate spread"] > 0.3 and curve["Cramer's V"] > 0.3
+    assert table.iloc[0]["Column"] == "Curve shape at entry"  # most convincing first
+    others = table[table["Column"] != "Curve shape at entry"]
+    assert not (others["Reading"] == "stands out").any() and "160 trades" in note
+    assert "idea" not in " ".join(table["Column"]).lower() and "Mistake" not in " ".join(table["Column"])  # overlapping tags are left to the group table
+
+
+def test_a_small_book_gets_a_caution_and_a_tiny_one_gets_nothing():
+    from core.journal_analysis import separation
+
+    table, note = separation(trade_table(planted(40)))
+    assert "pointer" in note and len(table) > 0
+    empty, note = separation(trade_table(planted(6)))
+    assert empty.empty and "Fewer than 10" in note
+    only_winners, _ = separation(trade_table([row(f"w{i}", 10.0, curve="Contango" if i % 2 else "Backwardation") for i in range(30)]))
+    assert only_winners.empty or "Curve shape at entry" not in set(only_winners["Column"])  # nothing lost: nothing to separate
+
+
+def test_the_analysis_tab_fills_the_two_new_tables(repo, env):
+    from ui.layouts.archive_analysis import SEPARATION_COLUMNS, TWO_WAY_COLUMNS
+
+    rows = planted()
+    two = ac.render_two_way(rows, "curve", "type")
+    assert len(two) == 4 and {c["id"] for c in TWO_WAY_COLUMNS} == set(two[0])
+    note, sep = ac.render_separation(rows)
+    assert "160 trades" in note and sep[0]["column"] == "Curve shape at entry" and {c["id"] for c in SEPARATION_COLUMNS} == set(sep[0])
+    assert ac.render_two_way([], None, None) == [] and ac.render_separation([])[1] == []
+    layout = str(at.archive_layout())
+    for component_id in ("analysis-sep-table", "analysis-two-table", "analysis-two-a", "analysis-two-b", "analysis-sep-note"):
+        assert component_id in layout, component_id

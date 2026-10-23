@@ -438,7 +438,9 @@ def clear_pnl_reset(n_clicks):
 
 def _run_sync() -> None:
     try:
-        container.historical_adapter.run_morning_sync(container.repository)
+        container.historical_adapter.run_morning_sync(
+            container.repository, skip=getattr(container.data_loader, "covered_by_settlements", None)
+        )
     except Exception:  # noqa: BLE001 - a background sync failure must never take the app down
         logger.exception("Manual morning sync crashed")
 

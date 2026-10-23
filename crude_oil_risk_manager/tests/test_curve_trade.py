@@ -9,7 +9,7 @@ import pytest
 from core.curve_calendar import DFLY, FLY, OUTRIGHT, SPREAD, build_structures
 from core.curve_history import CurveHistoryStore
 from core.curve_service import CurveService
-from core.curve_settings import CurveParams, load_params, save_params, validate_params
+from core.curve_settings import ALERT_KEYS, CurveParams, load_params, save_params, validate_params
 from core.curve_store import PrevSettlementStore, SnapshotStore
 from core.curve_trade import (
     HedgeCandidate, build_plan, change_frame, daily_move, fair_value, half_life, plan_summary, rank_hedges,
@@ -266,6 +266,7 @@ def service(repo, tmp_path, clock, alerts, monkeypatch):
     monkeypatch.setattr(CurveService, "_reversion", lambda self, product, family, history, params: (0.8, 40))
     api = FakeApi()
     repo.set_setting("api_access_token", "tok")  # lets the service load history and settlements
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=list(ALERT_KEYS)))  # alert at once on every curve type (the app's defaults are slower and d-fly only)
     return CurveService(
         repo, api, CurveHistoryStore(tmp_path / "c", api), PrevSettlementStore(tmp_path / "c" / "p.json"),
         SnapshotStore(tmp_path / "c"), alerts, products=PRODUCTS, clock=clock, run_in_background=False,
@@ -312,7 +313,7 @@ def test_the_alert_carries_entry_lots_stop_target_and_hedge(service, clock, aler
 
 
 def test_hedge_types_are_respected_and_can_exclude_everything_but_flies(service, clock, repo):
-    save_params(repo, CurveParams(hedge_types={"outright": ["fly"], "spread": ["spread", "fly", "dfly"],
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=list(ALERT_KEYS), hedge_types={"outright": ["fly"], "spread": ["spread", "fly", "dfly"],
                                                "fly": ["spread", "fly", "dfly"], "dfly": ["fly", "dfly"]}))
     feed(service, clock)
     plan = outright_kink(feed(service, clock, kinks={"COG27": 0.4}))["plan"]
@@ -329,7 +330,7 @@ def test_a_dfly_kink_can_only_be_hedged_with_flies_or_dflies_by_default(service,
 
 
 def test_the_minimum_reward_risk_filters_alerts_but_not_the_page(service, clock, alerts, repo):
-    save_params(repo, CurveParams(min_reward_risk=20.0))  # no plan here reaches 20:1
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=list(ALERT_KEYS), min_reward_risk=20.0))  # no plan here reaches 20:1
     feed(service, clock)
     alerts.sent.clear()
     state = feed(service, clock, kinks={"COG27": 0.4})
@@ -338,6 +339,7 @@ def test_the_minimum_reward_risk_filters_alerts_but_not_the_page(service, clock,
 
 
 def test_without_history_the_alert_still_gives_direction_and_price_and_explains_the_rest(repo, tmp_path, clock, alerts):
+    save_params(repo, CurveParams(persistence_polls=1, alert_structures=list(ALERT_KEYS)))
     api = FakeApi()
     plain = CurveService(
         repo, api, CurveHistoryStore(tmp_path / "n", api), PrevSettlementStore(tmp_path / "n" / "p.json"),

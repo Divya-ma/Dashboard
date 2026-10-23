@@ -128,6 +128,55 @@ GROUP_COLUMNS = [
 ]
 
 
+def _round_records(table, ids: dict, decimals: dict) -> list[dict]:
+    records = []
+    for row in table.to_dict("records"):
+        record = {}
+        for key, value in row.items():
+            if isinstance(value, float):
+                value = None if value != value else "∞" if math.isinf(value) else round(value, decimals.get(key, 0))
+            record[ids[key]] = EMPTY if value is None else value
+        records.append(record)
+    return records
+
+
+_TWO_IDS = {"Group A": "a", "Group B": "b", "Trades": "trades", "Win rate": "win_rate", "Expectancy $": "exp_usd", "Expectancy R": "exp_r",
+            "Profit factor": "profit_factor", "Total $": "total", "Sample": "sample"}
+_SEP_IDS = {"Column": "column", "Trades used": "trades", "Groups": "groups", "Best group": "best", "Worst group": "worst", "Win rate spread": "spread",
+            "Cramer's V": "v", "p-value": "p", "Reading": "reading"}
+
+
+def two_way_records(table) -> list[dict]:
+    return _round_records(table, _TWO_IDS, {"Win rate": 3, "Expectancy R": 2, "Profit factor": 2})
+
+
+def separation_records(table) -> list[dict]:
+    return _round_records(table, _SEP_IDS, {"Win rate spread": 3, "Cramer's V": 2, "p-value": 3})
+
+
+TWO_WAY_COLUMNS = [
+    {"id": "a", "name": "First column's group"}, {"id": "b", "name": "Second column's group"}, {"id": "trades", "name": "Trades", "type": "numeric"},
+    {"id": "win_rate", "name": "Win rate", "type": "numeric", "format": Format(precision=0, scheme=Scheme.percentage)},
+    {"id": "exp_usd", "name": "Expectancy ($)", "type": "numeric", "format": _MONEY}, {"id": "exp_r", "name": "Expectancy (R)"},
+    {"id": "profit_factor", "name": "Profit factor"}, {"id": "total", "name": "Total ($)", "type": "numeric", "format": _MONEY}, {"id": "sample", "name": "Sample"},
+]
+SEPARATION_COLUMNS = [
+    {"id": "column", "name": "Column"}, {"id": "trades", "name": "Trades used", "type": "numeric"}, {"id": "groups", "name": "Groups", "type": "numeric"},
+    {"id": "best", "name": "Wins most in"}, {"id": "worst", "name": "Wins least in"},
+    {"id": "spread", "name": "Win rate spread", "type": "numeric", "format": Format(precision=0, scheme=Scheme.percentage)},
+    {"id": "v", "name": "Strength (Cramer's V)"}, {"id": "p", "name": "p-value"}, {"id": "reading", "name": "Reading"},
+]
+
+
+def _table_style(left_columns: tuple) -> dict:
+    return dict(
+        sort_action="native", page_size=20, style_table={"overflowX": "auto"},
+        style_header={"backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_SECONDARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "fontWeight": "bold"},
+        style_cell={"backgroundColor": COLORS["CARD_BG"], "color": COLORS["TEXT_PRIMARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "padding": "8px 12px", "textAlign": "right"},
+        style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in left_columns],
+    )
+
+
 def analysis_tab() -> html.Div:
     return html.Div(
         [
@@ -138,6 +187,44 @@ def analysis_tab() -> html.Div:
             ),
             dbc.Row(id="analysis-cards"),
             dbc.Card(dbc.CardBody(dcc.Graph(id="analysis-equity", config={"displayModeBar": False})), style=_CARD, className="mb-3"),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.Div("What separates winners from losers", style=_LABEL),
+                        html.Div(id="analysis-sep-note", style={**_MUTED, "marginBottom": "8px"}),
+                        dash_table.DataTable(
+                            id="analysis-sep-table", columns=SEPARATION_COLUMNS, data=[],
+                            style_data_conditional=[
+                                {"if": {"filter_query": '{reading} = "stands out"'}, "color": COLORS["ACCENT_GREEN"], "fontWeight": "bold"},
+                                {"if": {"filter_query": '{reading} = "no sign"'}, "color": COLORS["TEXT_SECONDARY"]},
+                            ],
+                            **_table_style(("column", "best", "worst", "reading")),
+                        ),
+                    ]
+                ),
+                style=_CARD, className="mb-3",
+            ),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.Div("Two columns together", style=_LABEL),
+                        dbc.Row([
+                            dbc.Col([html.Div("First column", style=_MUTED), dbc.Select(id="analysis-two-a", options=[{"label": v, "value": k} for k, v in DIMENSIONS.items()], value="curve")], md=4),
+                            dbc.Col([html.Div("Second column", style=_MUTED), dbc.Select(id="analysis-two-b", options=[{"label": v, "value": k} for k, v in DIMENSIONS.items()], value="type")], md=4),
+                        ], className="mb-3"),
+                        dash_table.DataTable(
+                            id="analysis-two-table", columns=TWO_WAY_COLUMNS, data=[],
+                            style_data_conditional=[
+                                {"if": {"filter_query": '{sample} contains "low"'}, "color": COLORS["TEXT_SECONDARY"], "fontStyle": "italic"},
+                                {"if": {"column_id": "exp_usd", "filter_query": "{exp_usd} > 0"}, "color": COLORS["ACCENT_GREEN"]},
+                                {"if": {"column_id": "exp_usd", "filter_query": "{exp_usd} < 0"}, "color": COLORS["ACCENT_RED"]},
+                            ],
+                            **_table_style(("a", "b", "sample")),
+                        ),
+                    ]
+                ),
+                style=_CARD, className="mb-3",
+            ),
             dbc.Card(
                 dbc.CardBody(
                     [

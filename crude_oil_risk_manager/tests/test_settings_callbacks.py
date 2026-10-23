@@ -43,7 +43,7 @@ class StubHistorical:
         self.summary = {"last_sync_utc": None, "symbols_tracked": 0, "symbols_ok": 0, "symbols_error": 0}
         self.data = {"symbol_count": 0, "total_bytes": 0}
 
-    def run_morning_sync(self, repository):
+    def run_morning_sync(self, repository, skip=None):
         self.runs += 1
         self.started.set()
         self.release.wait(timeout=5)

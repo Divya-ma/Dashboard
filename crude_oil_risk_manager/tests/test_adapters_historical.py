@@ -422,3 +422,18 @@ def test_adapters_built_with_one_api_share_each_endpoints_limiter(repo, tmp_path
     hist = VendorHistoricalAdapter(repo, data_dir=str(tmp_path / "h"), api=api)
     assert live._api is hist._api is api
     assert api.client.limiter_for(ENDPOINTS["ohlc"]) is api.client.limiter_for(ENDPOINTS["ohlc"])
+
+
+def test_run_morning_sync_leaves_out_symbols_whose_history_comes_from_the_settlements(vendor_adapter, repo, mocker):
+    from core.models import Contract
+
+    for symbol, month in (("CLZ26", 12), ("WBSZ26", 12)):
+        repo.save_contract(Contract(product="CL" if symbol.startswith("CL") else "WBS", contract_month=month, contract_year=2026, symbol=symbol,
+                                    multiplier=1000.0, tick_size=0.01, tick_value=10.0))
+    fetch = mocker.patch.object(vendor_adapter, "_fetch_from_api", return_value={"WBSZ26": make_ohlc_df("WBSZ26", [datetime.now(timezone.utc)])})
+    result = vendor_adapter.run_morning_sync(repo, skip=lambda symbol: symbol == "CLZ26")
+    assert set(result) == {"WBSZ26"}  # CLZ26 is read from the settlements: no request for it
+    asked = [s for call in fetch.call_args_list for s in call.args[0]] if fetch.call_args_list else []
+    assert "CLZ26" not in asked
+    everything = vendor_adapter.run_morning_sync(repo, skip=lambda symbol: True)
+    assert everything == {}

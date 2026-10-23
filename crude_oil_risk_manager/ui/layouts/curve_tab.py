@@ -48,6 +48,7 @@ PARAM_FIELDS = [
     ("poly_degree", "Fit polynomial degree", "Degree of the robust curve fit", 1),
     ("min_scale", "Minimum scale (points)", "Floor on every scale, so a flat curve can't give huge z", 0.001),
     ("cooldown_minutes", "Alert cooldown (min)", "A cleared kink that returns within this window does not re-alert", 5),
+    ("persistence_polls", "Alert after (polls)", "A kink must be present on this many polls in a row (10 s apart) before it alerts; a price older than the stale limit never alerts", 1),
     ("stale_seconds", "Stale price (seconds)", "Live prices older than this are flagged", 5),
     ("snapshot_minutes", "Snapshot every (min)", "How often today's curve snapshot is saved", 1),
     ("history_years", "History (years)", "Years of generic history to load", 1),

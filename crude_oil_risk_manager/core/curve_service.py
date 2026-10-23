@@ -149,6 +149,7 @@ class CurveService:
         self._hedge_cache: dict = {}
         self._reversion_pending: set[tuple] = set()
         self._active_alert_rank: dict[tuple, int] = {}
+        self._present_polls: dict[tuple, int] = {}  # consecutive polls each qualifying kink has been present (flicker filter)
         self._last_alert_at: dict[tuple, datetime] = {}
         self._open_events: dict[tuple, int] = {}
         self._buffer_alerted: set[tuple[str, date]] = set()
@@ -421,18 +422,25 @@ class CurveService:
     def _handle_alerts(self, state: CurveState, params: CurveParams, now: datetime) -> None:
         if not params.alerts_enabled:
             self._active_alert_rank.clear()
+            self._present_polls.clear()
             return
         current: dict[tuple, int] = {}
         to_send: list[dict] = []
+        present: dict[tuple, int] = {}
         for row in state.kinks:
             if f"{row['product']}:{row['family']}" not in params.alert_structures:
                 continue  # alerts for this product / curve type are switched off (still shown and logged)
             if not meets_priority_row(row, params.alert_min_priority):
                 continue
+            if row.get("stale"):
+                continue  # a price it rests on is old: that is a stale feed, not a kink worth waking up for
+            key = self.kink_key(row)
+            present[key] = self._present_polls.get(key, 0) + 1
+            if present[key] < params.persistence_polls:
+                continue  # not there long enough yet: a one-poll flicker never alerts
             plan = row.get("plan")
             if params.min_reward_risk > 0 and plan is not None and (plan.rr is None or plan.rr < params.min_reward_risk):
                 continue  # the plan's reward:risk is below the minimum asked for
-            key = self.kink_key(row)
             rank = PRIORITY_RANK[row["priority"]]
             current[key] = rank
             previous = self._active_alert_rank.get(key)
@@ -445,6 +453,7 @@ class CurveService:
             to_send.append(row)
             self._last_alert_at[key] = now
         self._active_alert_rank = current
+        self._present_polls = present
         self._send_kink_alerts(to_send)
 
         for product in self.products:

@@ -114,3 +114,9 @@ def test_new_settlements_are_picked_up_when_the_store_version_changes(tmp_path, 
     assert len(loader.load_close_series("CLZ26", min_rows=20)) == 60  # cached until the version changes
     store.version = "v2"
     assert len(loader.load_close_series("CLZ26", min_rows=20)) == 61
+
+
+def test_the_loader_says_which_symbols_it_reads_from_the_settlements(tmp_path, parts):
+    loader = SettlementFirstLoader(str(tmp_path), CountingAdapter(), SettlementPrices(parts[1]))
+    assert loader.covered_by_settlements("CLZ26") and loader.covered_by_settlements("CLZ26-F27-G27") and loader.covered_by_settlements("BRNZ26")
+    assert not loader.covered_by_settlements("WBSZ26") and not loader.covered_by_settlements("CLH27") and not loader.covered_by_settlements("BZZ26")

@@ -391,7 +391,7 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         return results
 
     def run_morning_sync(
-        self, repository: Repository, extra_symbols: list[str] | None = None
+        self, repository: Repository, extra_symbols: list[str] | None = None, skip=None
     ) -> dict[str, str]:
         """Keep every tracked symbol's local Parquet cache current. Synchronous.
 
@@ -401,12 +401,20 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         which used to mean they were only ever backfilled lazily, one at a time, the first
         time someone happened to run a correlation check that touched them.
 
+        `skip(symbol)`, if given, leaves out the symbols it returns True for: those whose history is read from the stored
+        settlements (core.settlement_prices) never use their candle file, so keeping it current wastes API requests.
+
         Symbols needing sync are split into two batched requests instead of one call per
         symbol: those with no local data at all get a full history backfill (see
         backfill_symbols), everything else gets the usual latest-1-candle update.
         """
         logger.info("Morning sync: starting at %s", datetime.now(timezone.utc).isoformat())
         symbols = self.get_symbols_needing_sync(repository, extra_symbols)
+        if skip is not None:
+            covered = [s for s in symbols if skip(s)]
+            symbols = [s for s in symbols if s not in covered]
+            if covered:
+                logger.info("Morning sync: %d symbol(s) skipped, their history comes from the settlements", len(covered))
         if not symbols:
             logger.info("Morning sync: all symbols up to date")
             return {}
