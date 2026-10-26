@@ -16,6 +16,7 @@ from dash import ALL, MATCH, Input, Output, State, callback_context, html, no_up
 from dash.exceptions import PreventUpdate
 
 from config.settings import settings
+from core.models.structure import CHOOSABLE_STRUCTURE_TYPES, parse_structure_type
 from core.structure_builder import (
     ACTIVE_STRUCTURE_STATUSES,
     CORRELATION_FLAG_THRESHOLD,
@@ -294,18 +295,28 @@ def update_validation_messages(step, legs_store, symbols, ratios):
     return render_messages(errors, warnings)
 
 
-def render_review(step, template, symbols, ratios, tcs, name, multiplier, tick_size, tick_value, notes, correlation_rows):
+def default_structure_type(template):
+    """The Structure Type field starts as the template's own type (the Custom template has none to offer)."""
+    return template if template in {kind.value for kind in CHOOSABLE_STRUCTURE_TYPES} else None
+
+
+def render_review(step, template, symbols, ratios, tcs, name, multiplier, tick_size, tick_value, notes, correlation_rows, structure_type=None):
     if step != STEP_COUNT:
         raise PreventUpdate
     legs = _legs(symbols, ratios)
     tc_values = _tc_values(tcs)
     net, ignored = net_outright_equivalent(legs)
     label = STRUCTURE_TEMPLATES.get(template or "", {}).get("label", "—")
+    try:
+        chosen = parse_structure_type(structure_type)
+    except ValueError:
+        chosen = None
+    type_text = chosen.label if chosen else label
     text = {"color": COLORS["TEXT_PRIMARY"]}
     total_tc = sum(tc_values)
     sections = [
         html.H4(name or "(no name)", style=text),
-        html.Div(f"{label} · Multiplier {multiplier or '—'} · Tick size {tick_size or '—'} · Tick value {tick_value or '—'}",
+        html.Div(f"{type_text} (built from the {label} template) · Multiplier {multiplier or '—'} · Tick size {tick_size or '—'} · Tick value {tick_value or '—'}",
                  style={"color": COLORS["TEXT_SECONDARY"], "marginBottom": "12px"}),
         data_table(
             ["Leg", "Symbol", "Ratio", "TC/lot (1 side)"],
@@ -339,7 +350,7 @@ def render_review(step, template, symbols, ratios, tcs, name, multiplier, tick_s
 
 def save_structure(
     n_clicks, name, template, symbols, ratios, tcs, multiplier, tick_size, tick_value, notes,
-    status_filter, product_filter, sort_by, portfolio_pnl, live_prices,
+    status_filter, product_filter, sort_by, portfolio_pnl, live_prices, structure_type=None,
 ):
     """Build and save a SHELL structure; on errors keep the modal open and show them."""
     if not n_clicks:
@@ -348,7 +359,7 @@ def save_structure(
     try:
         built = build_shell_structure(
             name, template, symbols, ratios, multiplier, tick_size, tick_value, notes, repository.get_contract,
-            tcs=tcs,
+            tcs=tcs, structure_type=structure_type,
         )
         save_shell_structure(repository, built)
     except StructureBuildError as exc:
@@ -500,6 +511,7 @@ def register_structure_builder_callbacks(app) -> None:
         State("builder-tick-value", "value"),
         State("builder-notes", "value"),
         State("store-builder-correlation", "data"),
+        State("builder-structure-type", "value"),
         prevent_initial_call=True,
     )(render_review)
 
@@ -524,5 +536,11 @@ def register_structure_builder_callbacks(app) -> None:
         State("filter-structure-sort", "value"),
         State("store-portfolio-pnl", "data"),
         State("store-live-prices", "data"),
+        State("builder-structure-type", "value"),
         prevent_initial_call=True,
     )(save_structure)
+
+    app.callback(
+        Output("builder-structure-type", "value"),
+        Input("store-builder-template", "data"),
+    )(default_structure_type)

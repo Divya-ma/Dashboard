@@ -33,6 +33,7 @@ a setting, the default is given.
    - [Churn](#610-churn)
    - [Archive and the trade journal](#611-archive-and-the-trade-journal)
    - [Settings](#612-settings)
+   - [Seasonality](#613-seasonality)
 7. [Alerts](#7-alerts)
 8. [Storage: database, files, settings keys](#8-storage-database-files-settings-keys)
 9. [Configuration (.env)](#9-configuration-env)
@@ -336,7 +337,7 @@ is exit (donor) or fresh OI (receiver). It is an estimate — exchange OI cannot
 
 ### 6.1 Sidebar and shell
 
-Navigation: **Home, Structures, Correlation, Exposure Map, VaR & Scenarios, Trade Analyzer, Curve Compare,
+Navigation: **Home, Structures, Correlation, Exposure Map, VaR & Scenarios, Trade Analyzer, Curve Compare, Seasonality,
 OI · Volume · ATR, Churn, Archive, Settings.** The sidebar also shows the time of the last price update, a stale-data
 indicator and a countdown. A banner appears until an API token is configured. Alert toasts appear on screen.
 
@@ -375,7 +376,7 @@ only*, product (CL, BRN, BZ, WBS, G), sort (total P&L, unrealized P&L, days held
      negative = hedges).
    - *VaR of 1 lot* of the candidate by **both** the historical and the Monte Carlo method, with the VaR page's settings.
    - *Beta / position sizing* of the candidate against the portfolio: lots to hedge (−β) or match (+β).
-3. *Details*: name, multiplier, tick size, tick value, notes. **Leave the numbers blank to use each product's own**
+3. *Details*: name, **structure type**, multiplier, tick size, tick value, notes. The structure type is what you call the trade, and it is what the Archive, its filter and the analysis group by. It starts as the template's own type; type or pick another (outright, spread, fly, dfly, and the box and diff forms of each, for example `dflybox`, `spreaddiff`). A d-fly traded as two flies is built from the Fly template and stored as a *dfly*. **Leave the numbers blank to use each product's own**
    (CL/Brent 1,000 / 0.01 / $10; gasoil 100 / 0.25 / $25) — a cross-product structure gets each leg its own. Anything typed
    still wins.
 4. *Review* then save. History for new symbols is backfilled in the background.
@@ -635,6 +636,26 @@ mistakes.
 - **📊 Fill market data for old trades** backfills snapshots (3 trades per click; each trade costs 6 `/ohlc/` requests) and
   excursions.
 
+**✏️ Edit this trade (every column).** The detail panel of a trade has an *Edit this trade* button with four tabs, so any archive
+column can be corrected afterwards (`core/archive_edit.py`). Each tab saves on its own, writes one audit line to the structure's
+notes (`archive edit: ...`), and the table, stats and analysis reload:
+
+| Tab | Changes | Archive columns it drives |
+|---|---|---|
+| **Structure** | name, **structure type** (any of the 12, or Custom), notes | Structure Name, Type |
+| **Trades** | per trade: date and time (UTC), price, lots, buy / sell, transaction cost, realized P&L (gross), stop, target | Entry / Exit Date, Days Held, Entry / Exit Price, Lots, Transaction Cost, Realized PnL, Result, Risk : Reward, Risk at Stop, Result in R |
+| **Legs** | symbol and ratio of each leg (the number of legs stays; new contracts are created as in the builder) | Legs |
+| **Market data** | the 15 entry and exit snapshot cells (prices, day / 1-minute move, curve shapes, ATR, volatility, volume, bid-ask, Brent-WTI, crack, curve z) and the four MFE / MAE figures | the Entry / Exit market columns, MFE / MAE |
+
+Ideas, payups, conviction, exit reason and mistakes are edited in the journal editor above it. Columns that are worked out (Days
+Held, Result, Risk : Reward, Risk at Stop, Result in R) have no value of their own: change what they are worked out from.
+
+Prices and P&L: changing a trade's price, lots or buy / sell (with *Recalculate* ticked, the default) replays the structure's
+trades exactly as deleting a trade does: the legs' entry prices and each exit's realized P&L are recalculated, and a cost is scaled
+in proportion to new lots (a price never changes a cost). A P&L or cost typed in the same save is kept as typed; with
+*Recalculate* off everything is stored as typed. An edit that would leave lots open, or put a stop or target on the wrong side of
+the price, is refused and nothing is changed. Realized P&L feeds Home's totals, so a corrected trade moves them too.
+
 **The journal** is one JSON document per structure (`trade_journal` table):
 
 | Column group | What is recorded | How |
@@ -693,6 +714,47 @@ replaces it, including a dissolve). The snapshot is taken on a background thread
 
 Validators reject bad input with a readable message (text in a number field, a positive P&L stop, a non-https webhook) before
 anything is stored. The token and the webhook are never logged.
+
+### 6.13 Seasonality
+
+Route `/seasonality`. Where is a structure today compared with the same structure in earlier years at the same point of its
+life? For one product (CL / BRN / G) and curve type (outright / spread / fly / d-fly) the table lists the structures of the
+first N contracts from the front (default 15, up to 36); clicking a row plots them.
+
+**Comparison (`core/seasonality.py`).** The Apr26 d-fly is set against the Apr25, Apr24 ... d-flies (default 7 earlier
+years; the settlement store starts in 2019) at the same number of **trading days before expiry** — the exchange business days
+to the expiry of the structure's *front* leg (0 on the expiry day). A finished contract's expiry is the last day its front leg
+settled; a live one uses the rule-based date. Prices are settlements; a spread, fly or d-fly is the weighted sum of its outrights'
+settlements on the days every outright settled. A gap of up to 3 days is carried forward when years are lined up.
+
+**Band.** At each day before expiry: the mean ± *z* sample standard deviations (default z = 2) of the earlier years, or the
+robust median ± *z* × 1.4826 × MAD. The spread is never below one tick; a band needs at least two years. Any delivery year can be
+left out of the average (it stays on the chart, dotted and grey). The choices are not stored: they reset on every visit.
+
+**Status.** The live price (Curve Compare's quote VWAP, fair value as fallback; the last settlement if there is none) is
+scored as z = (price − centre) ÷ spread. Outside the band on one side for the chosen number of days in a row (default 3: the
+run of settlements ending at the last one, plus today when the live price is on the same side) = **FLAGGED RICH** (above, a
+sell candidate) or **FLAGGED CHEAP**; outside for fewer days = **WATCH**. A note appears when most of the table is outside the
+band on one side — that is the whole market in a different regime, not individual mispricings.
+
+**Table columns:** days to expiry, live price and source, last settlement, live − settlement, the usual price at this time of
+year, deviation in ticks and z, how many earlier years were priced below today, days outside the band, status, **same move in
+earlier years**, volume of the thinnest leg on the last settlement day, the usual volume at this point, and their ratio.
+*Same move in earlier years* (shown for WATCH / FLAGGED rows) lists each other year that left a band built from the remaining
+years, on the same side, within 10 trading days of today's point, with its peak z and whether it was back inside 20 trading
+days later ("back" / "still out").
+
+**Chart.** Every earlier year against days before expiry (axis runs right to left), this year's settlements in white, the
+band and average (tick box), and a star for today's price. The y-axis is sized to the 2nd–98th percentile of the plotted values,
+because the last days before expiry swing far more than the rest; zoom out to see them.
+
+**Rebasing.** *Show → Change since a reference day* plots each curve as the change since N trading days before expiry (default
+250). It removes the oil-price level (Brent at 20 dollars in 2020, 120 in 2022) that dominates an outright; a structure that is
+nearer expiry than the reference day cannot be rebased and shows no data.
+
+**Depth.** The watch window (days before expiry) reaches as far back as the stored settlements: each contract keeps
+`OI history` calendar days (Settings, default 1,500, about 1,030 trading days). The page says so when the window asks for more.
+No extra API calls are made by this page itself except Curve Compare's quote polling while it is open.
 
 ---
 

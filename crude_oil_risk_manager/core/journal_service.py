@@ -115,6 +115,21 @@ class JournalService:
         tags = clean_mistakes(mistakes, [*self.mistake_options(), *had["mistakes"]])
         return self._update(structure_id, lambda j: j.update(conviction=conviction, exit_reason=reason, mistakes=tags))
 
+    def set_market(self, structure_id: str, entry_values: dict | None, exit_values: dict | None, excursion_values: dict | None) -> dict:
+        """The Archive editor's market table and MFE / MAE: {column: typed value} for the entry and the exit snapshot (blank
+        clears a cell), and the four excursion figures. Raises ValueError, writing nothing, if any cell is invalid."""
+        from core.archive_edit import apply_excursion_values, apply_snapshot_values  # late: archive_edit imports the trade engine
+
+        with self._lock:
+            journal = with_defaults(self._repository.get_journal(structure_id))
+            for kind, values in (("entry", entry_values), ("exit", exit_values)):
+                if values:
+                    journal[kind] = apply_snapshot_values(journal.get(kind), values)
+            if excursion_values is not None:
+                journal["excursion"] = apply_excursion_values(journal.get("excursion"), excursion_values)
+            self._repository.save_journal(structure_id, journal)
+            return journal
+
     INTRADAY_MIN_SPARE = 8  # /ohlc/ requests that must be free (this minute, hour and day) before an intraday excursion is fetched
 
     def intraday_possible(self) -> bool:

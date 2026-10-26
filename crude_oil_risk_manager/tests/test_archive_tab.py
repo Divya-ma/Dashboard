@@ -205,7 +205,10 @@ def test_layout_controls_and_table_configuration():
     assert table.page_size == 20 and table.sort_action == "native"
     assert table.sort_by == [{"column_id": "exit_date", "direction": "desc"}]
     assert [c["name"] for c in table.columns][:3] == ["Structure Name", "Type", "Legs"]
-    assert [o["label"] for o in find(layout, "archive-type").options] == ["All", "Outright", "Spread", "Fly"]
+    assert [o["label"] for o in find(layout, "archive-type").options] == [
+        "All", "Outright", "Spread", "Fly", "Dfly", "Outright box", "Spread box", "Fly box", "Dfly box",
+        "Outright diff", "Spread diff", "Fly diff", "Dfly diff",
+    ]
     assert [o["label"] for o in find(layout, "archive-pnl").options] == ["All", "Winners only", "Losers only"]
     colors = {c["if"].get("filter_query"): c["color"] for c in table.style_data_conditional if "color" in c}
     assert colors["{realized_pnl} > 0"] == COLORS["ACCENT_GREEN"] and colors["{realized_pnl} < 0"] == COLORS["ACCENT_RED"]

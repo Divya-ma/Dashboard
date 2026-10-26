@@ -522,3 +522,60 @@ def test_save_structure_errors_keep_modal_open(repo):
     assert repo.get_all_structures() == []
     with pytest.raises(PreventUpdate):
         bc.save_structure(**save_args(n_clicks=None))
+
+
+# ---------- structure type (what the trader calls it) ----------
+
+
+def test_structure_type_labels_and_parsing():
+    from core.models.structure import CHOOSABLE_STRUCTURE_TYPES, parse_structure_type
+
+    assert [t.value for t in CHOOSABLE_STRUCTURE_TYPES] == [
+        "outright", "spread", "fly", "dfly", "outrightbox", "spreadbox", "flybox", "dflybox",
+        "outrightdiff", "spreaddiff", "flydiff", "dflydiff",
+    ]
+    assert [StructureType.SPREAD.label, StructureType.DFLY.label, StructureType.SPREADBOX.label, StructureType.DFLYDIFF.label] == [
+        "Spread", "Dfly", "Spread box", "Dfly diff",
+    ]
+    for typed in ("dfly", "DFLY", " D-Fly ", "d fly"):
+        assert parse_structure_type(typed) is StructureType.DFLY
+    assert parse_structure_type("Spread Box") is StructureType.SPREADBOX
+    assert parse_structure_type("flydiff") is StructureType.FLYDIFF
+    assert parse_structure_type("") is None and parse_structure_type(None) is None
+    with pytest.raises(ValueError, match="use one of"):
+        parse_structure_type("condor")
+
+
+def test_a_dfly_built_from_the_spread_template_is_saved_and_shown_as_a_dfly(repo):
+    from core.archive import filter_archive_rows
+    from core.structure_view import _type_label
+
+    built = sb.build_shell_structure(**spread_inputs(), get_contract=repo.get_contract, structure_type="dfly")
+    assert built.structure.structure_type is StructureType.DFLY and built.warnings == []  # the 2 legs are still a spread's
+    sb.save_shell_structure(repo, built)
+    saved = repo.get_structure(built.structure.structure_id)
+    assert saved.structure_type is StructureType.DFLY and _type_label(saved) == "Dfly"
+    rows = [{"type": StructureType.SPREADBOX.label}, {"type": StructureType.DFLY.label}, {"type": StructureType.SPREAD.label}]
+    assert filter_archive_rows(rows, structure_type="spreadbox") == [rows[0]]
+    assert filter_archive_rows(rows, structure_type="dfly") == [rows[1]]
+
+
+def test_a_blank_structure_type_keeps_the_templates_and_a_bad_one_is_an_error(repo):
+    for blank in (None, ""):
+        built = sb.build_shell_structure(**spread_inputs(), get_contract=repo.get_contract, structure_type=blank)
+        assert built.structure.structure_type is StructureType.SPREAD
+    with pytest.raises(sb.StructureBuildError, match="Unknown structure type"):
+        sb.build_shell_structure(**spread_inputs(), get_contract=repo.get_contract, structure_type="condor")
+    custom = sb.build_shell_structure(**spread_inputs(template="custom", ratios=[1, 2]), get_contract=repo.get_contract)
+    assert custom.structure.structure_type is StructureType.CUSTOM
+
+
+def test_the_type_field_defaults_to_the_template_and_is_saved_and_reviewed(repo, env):
+    assert bc.default_structure_type("fly") == "fly" and bc.default_structure_type("custom") is None
+    assert bc.default_structure_type(None) is None
+    bc.save_structure(**save_args(structure_type="Dfly"))
+    assert repo.get_all_structures()[0].structure_type is StructureType.DFLY
+    review = bc.render_review(4, "spread", ["CLZ26", "CLF27"], [1, -1], [0, 0], "N", None, None, None, None, [], structure_type="dflybox")
+    assert "Dfly box (built from the Spread template)" in str(review)
+    message = bc.save_structure(**save_args(name="Bad", structure_type="condor"))[2]
+    assert "Unknown structure type" in str(message)

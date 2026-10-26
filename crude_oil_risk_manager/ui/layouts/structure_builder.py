@@ -8,6 +8,7 @@ toggles their visibility.
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 
+from core.models.structure import CHOOSABLE_STRUCTURE_TYPES
 from core.structure_utils import STRUCTURE_TEMPLATES
 from core.structure_builder import CORRELATION_FLAG_THRESHOLD
 from ui.layouts.shell import COLORS
@@ -426,6 +427,16 @@ def _step_3() -> html.Div:
         [
             html.H5("Structure Details", style=_HEADING),
             _field("Structure Name", dbc.Input(id="builder-name", placeholder="e.g. CL Dec26-Jan27 Spread", maxLength=100)),
+            _field(
+                "Structure Type (what you call it; used in the Archive and its analysis)",
+                dcc.Dropdown(
+                    id="builder-structure-type",
+                    options=[{"label": kind.label, "value": kind.value} for kind in CHOOSABLE_STRUCTURE_TYPES],
+                    placeholder="Type or select, e.g. dfly. Blank = the template's own type",
+                    clearable=True,
+                    className="builder-dropdown",
+                ),
+            ),
             dbc.Row(
                 [
                     dbc.Col(_field("Multiplier ($/point)", dbc.Input(id="builder-multiplier", type="number", placeholder="blank = product default (CL, Brent 1000; Gasoil 100)")), md=4),

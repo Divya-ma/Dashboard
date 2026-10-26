@@ -1,6 +1,7 @@
 """Archive tab callbacks: load, filter, summarize and show the detail of closed structures.
 
-Read-only apart from one action: deleting the closed structures the user ticked and confirmed (core.archive.delete_archived_structures).
+Reads the closed structures, and changes them in two ways: deleting the ones the user ticked and confirmed
+(core.archive.delete_archived_structures) and correcting any column of one trade (core.archive_edit, the 'Edit this trade' panel).
 The row building, filtering and statistics live in core.archive.
 """
 
@@ -10,16 +11,18 @@ from datetime import date
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
+from core.archive_edit import ArchiveEditError, edit_legs, edit_structure, edit_trades, trade_rows
 from core.archive_export import archive_to_excel
 from core.journal_analysis import equity_curve, group_table, headline, separation, trade_table, two_way
 from ui.layouts.archive_analysis import (
     build_bar_figure, build_cards, build_equity_figure, separation_records, table_records, two_way_records,
 )
-from core.archive import build_archive_rows, delete_archived_structures, filter_archive_rows, summarize
+from core.archive import build_archive_rows, delete_archived_structures, filter_archive_rows, journal_columns, summarize
 from core.models import StructureStatus
 from core.pnl import calculate_net_realized_pnl
 from core.user_settings import KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE
 from ui.container import container
+from ui.layouts.archive_editor import MARKET_FIELDS
 from ui.layouts.archive_tab import (
     CARD_STYLE,
     NO_ARCHIVE_TEXT,
@@ -172,6 +175,102 @@ def save_journal_edits(n_clicks, selected_id, ideas, payup_entry, payup_exit, co
     except (ValueError, TypeError) as exc:
         return f"Not saved: {exc}"
     return "Saved. Reopen the tab (or click Apply Filters) to see it in the table."
+
+
+# ----------------------------------------------------------------------
+# Edit this trade (core.archive_edit)
+# ----------------------------------------------------------------------
+
+EXCURSION_KEYS = ("mfe_i", "mae_i", "mfe_d", "mae_d")
+
+
+def _status(text: str, ok: bool):
+    return html.Div(text, style={"color": "#00ff88" if ok else "#ff4444"})
+
+
+def _refresh(counter) -> int:
+    """The archive table reloads whenever this counter (the one a delete also bumps) changes."""
+    return (counter or 0) + 1
+
+
+def toggle_editor(n_clicks, is_open):
+    if not n_clicks:
+        raise PreventUpdate
+    return not is_open
+
+
+def fill_trade_editor(selected_id, _changes):
+    """The selected trade's own values in every editor field (after a save too, so the panel shows what is stored)."""
+    empty = (None, None, "", [], [], [], None, None, None, None)
+    if not selected_id:
+        return empty
+    repository = container.repository
+    structure = repository.get_structure(selected_id)
+    if structure is None:
+        return empty
+    cells = journal_columns(repository.get_journal(selected_id), [])
+    market = [{"id": column, "field": label, "entry": cells.get("e_" + column), "exit": cells.get("x_" + column)} for column, label in MARKET_FIELDS]
+    legs = [{"id": i, "leg": f"Leg {i + 1}", "symbol": leg.contract.symbol, "ratio": leg.ratio} for i, leg in enumerate(structure.legs)]
+    return (
+        structure.name, structure.structure_type.value, structure.notes or "", trade_rows(repository.get_trades_for_structure(selected_id)),
+        legs, market, *(cells.get(key) for key in EXCURSION_KEYS),
+    )
+
+
+def _save(selected_id, counter, action):
+    """Run one edit; (status, counter): a failure says why and leaves the table alone."""
+    if not selected_id:
+        return _status("Select a trade first.", False), no_update
+    try:
+        message = action()
+    except ArchiveEditError as exc:
+        return _status("Not saved: " + " ".join(exc.errors), False), no_update
+    except ValueError as exc:
+        return _status(f"Not saved: {exc}", False), no_update
+    except Exception:  # noqa: BLE001 - a readable message instead of a silent callback error
+        logger.exception("Archive edit failed")
+        return _status("Could not save; see the server log.", False), no_update
+    return _status(message, True), _refresh(counter)
+
+
+def save_structure_edit(n_clicks, selected_id, name, structure_type, notes, counter):
+    if not n_clicks:
+        raise PreventUpdate
+    return _save(selected_id, counter, lambda: edit_structure(container.repository, selected_id, name, structure_type, notes))
+
+
+def save_trades_edit(n_clicks, selected_id, rows, recalculate, counter):
+    if not n_clicks:
+        raise PreventUpdate
+    return _save(selected_id, counter, lambda: edit_trades(container.repository, selected_id, rows or [], bool(recalculate)))
+
+
+def _ratio(value):
+    """A typed ratio: a whole number becomes an int; anything else is passed on so validation can name it."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    return int(number) if number == int(number) else number
+
+
+def save_legs_edit(n_clicks, selected_id, rows, counter):
+    if not n_clicks:
+        raise PreventUpdate
+    rows = rows or []
+    return _save(selected_id, counter, lambda: edit_legs(container.repository, selected_id, [r.get("symbol") for r in rows], [_ratio(r.get("ratio")) for r in rows]))
+
+
+def save_market_edit(n_clicks, selected_id, rows, mfe_i, mae_i, mfe_d, mae_d, counter):
+    if not n_clicks:
+        raise PreventUpdate
+    if container.journal is None:
+        return _status("The journal is not available.", False), no_update
+    rows = rows or []
+    entry = {r["id"]: r.get("entry") for r in rows}
+    exit_ = {r["id"]: r.get("exit") for r in rows}
+    excursion = dict(zip(EXCURSION_KEYS, (mfe_i, mae_i, mfe_d, mae_d)))
+    return _save(selected_id, counter, lambda: (container.journal.set_market(selected_id, entry, exit_, excursion), "Saved the market data.")[1])
 
 
 def _ticked_ids(virtual_data, selected_rows) -> list[str]:
@@ -328,6 +427,48 @@ def register_archive_callbacks(app) -> None:
         State("archive-mistakes", "value"),
         prevent_initial_call=True,
     )(save_journal_edits)
+
+    app.callback(
+        Output("archive-edit-collapse", "is_open"),
+        Input("archive-edit-toggle", "n_clicks"),
+        State("archive-edit-collapse", "is_open"),
+        prevent_initial_call=True,
+    )(toggle_editor)
+
+    app.callback(
+        Output("archive-edit-name", "value"),
+        Output("archive-edit-type", "value"),
+        Output("archive-edit-notes", "value"),
+        Output("archive-edit-trades", "data"),
+        Output("archive-edit-legs", "data"),
+        Output("archive-edit-market", "data"),
+        Output("archive-edit-mfe-i", "value"),
+        Output("archive-edit-mae-i", "value"),
+        Output("archive-edit-mfe-d", "value"),
+        Output("archive-edit-mae-d", "value"),
+        Input("archive-selected", "data"),
+        Input("archive-deleted", "data"),
+    )(fill_trade_editor)
+
+    for button, status, callback, states in (
+        ("archive-edit-structure-save", "archive-edit-structure-status", save_structure_edit,
+         (State("archive-edit-name", "value"), State("archive-edit-type", "value"), State("archive-edit-notes", "value"))),
+        ("archive-edit-trades-save", "archive-edit-trades-status", save_trades_edit,
+         (State("archive-edit-trades", "data"), State("archive-edit-recalc", "value"))),
+        ("archive-edit-legs-save", "archive-edit-legs-status", save_legs_edit, (State("archive-edit-legs", "data"),)),
+        ("archive-edit-market-save", "archive-edit-market-status", save_market_edit,
+         (State("archive-edit-market", "data"), State("archive-edit-mfe-i", "value"), State("archive-edit-mae-i", "value"),
+          State("archive-edit-mfe-d", "value"), State("archive-edit-mae-d", "value"))),
+    ):
+        app.callback(
+            Output(status, "children"),
+            Output("archive-deleted", "data", allow_duplicate=True),
+            Input(button, "n_clicks"),
+            State("archive-selected", "data"),
+            *states,
+            State("archive-deleted", "data"),
+            prevent_initial_call=True,
+        )(callback)
 
     app.callback(
         Output("analysis-cards", "children"),

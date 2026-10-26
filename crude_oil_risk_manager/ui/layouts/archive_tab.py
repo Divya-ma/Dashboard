@@ -10,7 +10,9 @@ from dash.dash_table.Format import Format, Group, Scheme, Symbol
 
 from core.archive import RESULT_LOSS, RESULT_WIN, SNAPSHOT_FIELDS
 from core.journal import CONVICTIONS, EXIT_REASONS, MISTAKES
+from core.models.structure import CHOOSABLE_STRUCTURE_TYPES
 from ui.layouts.archive_analysis import analysis_tab
+from ui.layouts.archive_editor import SNAPSHOT_LABELS, trade_editor
 from ui.layouts.shell import COLORS
 
 EMPTY = "—"
@@ -23,6 +25,7 @@ TYPE_OPTIONS = [
     {"label": "Outright", "value": "outright"},
     {"label": "Spread", "value": "spread"},
     {"label": "Fly", "value": "fly"},
+    *({"label": kind.label, "value": kind.value} for kind in CHOOSABLE_STRUCTURE_TYPES if kind.value not in ("outright", "spread", "fly")),
 ]
 PNL_OPTIONS = [
     {"label": "All", "value": "all"},
@@ -279,12 +282,7 @@ def _stats_row() -> dbc.Row:
     )
 
 
-_SNAPSHOT_LABELS = {
-    "px_co": "CO price", "px_cl": "CL price", "px_go": "GO price", "move_day": "Day move", "move_min": "1-min move",
-    "curve_cl": "CL curve", "curve_brn": "BRN curve", "curve_go": "GO curve", "atr": "ATR",
-    "vol_ratio": "Volatility vs normal", "volume_ratio": "Volume vs normal", "spread_ticks": "Bid-ask (ticks)",
-    "brent_wti": "Brent-WTI", "crack": "Gasoil crack", "kink_z": "Curve z-score",
-}
+_SNAPSHOT_LABELS = SNAPSHOT_LABELS
 # entry columns first, then the same for the exit
 JOURNAL_COLUMNS = [
     {"id": prefix + column, "name": f"{'Entry' if prefix == 'e_' else 'Exit'} {_SNAPSHOT_LABELS[column]}", "type": "any"}
@@ -472,6 +470,7 @@ def _trades_tab() -> html.Div:
                     [
                         html.Div(id="archive-detail"),
                         _journal_editor(),
+                        trade_editor(),
                         # Always in the layout: a callback Input that is missing from the page never fires.
                         dbc.Button("Close Detail", id="archive-detail-close", color="secondary", outline=True, size="sm"),
                     ]

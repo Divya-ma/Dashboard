@@ -126,7 +126,7 @@ def build_archive_rows(
             {
                 "structure_id": structure.structure_id,
                 "name": structure.name,
-                "type": structure.structure_type.value.capitalize(),
+                "type": structure.structure_type.label,
                 "legs_summary": _legs_summary(legs),
                 "legs": legs,
                 "symbols": [leg["symbol"] for leg in legs],
@@ -171,7 +171,7 @@ def filter_archive_rows(
             exit_date = date.fromisoformat(row["exit_date"]) if row["exit_date"] else None
             if exit_date is None or (start and exit_date < start) or (end and exit_date > end):
                 continue
-        if structure_type and structure_type != "all" and row["type"].lower() != structure_type.lower():
+        if structure_type and structure_type != "all" and row["type"].lower().replace(" ", "") != structure_type.lower():
             continue
         if needle and not any(needle in symbol.lower() for symbol in row["symbols"]):
             continue

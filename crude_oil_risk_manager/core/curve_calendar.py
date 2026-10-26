@@ -136,6 +136,12 @@ def is_business_day(d: date, calendar: str) -> bool:
     return d not in holidays
 
 
+def holidays_in(calendar: str, years: range) -> list[date]:
+    """Every holiday of the exchange calendar in the given years, sorted."""
+    pick = _nymex_holidays if calendar == "nymex" else _uk_holidays
+    return sorted(day for year in years for day in pick(year))
+
+
 def add_business_days(d: date, n: int, calendar: str) -> date:
     """`d` moved by `n` business days (negative = earlier); `d` itself need not be a business day."""
     step = 1 if n >= 0 else -1

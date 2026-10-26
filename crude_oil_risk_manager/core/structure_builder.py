@@ -18,6 +18,7 @@ from core.correlation import classify_correlation, correlate_structures, outrigh
 from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError
 from core.models import Contract, Leg, Structure, StructureStatus, StructureType
+from core.models.structure import parse_structure_type
 from core.structure_utils import (
     STRUCTURE_TEMPLATES,
     compose_structure_symbol,
@@ -126,13 +127,14 @@ def _parse_tc(value, leg_number: int, errors: list[str]) -> float:
 
 
 def build_shell_structure(
-    name, template, symbols, ratios, multiplier, tick_size, tick_value, notes, get_contract, tcs=None
+    name, template, symbols, ratios, multiplier, tick_size, tick_value, notes, get_contract, tcs=None, structure_type=None
 ) -> BuiltStructure:
     """Validate the builder inputs and build a SHELL structure (no lots, no entry prices).
 
     `get_contract(symbol)` returns the saved Contract or None. `tcs` is the per-leg
     transaction cost ($/lot, one side); missing/blank entries default to 0.0. Raises
-    StructureBuildError listing every blocking problem at once.
+    StructureBuildError listing every blocking problem at once. `structure_type` is what the trader calls it (a d-fly
+    built from two flies is a DFLY); blank means the template's own type.
     """
     errors: list[str] = []
     spec = STRUCTURE_TEMPLATES.get(template or "")
@@ -141,6 +143,11 @@ def build_shell_structure(
     name = (name or "").strip()
     if not name:
         errors.append("Structure name is required.")
+    try:
+        chosen_type = parse_structure_type(structure_type)
+    except ValueError as exc:
+        chosen_type = None
+        errors.append(str(exc))
 
     rows = [{"symbol": normalize_symbol(s), "ratio": r} for s, r in zip(symbols or [], ratios or [])]
     tc_values = [_parse_tc(t, i + 1, errors) for i, t in enumerate((tcs or [])[: len(rows)])]
@@ -197,7 +204,7 @@ def build_shell_structure(
         ]
         structure = Structure(
             name=name,
-            structure_type=StructureType(template),
+            structure_type=chosen_type or StructureType(template),
             products=sorted({leg.contract.product for leg in legs}),
             legs=legs,
             status=StructureStatus.SHELL,

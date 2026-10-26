@@ -63,6 +63,7 @@ _ROUTES = {
     "/var-scenario": ("var_tab", "var_scenario_layout"),
     "/trade-analyzer": ("curve_tab", "trade_analyzer_layout"),
     "/curve-compare": ("curve_compare_tab", "curve_compare_layout"),
+    "/seasonality": ("seasonality_tab", "seasonality_layout"),
     "/oi-volume-atr": ("oi_tab", "oi_layout"),
     "/churn": ("churn_tab", "churn_layout"),
     "/archive": ("archive_tab", "archive_layout"),

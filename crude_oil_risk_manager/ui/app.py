@@ -38,6 +38,7 @@ from core.churn_data import ChurnStore  # noqa: E402
 from core.churn_service import ChurnService  # noqa: E402
 from core.oi_data import OiStore  # noqa: E402
 from core.oi_service import OiService  # noqa: E402
+from core.seasonality import SeasonalityService  # noqa: E402
 from core.curve_settings import migrate_alert_default  # noqa: E402
 from core.journal_service import JournalService  # noqa: E402
 from core.journal_snapshot import MarketSnapshotter, intraday_price_path, structure_price_path  # noqa: E402
@@ -58,6 +59,7 @@ from ui.callbacks.curve_callbacks import register_curve_callbacks  # noqa: E402
 from ui.callbacks.curve_compare_callbacks import register_curve_compare_callbacks  # noqa: E402
 from ui.callbacks.oi_callbacks import register_oi_callbacks  # noqa: E402
 from ui.callbacks.churn_callbacks import register_churn_callbacks  # noqa: E402
+from ui.callbacks.seasonality_callbacks import register_seasonality_callbacks  # noqa: E402
 from ui.callbacks.archive_callbacks import register_archive_callbacks  # noqa: E402
 from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
 from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
@@ -144,6 +146,10 @@ container.oi_service = OiService(
     repository, qh_api, _oi_store,
     alert_manager=alert_manager, atr_store=AtrStore(_resolve_path(settings.ATR_DATA_DIR)),
 )
+
+
+# Seasonality page: settlements of earlier years against today, live prices from Curve Compare.
+container.seasonality = SeasonalityService(_oi_store, compare=lambda: container.curve_compare)
 
 
 def _atr_frame(product: str):
@@ -298,6 +304,7 @@ register_curve_callbacks(app)
 register_curve_compare_callbacks(app)
 register_oi_callbacks(app)
 register_churn_callbacks(app)
+register_seasonality_callbacks(app)
 register_archive_callbacks(app)
 
 

@@ -10,12 +10,48 @@ from core.models.leg import Leg
 
 
 class StructureType(str, Enum):
-    """The shape of a structure's legs."""
+    """What the trader calls the structure. Chosen on the builder's Details step, so it can differ from the legs it is
+    built from (a d-fly traded as two flies is stored as two 3-leg structures but is a DFLY)."""
 
     OUTRIGHT = "outright"
     SPREAD = "spread"
     FLY = "fly"
+    DFLY = "dfly"
+    OUTRIGHTBOX = "outrightbox"
+    SPREADBOX = "spreadbox"
+    FLYBOX = "flybox"
+    DFLYBOX = "dflybox"
+    OUTRIGHTDIFF = "outrightdiff"
+    SPREADDIFF = "spreaddiff"
+    FLYDIFF = "flydiff"
+    DFLYDIFF = "dflydiff"
     CUSTOM = "custom"
+
+    @property
+    def label(self) -> str:
+        """Display text: "Dfly", "Spread box", "Fly diff"."""
+        text = self.value
+        for suffix in ("box", "diff"):
+            if text.endswith(suffix) and text != suffix:
+                return f"{text[:-len(suffix)].capitalize()} {suffix}"
+        return text.capitalize()
+
+
+# The types offered on the builder's Details step (Custom is only the Custom template's own default).
+CHOOSABLE_STRUCTURE_TYPES = [t for t in StructureType if t is not StructureType.CUSTOM]
+
+
+def parse_structure_type(text: str | None) -> StructureType | None:
+    """A typed or selected structure type -> StructureType ("Spread Box", "d-fly" and "SPREADBOX" all work); None if blank.
+
+    Raises ValueError listing the valid names when the text is not one of them."""
+    cleaned = "".join(ch for ch in (text or "").lower() if ch.isalnum())
+    if not cleaned:
+        return None
+    for kind in StructureType:
+        if kind.value == cleaned:
+            return kind
+    raise ValueError(f"Unknown structure type {text!r}; use one of: {', '.join(t.value for t in CHOOSABLE_STRUCTURE_TYPES)}.")
 
 
 class StructureStatus(str, Enum):

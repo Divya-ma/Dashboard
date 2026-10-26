@@ -366,6 +366,38 @@ class Repository:
                 {"name": name, "last_modified_at": now, "structure_id": structure_id},
             )
 
+    def update_structure_fields(
+        self, structure_id: str, name: str | None = None, structure_type: StructureType | None = None, notes: str | None = None,
+        products: list[str] | None = None, audit_note: str | None = None,
+    ) -> None:
+        """Change a structure's name, type, notes and/or products (None leaves a field alone) and append a timestamped
+        audit line to its notes. Legs, trades and status are not touched."""
+        now = _utcnow_iso()
+        with self._engine.begin() as conn:
+            current = conn.execute(
+                text("SELECT notes FROM structures WHERE structure_id = :structure_id"), {"structure_id": structure_id}
+            ).mappings().first()
+            if current is None:
+                raise KeyError(structure_id)
+            new_notes = (current["notes"] or "") if notes is None else notes
+            if audit_note:
+                new_notes += f"\n[{now}] {audit_note}"
+            conn.execute(
+                text(
+                    """
+                    UPDATE structures
+                    SET name = COALESCE(:name, name), structure_type = COALESCE(:structure_type, structure_type),
+                        products = COALESCE(:products, products), notes = :notes, last_modified_at = :last_modified_at
+                    WHERE structure_id = :structure_id
+                    """
+                ),
+                {
+                    "name": name, "structure_type": structure_type.value if structure_type else None,
+                    "products": json.dumps(products) if products is not None else None, "notes": new_notes,
+                    "last_modified_at": now, "structure_id": structure_id,
+                },
+            )
+
     def update_structure_status(
         self,
         structure_id: str,
@@ -541,6 +573,27 @@ class Repository:
         core.trade_entry.recompute_structure_from_trades — this only removes the row."""
         with self._engine.begin() as conn:
             conn.execute(text("DELETE FROM trades WHERE trade_id = :trade_id"), {"trade_id": trade_id})
+
+    def update_trade_fields(self, trade: Trade) -> None:
+        """Overwrite the editable figures of a stored trade (the Archive editor): time, price, lots, direction, realized P&L,
+        stop, target, cost and notes. Its id, structure, leg and event type never change."""
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE trades
+                    SET lots = :lots, price = :price, direction = :direction, timestamp = :timestamp, realized_pnl = :realized_pnl,
+                        notes = :notes, stop_loss_price = :stop_loss_price, target_price = :target_price,
+                        transaction_cost = :transaction_cost
+                    WHERE trade_id = :trade_id
+                    """
+                ),
+                {
+                    "lots": trade.lots, "price": trade.price, "direction": trade.direction, "timestamp": trade.timestamp.isoformat(),
+                    "realized_pnl": trade.realized_pnl, "notes": trade.notes, "stop_loss_price": trade.stop_loss_price,
+                    "target_price": trade.target_price, "transaction_cost": trade.transaction_cost, "trade_id": trade.trade_id,
+                },
+            )
 
     def update_trade_realized_pnl(self, trade_id: str, realized_pnl: float | None, transaction_cost: float) -> None:
         """Update a trade's stored realized_pnl/transaction_cost after recomputing history

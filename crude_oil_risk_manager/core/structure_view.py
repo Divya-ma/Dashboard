@@ -92,7 +92,7 @@ def _products(structure: Structure) -> list[str]:
 
 
 def _type_label(structure: Structure) -> str:
-    return structure.structure_type.value.capitalize()
+    return structure.structure_type.label
 
 
 def _sort_rows(rows: list[dict], sort_by: str | None) -> list[dict]:
