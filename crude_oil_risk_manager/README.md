@@ -340,6 +340,22 @@ From one day's change in OI per contract: donors (OI fell, total D), receivers (
 each donor's rolled-out amount is its share of D × R, spread over receivers in proportion to their increases. What remains
 is exit (donor) or fresh OI (receiver). It is an estimate — exchange OI cannot say who rolled.
 
+### 5.10 Portfolio stop risk (`core/portfolio_risk.py`)
+
+How much the whole book could lose if its stops were hit, allowing for correlation: **risk = √( r · C · rᵀ )**.
+
+- **r** has one entry per open structure: the dollar loss if it goes from its entry price to its **stop** (the stop on its Home packet,
+  typed with the latest entry): `|entry − stop| × lots × multiplier`, read as stops are entered and alerted everywhere (for a buy the
+  stop is below the entry, for a sell above it). The entry is that of the lots still open (5.1). A stop already moved past the entry
+  risks nothing. A structure with **no stop** has no entry in r and is named on the card.
+- **C** is the Correlation page's *Portfolio positions* matrix (5.5): the correlation of each position's daily P&L changes **as held**
+  (a sold structure is flipped), averaged with the rolling window and lookback of Settings. Since C is of the positions' P&L and r is
+  a loss, r is always positive and a long against a correlated short *reduces* the risk.
+- Checks: all correlations 1 → the plain **sum of the stops**; all 0 → the root of the sum of squares; two offsetting positions → close
+  to their difference. A pair with too little shared price history is **assumed fully correlated (1)**, so the figure errs on the
+  cautious side (the card counts such pairs). A matrix that is not a valid correlation matrix is repaired as the VaR page does.
+- The matrix is kept until the book's legs, the stored settlements or the windows change; a stop or lots change only r.
+
 ---
 
 ## 6. The pages
@@ -356,6 +372,8 @@ Three clocks drive the app: a 10 s live-price poll, a 5 s portfolio refresh, a 1
 
 - **Realized bar:** *Total realized P&L (all time)* and *Today's realized P&L* (the realized P&L of exits dated today, UTC).
   A note appears when an account reset is active.
+- **Portfolio Stop Risk (correlated):** √(r·C·rᵀ) of the structures' stops (5.10), with the plain sum of the stops, how much correlation
+  takes off, the structures left out for having no stop, and any pairs assumed fully correlated.
 - **Cards:** *Unrealized P&L* (gross, with "net of TC" for the open lots' cost), *Open structures*, *Open legs*, *Net lots
   by product* (sold legs count negative), *Margin used* (usage is not tracked; the configured limit is shown),
   *Largest winner*, *Largest loser*.

@@ -107,13 +107,17 @@ def home_layout() -> html.Div:
         [
             dbc.Col(
                 _card("Largest Winner", "home-winner-card", COLORS["ACCENT_GREEN"], {"fontSize": "18px"}),
-                md=4, className="mb-3",
+                md=6, xl=3, className="mb-3",
             ),
             dbc.Col(
                 _card("Largest Loser", "home-loser-card", COLORS["ACCENT_RED"], {"fontSize": "18px"}),
-                md=4, className="mb-3",
+                md=6, xl=3, className="mb-3",
             ),
-            dbc.Col(html.Div(id="home-stale-banner", style={"display": "none"}), md=4, className="mb-3"),
+            dbc.Col(
+                _card("Portfolio Stop Risk (correlated)", "home-card-stop-risk", COLORS["ACCENT_YELLOW"]),
+                md=6, xl=3, className="mb-3",
+            ),
+            dbc.Col(html.Div(id="home-stale-banner", style={"display": "none"}), md=6, xl=3, className="mb-3"),
         ]
     )
 

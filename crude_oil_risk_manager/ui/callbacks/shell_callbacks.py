@@ -19,6 +19,7 @@ from adapters.base import APIError, AuthenticationError, SymbolTranslator
 from config.settings import settings
 from core.models import AlertLevel, StructureStatus, TradeEventType
 from core.packets import RiskCache, build_packets
+from core.portfolio_risk import PortfolioRisk
 from core.pnl import (
     apply_pnl_reset_baseline,
     build_pnl_record,
@@ -26,7 +27,7 @@ from core.pnl import (
     calculate_todays_pnl,
     calculate_todays_realized_pnl,
 )
-from core.user_settings import KEY_API_TOKEN, KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE, KEY_PNL_STOP
+from core.user_settings import KEY_API_TOKEN, KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE, KEY_PNL_STOP, correlation_windows
 from ui.container import NO_UPDATE_LABEL, container
 from ui.layouts.placeholder import (
     archive_layout,
@@ -287,6 +288,22 @@ _risk_cache = RiskCache(
 )
 
 
+_portfolio_risk = PortfolioRisk(
+    lambda: container.data_loader,
+    lambda: container.settlements.version if container.settlements is not None else None,
+)
+
+
+def _stop_risk(structures, trades) -> dict | None:
+    """The whole book's correlation-adjusted stop risk for Home (None if it cannot be worked out)."""
+    try:
+        rolling, lookback = correlation_windows(container.repository)
+        return _portfolio_risk.compute(structures, trades, rolling, lookback).to_dict()
+    except Exception:  # noqa: BLE001 - Home still shows everything else
+        logger.exception("Could not calculate the portfolio stop risk")
+        return None
+
+
 def _add_structure_details(summary: dict, structures, stale_symbols: list[str]) -> None:
     """Add display details (name, products, status, days held) and the stale/missing symbols in use."""
     for structure in structures:
@@ -346,6 +363,7 @@ def refresh_portfolio_pnl(n_intervals, live_prices):
     summary["todays_realized_pnl"] = calculate_todays_realized_pnl(all_trades)
     _add_structure_details(summary, structures, stale)
     summary["packets"] = build_packets(structures, summary["per_structure"], prices, _risk_cache, trades)
+    summary["stop_risk"] = _stop_risk(structures, trades)
     summary["todays_pnl"] = _todays_pnl(structures, trades, prices, stale, summary)
     summary["calculated_at"] = summary["calculated_at"].isoformat()
     summary["has_missing_prices"] = bool(summary["missing_price_symbols"])

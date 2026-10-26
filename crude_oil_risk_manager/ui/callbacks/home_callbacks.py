@@ -145,6 +145,36 @@ def update_home_metrics(portfolio_pnl):
     )
 
 
+def update_stop_risk_card(portfolio_pnl):
+    """The whole book's stop risk, root of r·C·rᵀ (core.portfolio_risk), with the sum of the stops and what to be aware of."""
+    if not portfolio_pnl:
+        return "—"
+    info = portfolio_pnl.get("stop_risk")
+    if info is None:
+        return ["—", html.Div("Could not be calculated; see the log.", style=_SMALL_TEXT)]
+    warning = {**_SMALL_TEXT, "color": COLORS["ACCENT_YELLOW"]}
+    if info["value"] is None:
+        text = "No open structures." if not info["open_structures"] else "Set a stop on a structure to see this."
+        notes = [html.Div(text, style=_SMALL_TEXT)]
+        if info["without_stop"]:
+            notes.append(html.Div(f"No stop on: {', '.join(info['without_stop'])}", style=warning))
+        return ["—", *notes]
+    lines = [html.Span(f"${info['value']:,.0f}")]
+    detail = f"{info['counted']} structure(s) · sum of the stops ${info['sum_of_stops']:,.0f}"
+    if info.get("diversification") is not None and info["counted"] > 1:
+        detail += f" · correlation takes off {info['diversification']:.0%}"
+    lines.append(html.Div(detail, style=_SMALL_TEXT))
+    if info["counted"] > 1:
+        lines.append(html.Div(f"{info['rolling']}d rolling correlation, averaged over {info['lookback']}d", style=_SMALL_TEXT))
+    if info["without_stop"]:
+        lines.append(html.Div(f"No stop, left out: {', '.join(info['without_stop'])}", style=warning))
+    if info["assumed_pairs"]:
+        lines.append(html.Div(f"{info['assumed_pairs']} pair(s) assumed fully correlated (not enough price history)", style=warning))
+    if info.get("error"):
+        lines.append(html.Div(info["error"], style=warning))
+    return lines
+
+
 _CELL = {"padding": "4px 8px", "textAlign": "right", "whiteSpace": "nowrap"}
 _HEAD = {**_CELL, "color": COLORS["TEXT_SECONDARY"], "fontSize": "11px", "textTransform": "uppercase", "fontWeight": "normal"}
 _LEG_COLUMNS = ["Contract", "Side", "Lots", "Entry", "Live", "Risk", "Unrealized"]
@@ -236,3 +266,8 @@ def register_home_callbacks(app) -> None:
         Output("home-structures-table", "children"),
         Input("store-portfolio-pnl", "data"),
     )(update_home_table)
+
+    app.callback(
+        Output("home-card-stop-risk", "children"),
+        Input("store-portfolio-pnl", "data"),
+    )(update_stop_risk_card)
