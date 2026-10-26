@@ -26,7 +26,7 @@ _SNAPSHOT_LABELS = {
 # (row key, header)
 TRADE_COLUMNS = [
     ("name", "Structure Name"), ("type", "Type"), ("legs_summary", "Legs"), ("entry_date", "Entry Date"), ("exit_date", "Exit Date"),
-    ("days_held", "Days Held"), ("entry_price", "Entry Price (pts)"), ("exit_price", "Exit Price (pts)"), ("lots", "Lots"),
+    ("days_held", "Days Held"), ("entry_price", "Entry Price (pts)"), ("exit_price", "Exit Price (pts)"), ("lots", "Lots"), ("open_lots", "Lots Still Open"),
     ("transaction_costs", "Transaction Cost ($)"), ("realized_pnl", "Realized PnL ($, net of TC)"), ("result", "Result"),
     ("rr", "Risk : Reward"), ("ideas_text", "Trade Ideas"), ("payup_entry", "Payups in Entry"), ("payup_exit", "Payups in Exit"),
     ("conviction", "Conviction"), ("exit_reason", "Exit Reason"), ("mistakes_text", "Mistakes"), ("risk_usd", "Risk at Stop ($)"),

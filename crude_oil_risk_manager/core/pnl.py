@@ -9,6 +9,7 @@ standard library.
 import math
 from datetime import date, datetime, timezone
 
+from core.fifo import open_queue, queue_cost, queue_lots, take
 from core.positions import net_lots_by_product_and_symbol, signed_lots
 from core.models import Leg, PnLRecord, Structure, StructureStatus, Trade, TradeEventType
 
@@ -184,22 +185,33 @@ def _entered_lots_and_cost(trades: list[Trade]) -> tuple[float, float]:
 
 
 def entry_cost_for_lots(trades: list[Trade], lots: float) -> float:
-    """The entry/add transaction cost that belongs to `lots` of the structure: the average entry cost per entered lot x lots.
+    """The entry/add transaction cost that belongs to the next `lots` the structure gives up: those of the EARLIEST entry lots
+    still open (first in, first out, core.fifo), at their own entry's cost per lot.
 
-    Exiting (or dissolving) only part of a position takes only this share of the entry cost with it; the rest stays with
-    the lots that remain."""
-    entered, cost = _entered_lots_and_cost(trades)
-    return cost * min(max(lots, 0.0) / entered, 1.0) if entered > 0 else 0.0
+    Exiting (or dissolving) only part of a position takes only this share of the entry cost with it; the rest stays with the
+    lots that remain. A history that cannot be matched lot by lot (a per-leg exit) uses the average entry cost per entered lot."""
+    queue = open_queue(trades)
+    if queue is None:
+        entered, cost = _entered_lots_and_cost(trades)
+        return cost * min(max(lots, 0.0) / entered, 1.0) if entered > 0 else 0.0
+    taken, _left, _short = take(queue, max(lots, 0.0))
+    return queue_cost(taken)
 
 
 def split_transaction_costs(trades: list[Trade], open_lots: float) -> tuple[float, float]:
     """(realized_cost, open_cost): the transaction cost of what has been exited, and of the `open_lots` still held.
 
-    open_cost is the entry cost of the lots still open (average per entered lot x open_lots); realized_cost is every exit
-    cost plus the entry cost of the lots that have been exited. Their sum is always the structure's total cost, so a partial
-    exit charges only its own lots, and the rest stays with the remaining lots until they are exited too."""
+    open_cost is the entry cost of the lots still open (the entry lots no exit has taken yet, first in, first out; the average
+    per entered lot when the history cannot be matched); realized_cost is every exit cost plus the entry cost of the lots that
+    have been exited. Their sum is always the structure's total cost, so a partial exit charges only its own lots, and the rest
+    stays with the remaining lots until they are exited too."""
     total = calculate_structure_transaction_costs(trades)
-    open_cost = entry_cost_for_lots(trades, open_lots)
+    queue = open_queue(trades)
+    if queue is not None and abs(queue_lots(queue) - open_lots) <= 1e-6:
+        open_cost = queue_cost(queue)
+    else:
+        entered, cost = _entered_lots_and_cost(trades)
+        open_cost = cost * min(max(open_lots, 0.0) / entered, 1.0) if entered > 0 else 0.0
     return total - open_cost, open_cost
 
 

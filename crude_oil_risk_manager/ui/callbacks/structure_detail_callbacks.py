@@ -15,6 +15,7 @@ import logging
 from dash import ALL, MATCH, Input, Output, State, callback_context, html, no_update
 from dash.exceptions import PreventUpdate
 
+from core.fifo import open_queue
 from core.models import StructureStatus, TradeEventType
 from core.pnl import entry_cost_for_lots
 from core.user_settings import KEY_REQUIRE_STOP_TARGET
@@ -95,22 +96,24 @@ def _leg_payups(structure, values) -> dict:
     return {leg.contract.symbol: v for leg, v in zip(structure.legs, values or []) if v not in (None, "")}
 
 
-def _journal_entry(structure_id, ideas, payups, leg_payups, first_entry: bool, conviction=None) -> None:
-    """After a saved entry: remember the ideas and payups, and take the market snapshot of the first entry (background)."""
+def _journal_entry(structure_id, ideas, payups, leg_payups, first_entry: bool, conviction=None, trade_id=None) -> None:
+    """After a saved entry: remember the ideas and payups, and take the market snapshot of this entry (background). The first
+    entry's is also THE entry snapshot; every entry's is kept under its trade, which the Archive row of an exit that took lots
+    from it (first in, first out) reads."""
     journal = container.journal
     if journal is None:
         return
     try:
         structure = container.repository.get_structure(structure_id)
         journal.add_entry_inputs(structure_id, ideas, payups, _leg_payups(structure, leg_payups), conviction)
-        if first_entry:
-            journal.record(structure, "entry")
+        journal.record(structure, "entry", trade_id=trade_id, set_legacy=first_entry)
     except Exception:  # noqa: BLE001 - the journal never blocks a trade
         logger.exception("Journal update failed after entry for %s", structure_id)
 
 
-def _journal_exit(structure_id, payups=None, leg_payups=None, exit_reason=None) -> None:
-    """After a saved exit: remember the payups and take the market snapshot of the exit (the last exit is the one kept)."""
+def _journal_exit(structure_id, payups=None, leg_payups=None, exit_reason=None, trade_id=None) -> None:
+    """After a saved exit: remember the payups and take the market snapshot of the exit (the last exit is THE exit snapshot;
+    every exit's is also kept under its trade, for its own Archive row)."""
     journal = container.journal
     if journal is None:
         return
@@ -118,7 +121,7 @@ def _journal_exit(structure_id, payups=None, leg_payups=None, exit_reason=None) 
         structure = container.repository.get_structure(structure_id)
         if payups not in (None, "") or any(v not in (None, "") for v in leg_payups or []) or exit_reason:
             journal.add_exit_payups(structure_id, payups, _leg_payups(structure, leg_payups), exit_reason)
-        journal.record(structure, "exit", overwrite=True)
+        journal.record(structure, "exit", overwrite=True, trade_id=trade_id)
     except Exception:  # noqa: BLE001
         logger.exception("Journal update failed after exit for %s", structure_id)
 
@@ -245,10 +248,13 @@ def preview_exit_pnl(exit_price, lots, structure_id):
     entry = structure_entry_price(structure) if structure else None
     if entry is None:
         return ""
-    try:
-        pnl = structure_pnl(structure, entry, exit_price, lots)
-    except ValueError:
-        return ""
+    try:  # first in, first out: the lots exited come from the earliest entries
+        pnl = exit_structure(structure, exit_price, lots, None, open_entries=open_queue(container.repository.get_trades_for_structure(structure_id))).realized_pnl
+    except (TradeError, ValueError):
+        try:
+            pnl = structure_pnl(structure, entry, exit_price, lots)
+        except ValueError:
+            return ""
     return [f"Realized PnL at {exit_price:g}: ", pnl_span(pnl)]
 
 
@@ -281,7 +287,7 @@ def confirm_trade_entry(
         if structure.status != result.status:
             repository.update_structure_status(structure_id, result.status)
         repository.save_trade(result.trade)
-        _journal_entry(structure_id, ideas, payups, leg_payups, first_entry=result.trade.event_type == TradeEventType.TRADE, conviction=conviction)
+        _journal_entry(structure_id, ideas, payups, leg_payups, first_entry=result.trade.event_type == TradeEventType.TRADE, conviction=conviction, trade_id=result.trade.trade_id)
     except TradeError as exc:
         return (no_update, no_update, *_toast(exc.errors, ok=False, header="Trade not entered"))
     except Exception:  # noqa: BLE001
@@ -303,12 +309,13 @@ def open_exit_confirmation(n_clicks, exit_price, lots, structure_id):
     if not n_clicks:
         raise PreventUpdate
     structure = _load(structure_id)
+    trades = container.repository.get_trades_for_structure(structure_id)
     try:
-        result = exit_structure(structure, exit_price, lots, None)
+        result = exit_structure(structure, exit_price, lots, None, open_entries=open_queue(trades))
     except TradeError as exc:
         body = [html.Div(f"⛔ {message}", style={"color": COLORS["ACCENT_RED"]}) for message in exc.errors]
         return True, body, True
-    entry_tc = entry_cost_for_lots(container.repository.get_trades_for_structure(structure_id), lots)  # only the lots being exited
+    entry_tc = entry_cost_for_lots(trades, lots)  # only the lots being exited: the earliest entry lots still open
     total_tc = entry_tc + result.trade.transaction_cost
     net_pnl = result.realized_pnl - total_tc
     question = (
@@ -341,14 +348,15 @@ def execute_full_exit(
         raise PreventUpdate
     repository = container.repository
     structure = _load(structure_id)
-    prior_tc = entry_cost_for_lots(repository.get_trades_for_structure(structure_id), lots or 0)  # entry cost of the exited lots only
+    trades = repository.get_trades_for_structure(structure_id)
+    prior_tc = entry_cost_for_lots(trades, lots or 0)  # entry cost of the exited lots only: the earliest entry lots still open
     try:
-        result = exit_structure(structure, exit_price, lots, notes)
+        result = exit_structure(structure, exit_price, lots, notes, open_entries=open_queue(trades))
         repository.update_structure_legs(structure_id, result.legs, result.audit_note)
         repository.save_trade(result.trade)
         if result.closed:
             repository.update_structure_status(structure_id, StructureStatus.CLOSED, close_trigger="manual")
-        _journal_exit(structure_id, payups, leg_payups, exit_reason)
+        _journal_exit(structure_id, payups, leg_payups, exit_reason, trade_id=result.trade.trade_id)
     except TradeError as exc:
         return (no_update, no_update, *_toast(exc.errors, ok=False, header="Exit not executed"), False)
     except Exception:  # noqa: BLE001

@@ -234,7 +234,15 @@ Downloads are chunked so an interrupted run resumes where it stopped; a failed r
 ### 5.1 P&L (`core/pnl.py`)
 
 - **Leg P&L** = `(price − entry) × direction × ratio × lots × multiplier`, `direction` +1 for a buy, −1 for a sell.
-- **Average entry** after an add = `(lots₀·p₀ + lots₁·p₁) / (lots₀ + lots₁)`.
+- **Average entry** after an add = `(lots₀·p₀ + lots₁·p₁) / (lots₀ + lots₁)`: the entry price of the whole open position.
+- **First in, first out (`core/fifo.py`).** An exit takes its lots from the **earliest entry lots still open**, each at its own entry
+  price: the realized P&L of an exit is the sum over those lots of `(exit − that entry's price) × lots × multiplier`. The lots left
+  open then carry the **entry price of the lots not yet taken** (the legs' entry price is moved to it), so unrealized P&L, the
+  next exit and the entry price shown on the Structures page all follow. Example: 3 lots bought at 0.50 and 2 at 0.60; exiting 4 at
+  0.80 realizes 3×0.30 + 1×0.20 = 1,100 (not 4 × (0.80 − 0.54) = 1,040) and the 1 lot left is held at 0.60. With one entry price
+  FIFO and an average are the same number, and realized + unrealized is the same either way; FIFO only changes how much of it is
+  already realized. If the legs do not match the entry trades (real per-leg fills typed at entry, a hand-corrected entry price),
+  or a per-leg exit was used, the engine keeps the older average-cost figure for that structure.
 - **Structure price (as quoted)** = `sign(first ratio) × Σ ratio × leg price`. This reproduces the quoted spread/fly from
   its legs. A structure is entered at one structure price and one lot count; leg entry prices are allocated so the per-leg
   engine reproduces the structure P&L exactly (every leg but the first anchored at its live price, the first absorbing the
@@ -249,10 +257,11 @@ Downloads are chunked so an interrupted run resumes where it stopped; a failed r
 Every trade stores its own cost: entry or add = Σ over legs of `cost per lot × lots`; an exit is charged on the exited
 lots; a dissolve is charged **nothing** (see 6.3).
 
-Costs are attributed **by lots**, so a partial exit or dissolve only takes its own lots' share:
+Costs are attributed **by lots, first in, first out**, so a partial exit or dissolve only takes the entry cost of the lots it takes:
 
-- *entry cost per entered lot* = (entry + add costs) ÷ (entered lots);
-- *entry cost of N lots* = N × that average;
+- *entry cost per lot* of an entry = that entry's cost ÷ its lots;
+- *entry cost of N lots* = the cost of the N earliest entry lots still open, each at its own entry's cost per lot (a history that
+  cannot be matched lot by lot uses the average per entered lot);
 - **realized cost** = all exit costs + the entry cost of the lots already exited; **open cost** = the entry cost of the lots
   still open. They always add up to the structure's whole cost.
 
@@ -622,6 +631,18 @@ start-from contract (4), oscillation days (5). Candles refresh every 10 minutes 
 
 ### 6.11 Archive and the trade journal
 
+**Archive → Trades: one row per exit.** An exit of some of a structure's lots is in the Archive as soon as it is made (the rest
+stays open on the Structures page and in *Lots Still Open*); exiting the remainder adds a second row. A structure exited in two
+steps is two rows; its first row keeps the structure's id, later ones are `<id>#2`, `#3`. **Each exit takes its lots from the
+earliest entries first (first in, first out, `core/fifo.py`)**, which gives that row: its *entry price* (the lots-weighted price
+of the entries it took lots from), *entry date*, the *entry transaction cost of exactly those lots*, the stops and targets typed on
+those entries (risk:reward, risk at stop, R) and the market snapshot taken at that entry. Example: 3 lots bought Monday at 0.50 and 2
+bought Tuesday at 0.60; an exit of 4 lots is entry 0.525, Monday; the exit of the last lot is entry 0.60, Tuesday. The row's realized
+PnL is the figure stored on the exit trade (first in, first out as well: see 5.1; what Home uses, and what the editor corrects), net
+of the exit's cost and those entry costs, so a structure's rows always add up to its total. Every entry and every exit now has its own market snapshot (kept by trade); *Fill market data for old trades* fills the
+ones that are missing. Structures with a per-leg exit keep one row once closed. *Delete selected* removes a structure with all its
+exit rows and only once it is closed.
+
 **Archive → Trades.** Closed structures with filters (closed between, type, symbol contains, winners/losers) and summary cards
 (trades, winners, losers, win rate, total / average / best / worst P&L, all **net of transaction costs**). Columns: name, type,
 legs, entry and exit date, days held, entry and exit price, lots, transaction cost, realized P&L, result, then the journal
@@ -908,4 +929,8 @@ temp-file-and-replace helpers.
 - With few archived trades the journal analysis can only point to where to look; groups under 15 trades are marked "low" and
   the winners-vs-losers table is labelled a pointer below 100 trades.
 - Churn candles of d-flies are derived close to close; targets are therefore slightly harder to hit than on a real instrument.
+- First in, first out needs each entry's quoted structure price. A structure with real per-leg fills typed at entry, a hand-corrected
+  entry price, or a per-leg exit keeps the average-cost figure. On the first start after the move to FIFO, the stored exit P&L and the
+  entry price of lots still open are re-allocated once (`core/fifo_migration.py`, one audit line per structure); a structure with a P&L
+  typed in the Archive editor is left exactly as it is. A structure's total P&L never changes, only the realized / unrealized split.
 - Single-user: there is no per-user data; the optional Basic Auth login protects the whole app.

@@ -33,6 +33,7 @@ from core.curve_history import CurveHistoryStore  # noqa: E402
 from core.curve_service import CurveService  # noqa: E402
 from core.curve_store import PrevSettlementStore, SnapshotStore  # noqa: E402
 from core.excel_correlation import ExcelCorrelationStore  # noqa: E402
+from core.fifo_migration import migrate_to_fifo_once  # noqa: E402
 from core.atr_data import AtrStore  # noqa: E402
 from core.churn_data import ChurnStore  # noqa: E402
 from core.churn_service import ChurnService  # noqa: E402
@@ -95,6 +96,10 @@ _startup_time = datetime.now(timezone.utc)
 
 repository = Repository(_resolve_path(settings.DB_PATH))
 repository.initialize_db()
+try:  # once: stored exit P&L and the entry price of lots left open move from average cost to first in, first out
+    migrate_to_fifo_once(repository)
+except Exception:  # noqa: BLE001 - the stored figures simply stay as they are
+    logger.exception("First-in-first-out migration failed; stored figures unchanged")
 
 
 def _is_token_configured() -> bool:

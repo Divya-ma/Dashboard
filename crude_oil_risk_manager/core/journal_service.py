@@ -13,11 +13,16 @@ from core.journal import (
     add_payups, clean_conviction, clean_exit_reason, clean_ideas, clean_mistakes, entry_and_exit_times, excursion, parse_idea_list,
     set_payups, with_defaults,
 )
-from core.models import Structure, StructureStatus
+from core.models import Structure, StructureStatus, TradeEventType
 from core.journal import EXIT_REASONS, MISTAKES
 from core.user_settings import KEY_EXIT_REASONS, KEY_MISTAKES, KEY_TRADE_IDEAS
 
 logger = logging.getLogger(__name__)
+
+PER_TRADE_KEY = {"entry": "entries", "exit": "exits"}  # journal["entries"][trade id] / journal["exits"][trade id]
+_ENTRY_TYPES = (TradeEventType.TRADE, TradeEventType.ADD)
+_EXIT_TYPES = (TradeEventType.STRUCTURE_PARTIAL_EXIT, TradeEventType.FULL_EXIT, TradeEventType.DISSOLVE, TradeEventType.PARTIAL_EXIT)
+_OPEN_STATUSES = (StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED)
 
 
 class JournalService:
@@ -168,7 +173,7 @@ class JournalService:
 
     # -- snapshots --------------------------------------------------------
 
-    def _take(self, structure: Structure, kind: str, when: datetime, overwrite: bool) -> None:
+    def _take(self, structure: Structure, kind: str, when: datetime, overwrite: bool, trade_id: str | None = None, set_legacy: bool = True) -> None:
         try:
             snap = self._snapshotter.snapshot(structure, when)
         except Exception:  # noqa: BLE001
@@ -176,40 +181,71 @@ class JournalService:
             return
 
         def change(journal):
-            if journal.get(kind) is None or overwrite:
+            if set_legacy and (journal.get(kind) is None or overwrite):
                 journal[kind] = snap
+            if trade_id:  # the snapshot of THIS entry / exit, which an Archive row of one exit reads
+                journal[PER_TRADE_KEY[kind]][trade_id] = snap
             return journal
 
         self._update(structure.structure_id, change)
         if kind == "exit":
             self.record_excursion(self._repository.get_structure(structure.structure_id) or structure)
 
-    def record(self, structure: Structure, kind: str, when: datetime | None = None, overwrite: bool = False) -> threading.Thread | None:
-        """Take the market snapshot of an "entry" (kept once, at the first entry) or an "exit" (replaced by each later exit)."""
+    def record(
+        self, structure: Structure, kind: str, when: datetime | None = None, overwrite: bool = False, trade_id: str | None = None,
+        set_legacy: bool = True,
+    ) -> threading.Thread | None:
+        """Take the market snapshot of an "entry" (the first one is kept as THE entry) or an "exit" (the latest one is kept as
+        THE exit; `set_legacy=False` leaves them alone, for an add). With `trade_id` it is also kept for that one trade, so every
+        entry and every exit has its own."""
         when = when or self._clock()
         if self._snapshotter is None:
             return None
         if not self._background:
-            self._take(structure, kind, when, overwrite)
+            self._take(structure, kind, when, overwrite, trade_id, set_legacy)
             return None
-        thread = threading.Thread(target=self._take, args=(structure, kind, when, overwrite), name=f"journal-{kind}", daemon=True)
+        thread = threading.Thread(target=self._take, args=(structure, kind, when, overwrite, trade_id, set_legacy), name=f"journal-{kind}", daemon=True)
         self.threads = [t for t in self.threads if t.is_alive()] + [thread]
         thread.start()
         return thread
 
-    def backfill(self, limit: int | None = None) -> dict:
-        """Fill the missing entry / exit snapshots of closed structures from their trade times. Returns counts.
+    def _adopt_legacy_snapshots(self, structure_id: str, trades) -> None:
+        """The first entry's snapshot (`entry`) and the last exit's (`exit`) were kept before every trade had its own: file them
+        under their trade so they need no new API request."""
+        entries = sorted((t for t in trades if t.event_type in _ENTRY_TYPES), key=lambda t: t.timestamp)
+        exits = sorted((t for t in trades if t.event_type in _EXIT_TYPES), key=lambda t: t.timestamp)
 
-        One structure costs two API requests, so `limit` caps a run; call again for the rest."""
+        def change(journal):
+            for kind, trade in (("entry", entries[0] if entries else None), ("exit", exits[-1] if exits else None)):
+                if trade is not None and journal.get(kind) is not None:
+                    journal[PER_TRADE_KEY[kind]].setdefault(trade.trade_id, journal[kind])
+            return journal
+
+        self._update(structure_id, change)
+
+    def backfill(self, limit: int | None = None) -> dict:
+        """Fill the missing snapshots of every entry and exit of the closed and the partly exited structures, from the trade
+        times. Returns counts.
+
+        A trade costs three API requests, so `limit` (structures per run) caps a run; call again for the rest."""
         done = missing = 0
-        journals = self._repository.get_journals()
-        for structure in self._repository.get_all_structures(status_filter=[StructureStatus.CLOSED]):
-            journal = with_defaults(journals.get(structure.structure_id))
-            first, last = entry_and_exit_times(self._repository.get_trades_for_structure(structure.structure_id))
-            wanted = [(k, t) for k, t in (("entry", first), ("exit", last)) if t is not None and journal.get(k) is None]
+        for structure in self._repository.get_all_structures(status_filter=[StructureStatus.CLOSED, *_OPEN_STATUSES]):
+            trades = self._repository.get_trades_for_structure(structure.structure_id)
+            if not any(t.event_type in _EXIT_TYPES for t in trades):
+                continue  # nothing exited: not in the Archive
+            self._adopt_legacy_snapshots(structure.structure_id, trades)
+            journal = self.journal(structure.structure_id)
+            wanted = [
+                (("entry" if t.event_type in _ENTRY_TYPES else "exit"), t)
+                for t in sorted(trades, key=lambda t: t.timestamp)
+                if t.event_type in (*_ENTRY_TYPES, *_EXIT_TYPES) and t.trade_id not in journal[PER_TRADE_KEY["entry" if t.event_type in _ENTRY_TYPES else "exit"]]
+            ]
+            first, last = entry_and_exit_times(trades)
             excursion_done = journal.get("excursion") or {}
-            if not wanted and last is not None and (self._price_path is not None or self._intraday_path is not None) and (
-                not excursion_done or (excursion_done.get("intraday") is None and self.intraday_possible())
+            if (
+                not wanted and structure.status == StructureStatus.CLOSED and last is not None
+                and (self._price_path is not None or self._intraday_path is not None)
+                and (not excursion_done or (excursion_done.get("intraday") is None and self.intraday_possible()))
             ):
                 self.record_excursion(structure)  # daily needs no API; the intraday part is fetched only when requests are spare
             if not wanted:
@@ -217,7 +253,7 @@ class JournalService:
             missing += 1
             if limit is not None and done >= limit:
                 continue
-            for kind, moment in wanted:
-                self._take(structure, kind, moment, overwrite=False)
+            for kind, trade in wanted:
+                self._take(structure, kind, trade.timestamp, overwrite=False, trade_id=trade.trade_id)
             done += 1
         return {"filled": done, "left": max(missing - done, 0)}

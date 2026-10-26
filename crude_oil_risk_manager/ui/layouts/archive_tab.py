@@ -119,7 +119,7 @@ def build_table_rows(rows: list[dict]) -> list[dict]:
     """Scalar DataTable rows (the row `id` is what a click reports back)."""
     return [
         {
-            "id": row["structure_id"],
+            "id": row["id"],  # one row per exit: a structure exited in two goes in two rows
             "name": row["name"],
             "type": row["type"],
             "legs": row["legs_summary"],
@@ -129,6 +129,7 @@ def build_table_rows(rows: list[dict]) -> list[dict]:
             "entry_price": _or_dash(row["entry_price"], lambda v: round(v, 4)),
             "exit_price": _or_dash(row["exit_price"], lambda v: round(v, 4)),
             "lots": _or_dash(row["lots"], lambda v: f"{v:g}"),
+            "open_lots": f"{row['open_lots']:g}" if row.get("open_lots") else EMPTY,
             "transaction_costs": row["transaction_costs"],
             "realized_pnl": row["realized_pnl"],
             "result": row["result"],
@@ -182,6 +183,16 @@ def _when(snapshot) -> str:
     return (snapshot or {}).get("at", EMPTY)[:16].replace("T", " ") if snapshot else EMPTY
 
 
+def _exit_note(row: dict) -> list:
+    """Which exit of the structure this row is, and how its entry was matched (first in, first out)."""
+    if row.get("exits_of_structure", 1) <= 1 and not row.get("open_lots"):
+        return []
+    text = f"Exit {row['exit_number']} of {row['exits_of_structure']} of this structure: {row['lots']:g} lots, matched to the earliest entry lots (first in, first out)."
+    if row.get("open_lots"):
+        text += f" {row['open_lots']:g} lots are still open."
+    return [html.Div(text, style={**_MUTED, "marginBottom": "8px"})]
+
+
 def build_detail(row: dict | None) -> html.Div | None:
     """Expanded view of one closed structure: legs, prices, PnL, days held and (read-only) notes."""
     if row is None:
@@ -214,6 +225,7 @@ def build_detail(row: dict | None) -> html.Div | None:
     )
     parts = [
         html.H5(f"{row['name']} — {row['type']}", style=_HEADING),
+        *_exit_note(row),
         html.Div("Legs", style=_LABEL),
         legs_table,
         facts,
@@ -300,6 +312,7 @@ TABLE_COLUMNS = [
     {"id": "entry_price", "name": "Entry Price (pts)", "type": "any"},
     {"id": "exit_price", "name": "Exit Price (pts)", "type": "any"},
     {"id": "lots", "name": "Lots", "type": "any"},
+    {"id": "open_lots", "name": "Lots Still Open", "type": "any"},
     {
         "id": "transaction_costs", "name": "Transaction Cost ($)", "type": "numeric",
         "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, symbol=Symbol.yes, symbol_prefix="$"),

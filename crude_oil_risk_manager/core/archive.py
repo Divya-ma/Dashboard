@@ -1,14 +1,18 @@
-"""Archive rows, filters and summary statistics for closed structures (read-only).
+"""Archive rows, filters and summary statistics for exited trades (read-only).
 
-Nothing here touches the database: callers pass CLOSED structures and their trades.
-Realized PnL is the sum of the structure's saved exit trades (the value persisted at
-exit, never recomputed), net of every transaction cost booked on the structure
-(entry/add and exit) — see core.pnl.calculate_net_realized_pnl. Dates come from the
-trades (entry) and the structure's closed_at (exit); prices from core.structure_view.
+Nothing here touches the database: callers pass the structures that are CLOSED or have exited some of their lots, with their trades.
+
+ONE ROW PER EXIT. Exiting 2 of 5 lots puts a row in the Archive at once; exiting the other 3 adds a second row. Each exit takes its
+lots from the earliest entries first (core.fifo), and that match gives the row its entry price, entry date, entry cost, stops and
+targets (risk:reward) and entry snapshot. The row's realized PnL is the exit trade's saved figure (persisted at exit, never
+recomputed) net of the exit's own transaction cost and the entry cost of the lots it closed, so a structure's rows add up to
+core.pnl.calculate_net_realized_pnl of the whole structure. With per-leg exits, or a history that cannot be matched (no entry),
+a closed structure keeps the older single row for the whole structure.
 """
 
 from datetime import date, datetime
 
+from core.fifo import match_exits
 from core.journal import PRODUCT_LABELS, format_risk_reward, risk_reward, with_defaults
 from core.models import Structure, StructureStatus, Trade, TradeEventType
 from core.pnl import calculate_net_realized_pnl, calculate_structure_transaction_costs
@@ -91,62 +95,133 @@ def journal_columns(journal: dict | None, trades: list[Trade]) -> dict:
     return out
 
 
+def structure_id_of(row_id) -> str:
+    """The structure an Archive row belongs to (a structure's first exit row has its id; later ones are '<id>#2', '<id>#3' ...)."""
+    return str(row_id).split("#", 1)[0]
+
+
+def _row_id(structure_id: str, index: int) -> str:
+    return structure_id if index == 1 else f"{structure_id}#{index}"
+
+
+def _finish_row(row: dict, structure: Structure, extra: dict, rr: dict | None, lots: float | None, pnl: float) -> dict:
+    """The columns every kind of row shares: risk $, R, the curve edge of the entry's z-score, and the journal columns."""
+    multiplier = structure.legs[0].contract.multiplier if structure.legs else 1000.0
+    risk_usd = rr["risk"] * (lots or 0.0) * multiplier if rr and lots else None
+    z = extra.get("e_kink_z")
+    long_curve = bool(structure.legs) and ((structure.legs[0].direction == "buy") == (structure.legs[0].ratio > 0))
+    extra["kink_edge"] = None if z is None else (-z if long_curve else z)  # a long structure that was cheap (z < 0), or a short one that was rich
+    extra["risk_usd"] = risk_usd if risk_usd and risk_usd > 0 else None
+    extra["r_multiple"] = pnl / extra["risk_usd"] if extra["risk_usd"] else None
+    row.update(extra)
+    return row
+
+
+def _exit_row(structure: Structure, match, exits_in_total: int, journal: dict | None, last_exit_id: str, first_entry_id: str | None) -> dict:
+    """The row of ONE exit: its lots, the entry lots they closed (FIFO) and the snapshots of that entry and that exit."""
+    exit_trade, entry = match.exit, match.first_entry
+    closed = structure.status == StructureStatus.CLOSED
+    journal = with_defaults(journal)
+    entry_snapshot = journal["entries"].get(entry.trade_id) or (journal["entry"] if entry.trade_id == first_entry_id else None)
+    exit_snapshot = journal["exits"].get(exit_trade.trade_id) or (journal["exit"] if exit_trade.trade_id == last_exit_id else None)
+    view = {**journal, "entry": entry_snapshot, "exit": exit_snapshot, "excursion": journal["excursion"] if closed else None}
+    extra = journal_columns(view, match.entry_trades())
+    transaction_costs = exit_trade.transaction_cost + match.entry_cost
+    pnl = (exit_trade.realized_pnl or 0.0) - transaction_costs
+    entry_date, exit_date = entry.timestamp.date(), exit_trade.timestamp.date()
+    legs = _legs_detail(structure, match.lots)
+    row = {
+        "id": _row_id(structure.structure_id, match.index),
+        "structure_id": structure.structure_id,
+        "exit_trade_id": exit_trade.trade_id,
+        "exit_number": match.index,
+        "exits_of_structure": exits_in_total,
+        "open_lots": 0.0 if closed else (structure.legs[0].lots if structure.legs else 0.0),
+        "name": structure.name,
+        "type": structure.structure_type.label,
+        "legs_summary": _legs_summary(legs),
+        "legs": legs,
+        "symbols": [leg["symbol"] for leg in legs],
+        "entry_date": entry_date.isoformat(),
+        "exit_date": exit_date.isoformat(),
+        "days_held": (exit_date - entry_date).days,
+        "entry_price": match.entry_price,
+        "exit_price": exit_trade.price,
+        "lots": match.lots,
+        "realized_pnl": pnl,
+        "transaction_costs": transaction_costs,
+        "result": result_for(pnl),
+        "notes": structure.notes or "",
+        "products": list(structure.products),
+        "entry_at": entry.timestamp.isoformat(),
+        "exit_at": exit_trade.timestamp.isoformat(),
+    }
+    return _finish_row(row, structure, extra, extra["rr_detail"], match.lots, pnl)
+
+
+def _closed_structure_row(structure: Structure, trades: list[Trade], journals: dict[str, dict] | None) -> dict:
+    """The older row: one for a whole closed structure (per-leg exits, or trades that cannot be matched lot by lot)."""
+    entries = sorted((t for t in trades if t.event_type in _ENTRY_EVENTS), key=lambda t: t.timestamp)
+    exits = sorted((t for t in trades if t.event_type in _EXIT_EVENTS), key=lambda t: t.timestamp)
+    entry_date = _date_or_none(entries[0].timestamp if entries else None)
+    exit_date = _date_or_none(structure.closed_at or (exits[-1].timestamp if exits else None))
+    entered_lots = sum(t.lots for t in entries) if entries else None
+    pnl = calculate_net_realized_pnl(trades)
+    legs = _legs_detail(structure, entered_lots)
+    extra = journal_columns((journals or {}).get(structure.structure_id), trades)
+    exit_at = structure.closed_at or (exits[-1].timestamp if exits else None)
+    row = {
+        "id": structure.structure_id,
+        "structure_id": structure.structure_id,
+        "exit_trade_id": exits[-1].trade_id if exits else None,
+        "exit_number": 1,
+        "exits_of_structure": 1,
+        "open_lots": 0.0,
+        "name": structure.name,
+        "type": structure.structure_type.label,
+        "legs_summary": _legs_summary(legs),
+        "legs": legs,
+        "symbols": [leg["symbol"] for leg in legs],
+        "entry_date": entry_date.isoformat() if entry_date else None,
+        "exit_date": exit_date.isoformat() if exit_date else None,
+        "days_held": (exit_date - entry_date).days if entry_date and exit_date else None,
+        "entry_price": structure_entry_price(structure) if structure.legs else None,
+        "exit_price": structure_exit_price(structure, trades),
+        "lots": entered_lots,
+        "realized_pnl": pnl,
+        "transaction_costs": calculate_structure_transaction_costs(trades),
+        "result": result_for(pnl),
+        "notes": structure.notes or "",
+        "products": list(structure.products),
+        "entry_at": entries[0].timestamp.isoformat() if entries else None,
+        "exit_at": exit_at.isoformat() if exit_at else None,
+    }
+    return _finish_row(row, structure, extra, extra["rr_detail"], entered_lots, pnl)
+
+
 def build_archive_rows(
     structures: list[Structure], trades_by_structure: dict[str, list[Trade]], journals: dict[str, dict] | None = None,
 ) -> list[dict]:
-    """One row per closed structure, most recently closed first.
+    """One row per exit of the given structures, most recent exit first (see the module docstring).
 
-    Missing entry/exit dates (data anomalies) stay None; days_held is then None too.
-    A structure without legs still gets a row (legs shown as a dash). `journals` (by structure id) adds the trade-journal
-    columns (see journal_columns).
-    """
+    A structure that has not exited anything has no row. Missing dates (data anomalies) stay None. A closed structure whose
+    exits cannot be matched to entries (or that has none, or no trades at all) still gets its single older row. `journals`
+    (by structure id) adds the trade-journal columns (see journal_columns)."""
     rows = []
     for structure in structures:
         trades = trades_by_structure.get(structure.structure_id, [])
+        matches = match_exits(trades)
+        matched = [m for m in matches or [] if m.entries]
+        clean = bool(matches) and len(matched) == len(matches) and not any(m.unmatched for m in matches)
+        if not clean and structure.status == StructureStatus.CLOSED:
+            rows.append(_closed_structure_row(structure, trades, journals))
+            continue
         entries = sorted((t for t in trades if t.event_type in _ENTRY_EVENTS), key=lambda t: t.timestamp)
         exits = sorted((t for t in trades if t.event_type in _EXIT_EVENTS), key=lambda t: t.timestamp)
-        entry_date = _date_or_none(entries[0].timestamp if entries else None)
-        exit_date = _date_or_none(structure.closed_at or (exits[-1].timestamp if exits else None))
-        entered_lots = sum(t.lots for t in entries) if entries else None
-        pnl = calculate_net_realized_pnl(trades)
-        transaction_costs = calculate_structure_transaction_costs(trades)
-        legs = _legs_detail(structure, entered_lots)
-        extra = journal_columns((journals or {}).get(structure.structure_id), trades)
-        entry_at = entries[0].timestamp.isoformat() if entries else None
-        exit_at = (structure.closed_at or (exits[-1].timestamp if exits else None))
-        rr = extra["rr_detail"]
-        multiplier = structure.legs[0].contract.multiplier if structure.legs else 1000.0
-        risk_usd = rr["risk"] * (entered_lots or 0.0) * multiplier if rr and entered_lots else None
-        z = extra.get("e_kink_z")
-        long_curve = bool(structure.legs) and ((structure.legs[0].direction == "buy") == (structure.legs[0].ratio > 0))
-        extra["kink_edge"] = None if z is None else (-z if long_curve else z)  # a long structure that was cheap (z < 0), or a short one that was rich
-        extra["risk_usd"] = risk_usd if risk_usd and risk_usd > 0 else None
-        extra["r_multiple"] = pnl / extra["risk_usd"] if extra["risk_usd"] else None
-        rows.append(
-            {
-                "structure_id": structure.structure_id,
-                "name": structure.name,
-                "type": structure.structure_type.label,
-                "legs_summary": _legs_summary(legs),
-                "legs": legs,
-                "symbols": [leg["symbol"] for leg in legs],
-                "entry_date": entry_date.isoformat() if entry_date else None,
-                "exit_date": exit_date.isoformat() if exit_date else None,
-                "days_held": (exit_date - entry_date).days if entry_date and exit_date else None,
-                "entry_price": structure_entry_price(structure) if structure.legs else None,
-                "exit_price": structure_exit_price(structure, trades),
-                "lots": entered_lots,
-                "realized_pnl": pnl,
-                "transaction_costs": transaction_costs,
-                "result": result_for(pnl),
-                "notes": structure.notes or "",
-                "products": list(structure.products),
-                "entry_at": entry_at,
-                "exit_at": exit_at.isoformat() if exit_at else None,
-                **extra,
-            }
-        )
-    rows.sort(key=lambda r: r["exit_date"] or "", reverse=True)
+        journal = (journals or {}).get(structure.structure_id)
+        for match in matched:  # an open structure with an inconsistent history still shows the exits that can be matched
+            rows.append(_exit_row(structure, match, len(matches), journal, exits[-1].trade_id, entries[0].trade_id if entries else None))
+    rows.sort(key=lambda r: r["exit_date"] or "", reverse=True)  # stable: the exits of one day keep their order
     return rows
 
 

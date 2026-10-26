@@ -2,6 +2,8 @@
 
 Per structure, stored as one JSON document (repository table `trade_journal`):
 
+    entries / exits  the same snapshot for EVERY entry and exit trade, by trade id ({trade_id: snapshot}); an Archive row built
+                     from one exit (core.archive, FIFO) reads the snapshot of the entry it took lots from and of that exit
     entry / exit   the market when the trade was first entered / last exited (core.journal_snapshot):
                      prices   {"CO": .., "CL": .., "GO": ..}  last traded price of each product's front outright
                      move_day / move_min   Bullish | Bearish | Stalemate for the front outright of the structure's product,
@@ -170,7 +172,7 @@ def format_risk_reward(value: dict | None) -> str:
 
 def empty_journal() -> dict:
     return {
-        "entry": None, "exit": None, "ideas": [], "payups": {"entry": {"total": None, "legs": {}}, "exit": {"total": None, "legs": {}}},
+        "entry": None, "exit": None, "entries": {}, "exits": {}, "ideas": [], "payups": {"entry": {"total": None, "legs": {}}, "exit": {"total": None, "legs": {}}},
         "conviction": None, "exit_reason": None, "mistakes": [], "excursion": None,
     }
 

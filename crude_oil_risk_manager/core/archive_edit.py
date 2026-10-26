@@ -1,4 +1,4 @@
-"""Corrections to an archived (closed) trade: every archive column can be changed from where its value lives.
+"""Corrections to an archived trade (a closed structure, or one that has exited some lots): every archive column can be changed from where its value lives.
 
   Structure   name, structure type, notes                              -> the structure row
   Trades      time, price, lots, direction, cost, realized P&L, stop,  -> the trade rows; they drive entry / exit date, days held,
@@ -16,7 +16,7 @@ recompute_structure_from_trades, the same replay a deleted trade uses): the legs
 recalculated. A cost is never recalculated from a price; it follows the lots (scaled in proportion). A realized P&L or cost typed
 in the same save always wins over the recalculated one. With the replay off (or when only times, costs, P&L, stops or targets
 change) every figure is stored exactly as typed. Either way the structure
-stays closed: an edit that would leave lots open is refused. Every change writes one audit line to the structure's notes.
+keeps its state: an edit that would leave lots open in a closed trade (or close one that still has lots open) is refused. Every change writes one audit line to the structure's notes.
 """
 
 import math
@@ -281,10 +281,13 @@ def edit_trades(repository, structure_id: str, rows: list[dict], recalculate: bo
             replay = recompute_structure_from_trades(structure, list(final.values()))
         except TradeError as exc:
             raise ArchiveEditError([f"The trades do not replay: {error}" for error in exc.errors]) from exc
-        if replay.structure.status != StructureStatus.CLOSED:
+        was_closed = structure.status == StructureStatus.CLOSED
+        if (replay.structure.status == StructureStatus.CLOSED) != was_closed:
             raise ArchiveEditError([
                 "With these prices and lots the exits no longer close the whole position (some lots would stay open). "
-                "Make the exit lots add up to the entry lots, or switch the recalculation off."
+                "Make the exit lots add up to the entry lots, or switch the recalculation off." if was_closed else
+                "With these lots the exits would close the whole position, which is still open. Exit it from the Structures page "
+                "instead, or keep the exit lots below the entry lots."
             ])
         for trade_id, (pnl, _cost) in replay.exit_trade_updates.items():
             as_typed, original = final[trade_id], by_id[trade_id]
@@ -305,7 +308,7 @@ def edit_trades(repository, structure_id: str, rows: list[dict], recalculate: bo
     else:
         repository.update_structure_fields(structure_id, audit_note=audit)
     exits = [t for t in final.values() if t.event_type in EXIT_EVENTS]
-    if exits and any(by_id[t.trade_id].timestamp != t.timestamp for t in exits):
+    if exits and structure.status == StructureStatus.CLOSED and any(by_id[t.trade_id].timestamp != t.timestamp for t in exits):
         repository.set_structure_lifecycle(structure_id, StructureStatus.CLOSED, max(t.timestamp for t in exits), structure.close_trigger)
     return f"Saved {len(edited)} trade(s): " + "; ".join(changes) + "."
 

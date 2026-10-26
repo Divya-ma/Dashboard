@@ -31,6 +31,7 @@ import math
 from dataclasses import dataclass
 
 from core.dissolve import CLOSE_TRIGGER, dissolve_lots
+from core.fifo import EntrySlice, UNMATCHABLE_EVENTS, queue_price, reconciles, take, with_entry_price
 from core.exceptions import CrudeOilRiskError
 from core.models import Leg, Structure, StructureStatus, Trade, TradeEventType
 from core.pnl import calculate_average_entry_price, calculate_leg_realized_pnl, calculate_leg_unrealized_pnl
@@ -290,10 +291,16 @@ def enter_trade(
 # ----------------------------------------------------------------------
 
 
-def exit_structure(structure: Structure, price, lots, notes: str | None) -> ExitResult:
+def exit_structure(structure: Structure, price, lots, notes: str | None, open_entries: list[EntrySlice] | None = None) -> ExitResult:
     """Exit `lots` of the structure at one structure price: all of them closes it (FULL_EXIT), fewer is a
     STRUCTURE_PARTIAL_EXIT that takes `lots` off every leg and leaves the rest open (still a complete structure,
-    nothing naked). More than is open, or legs already at unequal lots (use the per-leg exit then), is refused."""
+    nothing naked). More than is open, or legs already at unequal lots (use the per-leg exit then), is refused.
+
+    FIRST IN, FIRST OUT. Given `open_entries` (core.fifo.open_queue: the entry lots still open, oldest first), the realized P&L is
+    that of the EARLIEST entry lots, each at its own entry price, and the lots left open take the entry price of the lots not yet
+    taken (the legs' entry price is moved to it), so a later exit and the unrealized P&L see the right entry price. Without
+    `open_entries`, or when they do not match the position the legs show (real per-leg fills typed at entry, a corrected entry
+    price), the older average-cost figure is used: the average entry price of the whole position."""
     errors = []
     if structure.status not in _OPEN_STATUSES:
         errors.append("Only an open structure can be exited.")
@@ -312,7 +319,13 @@ def exit_structure(structure: Structure, price, lots, notes: str | None) -> Exit
     if errors:
         raise TradeError(errors)
 
-    realized = structure_pnl(structure, entry_price, price, lots)
+    realized, left_price = None, None
+    if open_entries is not None and reconciles(structure.legs, open_entries):
+        taken, left, _short = take(open_entries, lots)
+        realized = sum(structure_pnl(structure, item.trade.price, price, item.lots) for item in taken)
+        left_price = queue_price(left)
+    if realized is None:
+        realized = structure_pnl(structure, entry_price, price, lots)
     exit_tc = structure_transaction_cost(structure, lots)
     remaining = open_lots - lots
     closes = remaining <= _LOT_TOLERANCE
@@ -329,11 +342,14 @@ def exit_structure(structure: Structure, price, lots, notes: str | None) -> Exit
     )
     remaining = 0.0 if closes else remaining
     legs = [leg.model_copy(update={"lots": remaining}) for leg in structure.legs]
+    if not closes and left_price is not None:
+        legs = with_entry_price(legs, left_price)
     kind = "full exit" if closes else "partial exit"
     return ExitResult(
         legs=legs, trade=trade, realized_pnl=realized,
         audit_note=f"{kind}: {lots:g} lots at {price:g}, realized {realized:+,.0f} gross"
-        + (f" (exit cost {exit_tc:,.0f})" if exit_tc else "") + ("" if closes else f"; {remaining:g} lots remain"),
+        + (f" (exit cost {exit_tc:,.0f})" if exit_tc else "")
+        + ("" if closes else f"; {remaining:g} lots remain" + (f" at an entry price of {left_price:g}" if left_price is not None else "")),
         closed=closes, remaining_lots=remaining,
     )
 
@@ -454,7 +470,7 @@ class RecomputeResult:
     audit_note: str
 
 
-def recompute_structure_from_trades(structure: Structure, trades: list[Trade]) -> RecomputeResult:
+def recompute_structure_from_trades(structure: Structure, trades: list[Trade], fifo: bool = True) -> RecomputeResult:
     """Rebuild leg state, status and every FULL_EXIT trade's realized_pnl from scratch.
 
     Used after deleting a trade: `trades` is the SURVIVING history (the deleted one already
@@ -464,6 +480,10 @@ def recompute_structure_from_trades(structure: Structure, trades: list[Trade]) -
     closed_at, and any surviving exit's realized PnL) lands exactly where it would be had
     the deleted trade never happened, instead of reversing one trade's math in place —
     which is much easier to get subtly wrong once average-price adds are involved.
+
+    The replay is first in, first out (`fifo=True`, see exit_structure): each exit's P&L is that of the earliest entry lots and the
+    lots left open carry the entry price of the lots not yet taken. `fifo=False` is the older average-cost replay (used to tell
+    which stored figures the engine itself produced, see core.fifo_migration); a per-leg exit anywhere also means average cost.
 
     TRADE, ADD, FULL_EXIT, STRUCTURE_PARTIAL_EXIT, DISSOLVE and PARTIAL_EXIT are all replayed; a ROLL trade in `trades`
     still raises TradeError, since there is no pure function here to replay it.
@@ -486,6 +506,8 @@ def recompute_structure_from_trades(structure: Structure, trades: list[Trade]) -
         update={"legs": shell_legs, "status": StructureStatus.SHELL, "closed_at": None, "close_trigger": None}
     )
     exit_updates: dict[str, tuple[float, float]] = {}
+    use_fifo = fifo and not any(t.event_type in UNMATCHABLE_EVENTS for t in ordered)
+    queue: list[EntrySlice] = []  # the entry lots still open, oldest first
 
     for trade in ordered:
         if trade.event_type in (TradeEventType.TRADE, TradeEventType.ADD):
@@ -494,8 +516,10 @@ def recompute_structure_from_trades(structure: Structure, trades: list[Trade]) -
                 stop_loss_price=trade.stop_loss_price, target_price=trade.target_price,
             )
             current = current.model_copy(update={"legs": result.legs, "status": result.status})
+            queue.append(EntrySlice(trade, trade.lots))
         elif trade.event_type in (TradeEventType.FULL_EXIT, TradeEventType.STRUCTURE_PARTIAL_EXIT):
-            result = exit_structure(current, trade.price, trade.lots, trade.notes)
+            result = exit_structure(current, trade.price, trade.lots, trade.notes, open_entries=queue if use_fifo else None)
+            queue = take(queue, trade.lots)[1]
             updates = {"legs": result.legs}
             if result.closed:
                 updates.update(status=StructureStatus.CLOSED, closed_at=trade.timestamp, close_trigger="manual")
@@ -503,7 +527,8 @@ def recompute_structure_from_trades(structure: Structure, trades: list[Trade]) -
             exit_updates[trade.trade_id] = (result.realized_pnl, result.trade.transaction_cost)
         elif trade.event_type == TradeEventType.DISSOLVE:
             # its P&L was fixed by the group it was dissolved with (kept as stored); only the lots come off
-            legs, status = dissolve_lots(current, trade.lots)
+            legs, status = dissolve_lots(current, trade.lots, open_entries=queue if use_fifo else None)
+            queue = take(queue, trade.lots)[1]
             updates = {"legs": legs, "status": status}
             if status == StructureStatus.CLOSED:
                 updates.update(closed_at=trade.timestamp, close_trigger=CLOSE_TRIGGER)

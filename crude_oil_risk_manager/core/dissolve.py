@@ -21,6 +21,7 @@ import math
 from dataclasses import dataclass, field
 
 from core.exceptions import CrudeOilRiskError
+from core.fifo import EntrySlice, open_queue, queue_price, reconciles, take, with_entry_price
 from core.models import Leg, Structure, StructureStatus, Trade, TradeEventType
 from core.pnl import calculate_leg_realized_pnl, entry_cost_for_lots
 from core.positions import leg_outrights
@@ -65,12 +66,19 @@ def _finite(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def dissolve_lots(structure: Structure, lots: float) -> tuple[list[Leg], StructureStatus]:
-    """The legs and status after taking `lots` off every leg (no P&L: that is booked by the group)."""
+def dissolve_lots(structure: Structure, lots: float, open_entries: list[EntrySlice] | None = None) -> tuple[list[Leg], StructureStatus]:
+    """The legs and status after taking `lots` off every leg (no P&L: that is booked by the group).
+
+    With `open_entries` (core.fifo.open_queue) the lots left open take the entry price of the entry lots not yet taken, first in,
+    first out, as an exit does."""
     legs = [leg.model_copy(update={"lots": max(leg.lots - lots, 0.0), "is_naked": False}) for leg in structure.legs]
     if all(leg.lots <= _LOT_TOLERANCE for leg in legs):
         legs = [leg.model_copy(update={"lots": 0.0}) for leg in legs]
         return legs, StructureStatus.CLOSED
+    if open_entries is not None and reconciles(structure.legs, open_entries):
+        left_price = queue_price(take(open_entries, lots)[1])
+        if left_price is not None:
+            legs = with_entry_price(legs, left_price)
     return legs, StructureStatus.OPEN
 
 
@@ -183,7 +191,7 @@ def dissolve_structures(
     names = ", ".join(s.name for s in structures)
     items = []
     for s in structures:
-        legs, status = dissolve_lots(s, chosen[s.structure_id])
+        legs, status = dissolve_lots(s, chosen[s.structure_id], open_queue(trades_by_structure.get(s.structure_id, [])))
         if use_legs:
             price = structure_live_price(s, prices)
         else:

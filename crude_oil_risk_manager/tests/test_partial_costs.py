@@ -36,9 +36,10 @@ def test_the_entry_cost_belongs_to_the_lots_that_were_entered():
     entry = trade(s, TradeEventType.TRADE, 10, 70.0, tc=15.0)
     assert entry_cost_for_lots([entry], 4) == pytest.approx(6.0) and entry_cost_for_lots([entry], 10) == 15.0
     assert entry_cost_for_lots([entry], 99) == 15.0 and entry_cost_for_lots([], 4) == 0.0
-    # a later add at a different cost: the average per entered lot
+    # a later add at a different cost: the earliest lots go first (first in, first out), each at its own entry's cost per lot
     add = trade(s, TradeEventType.ADD, 10, 71.0, tc=25.0, day=1)
-    assert entry_cost_for_lots([entry, add], 5) == pytest.approx(10.0)  # (15 + 25) over 20 lots = 2 a lot
+    assert entry_cost_for_lots([entry, add], 5) == pytest.approx(7.5)  # 5 of the first entry's lots at 1.50
+    assert entry_cost_for_lots([entry, add], 12) == pytest.approx(15.0 + 2 * 2.5)  # all 10 of them, then 2 of the add's at 2.50
 
 
 def test_costs_split_between_the_exited_lots_and_the_lots_still_open():

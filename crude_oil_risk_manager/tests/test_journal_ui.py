@@ -99,7 +99,8 @@ def test_an_entry_records_ideas_payups_and_the_market_snapshot(repo, env, snapsh
     dc.confirm_trade_entry(1, 1.30, 2, "buy", None, None, None, [], sid, LIVE_STORE, *GRID, ["Mean reversion"], 1, None)
     journal = env.journal.journal(sid)
     assert journal["ideas"] == ["Breakout", "Mean reversion"] and journal["payups"]["entry"]["total"] == 3.0 and journal["entry"]["prices"]["CL"] == 71.0
-    assert len(snapshotter.calls) == 1
+    # every entry is snapshotted for its own Archive row (first in, first out), but `entry` stays the FIRST entry's
+    assert len(snapshotter.calls) == 2 and len(journal["entries"]) == 2
 
 
 def test_a_failed_entry_leaves_the_journal_alone(repo, env, snapshotter):

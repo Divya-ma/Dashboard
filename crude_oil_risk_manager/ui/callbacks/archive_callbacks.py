@@ -17,7 +17,7 @@ from core.journal_analysis import equity_curve, group_table, headline, separatio
 from ui.layouts.archive_analysis import (
     build_bar_figure, build_cards, build_equity_figure, separation_records, table_records, two_way_records,
 )
-from core.archive import build_archive_rows, delete_archived_structures, filter_archive_rows, journal_columns, summarize
+from core.archive import build_archive_rows, delete_archived_structures, filter_archive_rows, journal_columns, structure_id_of, summarize
 from core.models import StructureStatus
 from core.pnl import calculate_net_realized_pnl
 from core.user_settings import KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE
@@ -52,10 +52,13 @@ def _parse_date(value) -> date | None:
 
 
 def _load_rows() -> list[dict]:
+    """One row per exit: of the closed structures, and of the open ones that have exited some lots (the rest stays open)."""
     repository = container.repository
-    closed = repository.get_all_structures(status_filter=[StructureStatus.CLOSED])
-    trades = {s.structure_id: repository.get_trades_for_structure(s.structure_id) for s in closed}
-    return build_archive_rows(closed, trades, repository.get_journals())
+    structures = repository.get_all_structures(
+        status_filter=[StructureStatus.CLOSED, StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
+    )
+    trades = {s.structure_id: repository.get_trades_for_structure(s.structure_id) for s in structures}
+    return build_archive_rows(structures, trades, repository.get_journals())
 
 
 def refresh_archive(pathname, apply_clicks, clear_clicks, deleted, start, end, structure_type, symbol, pnl_filter):
@@ -98,7 +101,7 @@ def select_row(active_cell, close_clicks):
 
 def render_detail(selected_id, rows):
     """Show the detail panel for the selected row if it is still in the current (filtered) set."""
-    row = next((r for r in rows or [] if r["structure_id"] == selected_id), None)
+    row = next((r for r in rows or [] if r["id"] == selected_id), None)
     if row is None:
         return None, {**CARD_STYLE, "display": "none"}
     return build_detail(row), {**CARD_STYLE, "display": "block"}
@@ -150,6 +153,7 @@ def fill_journal_editor(selected_id):
     """The selected trade's ideas, the ideas on offer (plus any the trade has that were later taken off the list) and payups."""
     if not selected_id or container.journal is None:
         return [], [], None, None, None, None, [], [], []
+    selected_id = structure_id_of(selected_id)
     journal = container.journal.journal(selected_id)
 
     def options(listed, kept):
@@ -166,6 +170,7 @@ def save_journal_edits(n_clicks, selected_id, ideas, payup_entry, payup_exit, co
         raise PreventUpdate
     if not selected_id or container.journal is None:
         return "Select a trade first."
+    selected_id = structure_id_of(selected_id)
     try:
         container.journal.set_ideas(selected_id, ideas)
         journal = container.journal.journal(selected_id)
@@ -204,6 +209,7 @@ def fill_trade_editor(selected_id, _changes):
     empty = (None, None, "", [], [], [], None, None, None, None)
     if not selected_id:
         return empty
+    selected_id = structure_id_of(selected_id)
     repository = container.repository
     structure = repository.get_structure(selected_id)
     if structure is None:
@@ -222,7 +228,7 @@ def _save(selected_id, counter, action):
     if not selected_id:
         return _status("Select a trade first.", False), no_update
     try:
-        message = action()
+        message = action(structure_id_of(selected_id))
     except ArchiveEditError as exc:
         return _status("Not saved: " + " ".join(exc.errors), False), no_update
     except ValueError as exc:
@@ -236,13 +242,13 @@ def _save(selected_id, counter, action):
 def save_structure_edit(n_clicks, selected_id, name, structure_type, notes, counter):
     if not n_clicks:
         raise PreventUpdate
-    return _save(selected_id, counter, lambda: edit_structure(container.repository, selected_id, name, structure_type, notes))
+    return _save(selected_id, counter, lambda sid: edit_structure(container.repository, sid, name, structure_type, notes))
 
 
 def save_trades_edit(n_clicks, selected_id, rows, recalculate, counter):
     if not n_clicks:
         raise PreventUpdate
-    return _save(selected_id, counter, lambda: edit_trades(container.repository, selected_id, rows or [], bool(recalculate)))
+    return _save(selected_id, counter, lambda sid: edit_trades(container.repository, sid, rows or [], bool(recalculate)))
 
 
 def _ratio(value):
@@ -258,7 +264,7 @@ def save_legs_edit(n_clicks, selected_id, rows, counter):
     if not n_clicks:
         raise PreventUpdate
     rows = rows or []
-    return _save(selected_id, counter, lambda: edit_legs(container.repository, selected_id, [r.get("symbol") for r in rows], [_ratio(r.get("ratio")) for r in rows]))
+    return _save(selected_id, counter, lambda sid: edit_legs(container.repository, sid, [r.get("symbol") for r in rows], [_ratio(r.get("ratio")) for r in rows]))
 
 
 def save_market_edit(n_clicks, selected_id, rows, mfe_i, mae_i, mfe_d, mae_d, counter):
@@ -270,13 +276,14 @@ def save_market_edit(n_clicks, selected_id, rows, mfe_i, mae_i, mfe_d, mae_d, co
     entry = {r["id"]: r.get("entry") for r in rows}
     exit_ = {r["id"]: r.get("exit") for r in rows}
     excursion = dict(zip(EXCURSION_KEYS, (mfe_i, mae_i, mfe_d, mae_d)))
-    return _save(selected_id, counter, lambda: (container.journal.set_market(selected_id, entry, exit_, excursion), "Saved the market data.")[1])
+    return _save(selected_id, counter, lambda sid: (container.journal.set_market(sid, entry, exit_, excursion), "Saved the market data.")[1])
 
 
 def _ticked_ids(virtual_data, selected_rows) -> list[str]:
-    """Structure ids of the ticked rows (indices into the rows as displayed: sorted, filtered, on any page)."""
+    """Structure ids of the ticked rows (indices into the rows as displayed: sorted, filtered, on any page). Several ticked exits
+    of one structure count once."""
     rows = virtual_data or []
-    return [rows[i]["id"] for i in selected_rows or [] if 0 <= i < len(rows)]
+    return list(dict.fromkeys(structure_id_of(rows[i]["id"]) for i in selected_rows or [] if 0 <= i < len(rows)))
 
 
 def open_delete(n_clicks, virtual_data, selected_rows):
@@ -287,14 +294,22 @@ def open_delete(n_clicks, virtual_data, selected_rows):
     if not ids:
         return True, [html.Div("Tick the trades to delete first.", style={"color": "#f0b429"})], [], {"display": "none"}, True
     repository = container.repository
-    lines, total = [], 0.0
+    lines, total, kept, deletable = [], 0.0, [], []
     for sid in ids:
         structure = repository.get_structure(sid)
         if structure is None:
             continue
+        if structure.status != StructureStatus.CLOSED:
+            kept.append(structure.name)  # lots are still open: only its exits are in the archive, the position stays
+            continue
+        deletable.append(sid)
         pnl = calculate_net_realized_pnl(repository.get_trades_for_structure(sid))
         total += pnl
-        lines.append(html.Li(f"{structure.name}: {'+' if pnl >= 0 else '-'}${abs(pnl):,.0f}"))
+        lines.append(html.Li(f"{structure.name}: {'+' if pnl >= 0 else '-'}${abs(pnl):,.0f} (all of its exits)"))
+    ids = deletable
+    if not ids:
+        note = f"{', '.join(kept)} still has lots open, so it is not deleted; exit the rest first." if kept else "Nothing to delete."
+        return True, [html.Div(note, style={"color": "#f0b429"})], [], {"display": "none"}, True
     reset_active = bool(repository.get_setting(KEY_PNL_BASELINE, 0.0) or repository.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0))
     body = [
         html.P(f"Delete {len(lines)} closed trade(s) for good, with their trades and history?"),
@@ -303,6 +318,8 @@ def open_delete(n_clicks, virtual_data, selected_rows):
                style={"fontWeight": "bold"}),
         html.P("This cannot be undone.", style={"color": "#f0b429"}),
     ]
+    if kept:
+        body.insert(1, html.P(f"Not deleted (lots still open): {', '.join(kept)}.", style={"color": "#f0b429"}))
     return True, body, ids, ({"display": "block", "marginTop": "10px"} if reset_active else {"display": "none"}), False
 
 
