@@ -237,16 +237,18 @@ def test_the_migration_moves_engine_made_average_figures_to_fifo_and_leaves_type
     assert migrate_to_fifo(repo) == {"structures": [], "exits": 0, "positions": 0}  # nothing left to change
 
 
-def test_an_open_structure_whose_legs_are_not_what_its_trades_give_is_left_alone(repo):
+def test_an_open_structure_whose_legs_carry_a_corrected_price_moves_by_the_same_shift_and_keeps_its_total(repo):
     book = two_entries(fifo=False)
     book.exit(4, 0.80, WED)
     first_leg, *others = book.structure.legs
     corrected = first_leg.model_copy(update={"average_entry_price": first_leg.average_entry_price + 0.05})  # a hand-corrected entry price
     book.structure = book.structure.model_copy(update={"legs": [corrected, *others]})
     sid = book.save(repo)
-    assert migrate_to_fifo(repo) == {"structures": [], "exits": 0, "positions": 0}
+    assert migrate_to_fifo(repo) == {"structures": ["s"], "exits": 1, "positions": 1}
     exit_trade = next(t for t in repo.get_trades_for_structure(sid) if t.event_type == TradeEventType.STRUCTURE_PARTIAL_EXIT)
-    assert exit_trade.realized_pnl == pytest.approx(1040.0)  # not moved without the entry price moving with it
+    assert exit_trade.realized_pnl == pytest.approx(1100.0)  # +60 realized ...
+    assert structure_entry_price(repo.get_structure(sid)) == pytest.approx(0.59 + 0.06)  # ... and the open lot's price up by the same 60 / 1000, the correction kept
+    assert migrate_to_fifo(repo) == {"structures": [], "exits": 0, "positions": 0}
 
 
 def test_the_migration_runs_once_and_skips_single_entry_and_per_leg_histories(repo):

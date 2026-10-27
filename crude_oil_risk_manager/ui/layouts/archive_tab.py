@@ -8,7 +8,7 @@ import dash_bootstrap_components as dbc
 from dash import dash_table, dcc, html
 from dash.dash_table.Format import Format, Group, Scheme, Symbol
 
-from core.archive import RESULT_LOSS, RESULT_WIN, SNAPSHOT_FIELDS
+from core.archive import RESULT_LOSS, RESULT_WIN, SNAPSHOT_FIELDS, display_atr
 from core.journal import CONVICTIONS, EXIT_REASONS, MISTAKES
 from core.models.structure import CHOOSABLE_STRUCTURE_TYPES
 from ui.layouts.archive_analysis import analysis_tab
@@ -111,6 +111,7 @@ def _journal_cells(row: dict) -> dict:
     for prefix in ("e_", "x_"):
         for column, _key, _sub in SNAPSHOT_FIELDS:
             value = row.get(prefix + column)
+            value = display_atr(value) if column == "atr" else value
             cells[prefix + column] = EMPTY if value is None else round(value, 4) if isinstance(value, float) else value
     return cells
 
@@ -154,7 +155,7 @@ def journal_detail(row: dict) -> list:
     if snaps.get("entry") or snaps.get("exit"):
         head = html.Thead(html.Tr([html.Th("Market"), html.Th("At entry"), html.Th("At exit")]))
         body = html.Tbody([
-            html.Tr([html.Td(_SNAPSHOT_LABELS[column]), html.Td(_cell(row.get("e_" + column))), html.Td(_cell(row.get("x_" + column)))])
+            html.Tr([html.Td(_SNAPSHOT_LABELS[column]), html.Td(_cell(_shown(column, row.get("e_" + column)))), html.Td(_cell(_shown(column, row.get("x_" + column))))])
             for column, _key, _sub in SNAPSHOT_FIELDS
         ] + [html.Tr([html.Td("Taken at"), html.Td(_when(snaps.get("entry"))), html.Td(_when(snaps.get("exit")))])])
         parts.append(dbc.Table([head, body], color="dark", striped=True, size="sm"))
@@ -173,6 +174,10 @@ def journal_detail(row: dict) -> list:
     if leg_text:
         parts.append(html.Div(f"Payups per leg (ticks) — {leg_text}", style={**_MUTED, "marginBottom": "6px"}))
     return parts
+
+
+def _shown(column: str, value):
+    return display_atr(value) if column == "atr" else value
 
 
 def _cell(value) -> str:

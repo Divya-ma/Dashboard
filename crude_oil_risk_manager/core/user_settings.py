@@ -7,9 +7,12 @@ ValueError; the message is safe to show to the user and never contains secrets.
 """
 
 import math
+import re
 from urllib.parse import urlparse
 
-from core.alerts import ENABLED_SETTING_KEY, WEBHOOK_SETTING_KEY
+from core.alerts import (
+    ENABLED_SETTING_KEY, MENTION_ALL, MENTION_EMAIL_KEY, MENTION_LEVEL_CHOICES, MENTION_LEVELS_KEY, MENTION_NAME_KEY, WEBHOOK_SETTING_KEY,
+)
 
 KEY_API_TOKEN = "api_access_token"
 KEY_PNL_BASELINE = "pnl_reset_baseline"
@@ -33,6 +36,9 @@ KEY_CORRELATION_ROLLING = "correlation_rolling_window"
 KEY_CORRELATION_LOOKBACK = "correlation_lookback"
 KEY_TEAMS_WEBHOOK = WEBHOOK_SETTING_KEY
 KEY_TEAMS_ENABLED = ENABLED_SETTING_KEY
+KEY_TEAMS_MENTION_EMAIL = MENTION_EMAIL_KEY
+KEY_TEAMS_MENTION_NAME = MENTION_NAME_KEY
+KEY_TEAMS_MENTION_LEVELS = MENTION_LEVELS_KEY
 
 VAR_CONFIDENCE_CHOICES = (0.95, 0.99)
 MIN_ROLLING_WINDOW = 2  # a correlation needs at least two days
@@ -147,6 +153,38 @@ def correlation_windows(repository) -> tuple[int, int]:
         read(KEY_CORRELATION_ROLLING, settings.DEFAULT_CORRELATION_ROLLING_WINDOW, MIN_ROLLING_WINDOW),
         read(KEY_CORRELATION_LOOKBACK, settings.DEFAULT_CORRELATION_LOOKBACK, MIN_CORRELATION_LOOKBACK),
     )
+
+
+_EMAIL = re.compile(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+")
+
+
+def validate_mention_email(raw) -> str:
+    """The email a Teams alert @mentions. Empty is allowed (no mention); otherwise it must look like name@company.com."""
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError("The Teams mention email must be text")
+    email = raw.strip()
+    if email and (len(email) > 254 or not _EMAIL.fullmatch(email)):
+        raise ValueError("The Teams mention email must look like name@company.com")
+    return email
+
+
+def validate_mention_name(raw) -> str:
+    """The optional name shown in the mention (blank = made from the email)."""
+    name = (raw or "").strip() if isinstance(raw, str) or raw is None else None
+    if name is None or len(name) > 60 or any(ch in name for ch in "<>&"):
+        raise ValueError("The mention name must be plain text of at most 60 characters")
+    return name
+
+
+def validate_mention_levels(raw) -> str:
+    """Which alerts @mention you: 'all', 'warning' (warning and critical) or 'critical'."""
+    if raw in MENTION_LEVEL_CHOICES:
+        return raw
+    if raw in (None, ""):
+        return MENTION_ALL
+    raise ValueError("Choose which alerts mention you: all, warnings and critical, or critical only")
 
 
 def validate_webhook_url(raw) -> str:

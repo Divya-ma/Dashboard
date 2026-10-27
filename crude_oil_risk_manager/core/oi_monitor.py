@@ -244,6 +244,37 @@ class MonitorEngine:
         same.sort(key=lambda s: self.universe[s].order, reverse=True)
         return tuple(same[: self.params.years])
 
+    def years_table(self, symbol: str) -> dict | None:
+        """The same delivery month in every earlier year, at the live contract's CURRENT number of days before expiry.
+
+        {"label", "dte", "data_date", "rows": [{"label", "oi", "pct_of_peak", "live"}]}: the live contract first (its OI now and its
+        share of the peak so far), then each finished contract of that month, newest first: its OI when it was `dte` days from
+        expiry and that OI as a share of the contract's highest OI over its whole life. None for a contract without OI."""
+        if self._empty or symbol not in self.oi.columns or symbol not in self.universe:
+            return None
+        series = self.oi[symbol].dropna()
+        if series.empty:
+            return None
+        contract = self.universe[symbol]
+        dte = max((contract.expiry - series.index[-1].date()).days, 0)
+        peak_now = float(series.max())
+        rows = [{"label": contract.label, "oi": float(series.iloc[-1]), "pct_of_peak": float(series.iloc[-1]) / peak_now if peak_now > 0 else np.nan, "live": True}]
+        past = [s for s in self.finished if s in self.dense["oi"] and self.universe[s].month == contract.month and s != symbol]
+        for s in sorted(past, key=lambda s: self.universe[s].order, reverse=True):
+            oi_series = self.oi[s].loc[: self.expiry_actual[s]].dropna()
+            peak = float(oi_series.max()) if len(oi_series) else np.nan
+            value = self.dense["oi"][s].get(dte, np.nan)
+            value = float(value) if value == value else np.nan
+            rows.append({"label": self.universe[s].label, "oi": value, "pct_of_peak": value / peak if peak and peak > 0 and value == value else np.nan, "live": False})
+        return {"label": contract.label, "dte": dte, "data_date": series.index[-1].date(), "rows": rows}
+
+    def live_symbol_of_month(self, month: int) -> str | None:
+        """The nearest contract of this delivery month that has not expired (None if the data holds none)."""
+        for s, c in sorted(self.universe.items(), key=lambda item: item[1].order):
+            if c.month == month and s in self.oi.columns and c.expiry >= self.last_date.date() and self.oi[s].notna().any():
+                return s
+        return None
+
     # -- live contracts --------------------------------------------------
 
     def live_symbols(self) -> list[str]:

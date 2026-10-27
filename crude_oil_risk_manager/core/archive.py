@@ -54,13 +54,21 @@ def result_for(pnl: float) -> str:
     return RESULT_WIN if pnl > 0 else RESULT_LOSS if pnl < 0 else RESULT_FLAT
 
 
+ATR_DISPLAY_SCALE = 100  # the Archive shows (and the editor takes) ATR times this; the journal stores points
+
+
+def display_atr(value):
+    """A stored ATR as shown: times ATR_DISPLAY_SCALE (None and text pass through)."""
+    return round(value * ATR_DISPLAY_SCALE, 4) if isinstance(value, (int, float)) and not isinstance(value, bool) else value
+
+
 # the journal columns: id prefix "e_" / "x_" for the entry / exit snapshot
 CURVE_PRODUCTS = ("CL", "BRN", "G")  # the curves are listed CL, BRN, GO
 SNAPSHOT_FIELDS = (
     ("px_co", "prices", "CO"), ("px_cl", "prices", "CL"), ("px_go", "prices", "GO"),
     ("move_day", "move_day", None), ("move_min", "move_min", None),
     ("curve_cl", "curve", "CL"), ("curve_brn", "curve", "BRN"), ("curve_go", "curve", "G"),
-    ("atr", "atr", None),
+    ("atr", "atr", None), ("atr_basis", "atr_basis", None),
     ("vol_ratio", "vol_ratio", None), ("volume_ratio", "volume_ratio", None), ("spread_ticks", "spread_ticks", None),
     ("brent_wti", "brent_wti", None), ("crack", "crack", None), ("kink_z", "kink_z", None),
 )

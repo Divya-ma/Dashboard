@@ -15,11 +15,11 @@ from datetime import date, datetime
 
 import pandas as pd
 
-from core.archive import SNAPSHOT_FIELDS, summarize
+from core.archive import SNAPSHOT_FIELDS, display_atr, summarize
 
 _SNAPSHOT_LABELS = {
     "px_co": "CO price", "px_cl": "CL price", "px_go": "GO price", "move_day": "Day move", "move_min": "1-min move",
-    "curve_cl": "CL curve", "curve_brn": "BRN curve", "curve_go": "GO curve", "atr": "ATR",
+    "curve_cl": "CL curve", "curve_brn": "BRN curve", "curve_go": "GO curve", "atr": "ATR (x100)", "atr_basis": "ATR basis",
     "vol_ratio": "Volatility vs normal", "volume_ratio": "Volume vs normal", "spread_ticks": "Bid-ask (ticks)",
     "brent_wti": "Brent-WTI", "crack": "Gasoil crack", "kink_z": "Curve z-score",
 }
@@ -65,6 +65,8 @@ def trades_frame(rows: list[dict]) -> pd.DataFrame:
                 value = _date(value)
             elif key == "lots":
                 value = _lots(value)
+            elif key in ("e_atr", "x_atr"):
+                value = display_atr(value)
             record[header] = value
         records.append(record)
     return pd.DataFrame(records, columns=[header for _key, header in TRADE_COLUMNS])

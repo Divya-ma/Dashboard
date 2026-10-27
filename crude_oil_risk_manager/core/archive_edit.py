@@ -324,6 +324,8 @@ def parse_snapshot_cell(column: str, value):
         return None
     if column in NUMERIC_SNAPSHOT_COLUMNS:
         return parse_number(value, column)
+    if column == "atr_basis":
+        return str(value).strip()[:40]
     if column in ("move_day", "move_min"):
         return _pick(value, MOVES, "A movement")
     return _pick(value, CURVES, "A curve shape")

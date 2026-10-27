@@ -587,6 +587,8 @@ one contract against its baselines, and a **front-contract check** (in the last 
 did — how much is still open, how much has dropped, how much rolled into the next contract). Alerts go out once a day when fresh
 data arrives; each deviation alerts once.
 
+**Earlier years table** (under the Live monitor chart, for the contract picked in the dropdown; also at the top of the Research tab for the month picked there, using that month's nearest live contract): one row per earlier contract of the same delivery month, newest first, with its OI when it was as many days from expiry as the live contract is now (days counted to the latest OI date) and that OI as a % of the contract's highest OI over its whole life. The live contract is the first row (its % is of its peak so far).
+
 **Research** (finished contracts only, same delivery month together): the peak OI of each contract and how many days before
 expiry it came; how long before expiry it reaches 10 / 25 / 50 / 75 / 90 / 100% of its peak and what share is still open N days
 out; the last month day by day (share of peak open, the fall that day split into rolled and exited, and which following months
@@ -702,7 +704,7 @@ the price, is refused and nothing is changed. Realized P&L feeds Home's totals, 
 | **Outright prices** (CO, CL, GO) | last traded price of each product's front outright at entry and at exit | last 1-minute close, else last hourly close (within 3 days), else the latest daily close; from `/ohlc/`, not `/fairvalue/` |
 | **Day move / 1-minute move** | Bullish / Bearish / Stalemate for the front outright of the structure's own product | *Day*: the day so far (hourly candles from 00:00 UTC to the trade, so a past trade is judged on what was known then). *1-minute*: the last one-minute candle. Rule: close above open = Bullish, below = Bearish; **Stalemate** if high − low ≥ 5 × |open − close|; but if |open − close| ≥ 50 ticks the direction counts regardless |
 | **Curve shape** (CL, BRN, GO) | Contango / Backwardation / Contango – Backwardation / Backwardation – Contango (or Flat) | first 6 values of the structure's curve type — **fly if any leg is a fly, else spread, else outright** — built from outright prices (spread = M1−M2…, fly = M1−2M2+M3…). Rising with maturity = Contango; a rise that turns into a fall = Contango – Backwardation. Moves under 5% of the range (or a tick) are not a turn; a zig-zag is decided by the bigger turn |
-| **ATR** | ATR of the whole structure per lot | a quoted spread/fly/outright → its own ATR (as on the ATR page); else the structure's price built from the legs' stored closes and the 14-day mean absolute close-to-close change |
+| **ATR** | ATR of the whole structure per lot | a quoted spread/fly/outright → its own ATR (as on the ATR page); else an **estimate**: k × the standard deviation of the structure's daily change (ratio × close of every leg, summed, last 60 days, at least 30), with k = 1.55 for a two-leg structure and 1.0 otherwise (fly, d-fly, boxes). Legs' ATRs are never added (a range does not add, variance does), and the legs' correlation is already inside the combined price. The **ATR basis** column says `quoted` or `estimated ±30%` / `±65%` (typical error against quoted spreads and flies; a d-fly is at least as uncertain as a fly because no quoted d-fly exists to check it). Entries saved before this change keep their old figure and have no basis. **Display:** every ATR in points is shown ×100 (0.0731 reads 7.31) on the ATR tab and in the Archive table, detail, export and trade editor (the editor divides what you type by 100); % of price and ratios are unchanged and the journal still stores points |
 | **Volatility / volume vs normal** | last 24 hourly candles of the front contract vs the preceding 10 days | st.dev. of hourly close changes, and volume per 24 candles; 1.0 = normal |
 | **Brent–WTI** and **gasoil crack** | from the prices above | CO − CL; GO ÷ 7.45 − CO |
 | **Bid-ask (ticks)** | live trades only | one `/taq/` request for the quoted structure, when `/taq/` has ≥ 3 spare requests |
@@ -747,7 +749,7 @@ replaces it, including a dissolve). The snapshot is taken on a background thread
 | **Curve Kinks** | opening time and time zone of the daily previous-settlement fetch; trade-plan settings (risk, stop multiple, volatility window, hedge types…) |
 | **OI / Volume / ATR** | OI history length (1,500 calendar days before expiry), ATR history length (400) |
 | **Trade Journal lists** | trade ideas, exit reasons and mistake tags (one per line), and the switch "a first entry must have a stop and a target" |
-| **Microsoft Teams Alerts** | webhook URL (masked, https only), enable switch, *Test*, *Save* |
+| **Microsoft Teams Alerts** | webhook URL (masked, https only), enable switch, **@mention me** (your Teams email, an optional name, and which alerts: all / warnings and critical / critical only), *Test*, *Save* |
 | **Account Reset** | *Reset total P&L to zero* (stores baselines for total and realized P&L, confirm first) and *Clear reset* |
 | **Data Management** | last sync summary (symbols tracked / ok / error), stored data size, *Run sync now* |
 
@@ -812,6 +814,13 @@ the webhook URL is a secret and is never logged.
 | Stale data | shown on Home and the sidebar, not sent | — |
 
 Titles are cut to 100 characters and bodies to 500 (Curve Kink bodies are allowed longer).
+
+**Getting a push on your phone.** Teams pushes a post to a phone only if it @mentions you (or the channel is set to notify for every
+post). Type your Teams email under *Settings → Microsoft Teams Alerts → @mention me*: alerts are then sent as an Adaptive Card that
+@mentions that address (the older MessageCard cannot mention anyone), for the alert levels you choose. Your Workflows webhook has to post
+the card as it receives it (the *Post card in a chat or channel* action). If Teams or the workflow does not accept the Adaptive Card the
+same alert is sent again in the old format, so an alert is never lost to the mention; *Test Teams Alert* tells you which happened.
+With no email nothing changes. Teams also holds phone pushes back while you are active on the computer.
 
 ---
 
@@ -947,8 +956,11 @@ temp-file-and-replace helpers.
 - With few archived trades the journal analysis can only point to where to look; groups under 15 trades are marked "low" and
   the winners-vs-losers table is labelled a pointer below 100 trades.
 - Churn candles of d-flies are derived close to close; targets are therefore slightly harder to hit than on a real instrument.
-- First in, first out needs each entry's quoted structure price. A structure with real per-leg fills typed at entry, a hand-corrected
-  entry price, or a per-leg exit keeps the average-cost figure. On the first start after the move to FIFO, the stored exit P&L and the
-  entry price of lots still open are re-allocated once (`core/fifo_migration.py`, one audit line per structure); a structure with a P&L
-  typed in the Archive editor is left exactly as it is. A structure's total P&L never changes, only the realized / unrealized split.
+- First in, first out needs each entry's quoted structure price. A per-leg exit keeps the average-cost figure, and so does an exit
+  whose open lots carry real per-leg fills or a hand-corrected price (the exit is worked out on the entry trades' typed prices). On
+  the first start after the move to FIFO, the stored exit P&L and the entry price of lots still open are re-allocated once
+  (`core/fifo_migration.py`, one audit line per structure; the open lots keep any real fill or correction, they only move by the FIFO
+  shift, so the total is unchanged); a structure with a P&L typed in the Archive editor is left exactly as it is. The first version
+  of this move skipped a structure that had a real-fill add after its exits, so those exits kept average-cost figures (3 ticks
+  booked as 27.5 instead of 30); the move was run again (setting `fifo_migrated_v2`) and fixes them. A structure's total P&L never changes, only the realized / unrealized split.
 - Single-user: there is no per-user data; the optional Basic Auth login protects the whole app.

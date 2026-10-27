@@ -201,6 +201,37 @@ def test_the_chart_data_has_the_same_month_baseline_and_the_live_path(base_frame
     assert engine(base_frame).chart("CLZ99") is None
 
 
+def test_the_years_table_lists_the_live_contract_then_each_earlier_year_at_todays_days_to_expiry(base_frame):
+    e = engine(base_frame)
+    data = e.years_table(LIVE)
+    live_dte = e.chart(LIVE)["dte"][-1]
+    assert data["label"] == "Jan27" and data["dte"] == live_dte
+    assert data["rows"][0]["live"] and data["rows"][0]["label"] == "Jan27" and not any(r["live"] for r in data["rows"][1:])
+    past = data["rows"][1:]
+    assert len(past) == 4 and [r["label"][-2:] for r in past] == sorted((r["label"][-2:] for r in past), reverse=True)  # newest first
+    for r in past:
+        assert r["label"].startswith("Jan") and r["oi"] >= 0 and 0 <= r["pct_of_peak"] <= 1 + 1e-9
+    symbol = next(s for s in e.finished if e.universe[s].label == past[0]["label"])
+    peak = e.oi[symbol].loc[: e.expiry_actual[symbol]].max()
+    assert past[0]["oi"] / peak == pytest.approx(past[0]["pct_of_peak"])
+    assert past[0]["oi"] == pytest.approx(e.dense["oi"][symbol].loc[data["dte"]])
+    assert e.years_table("CLZ99") is None
+    assert e.live_symbol_of_month(1) == LIVE and e.live_symbol_of_month(13) is None
+
+
+def test_the_years_table_shows_in_the_view_and_the_callback(service_with, base_frame, monkeypatch):
+    from ui.layouts.oi_monitor_view import years_body
+
+    body = str(years_body(engine(base_frame).years_table(LIVE)))
+    assert "oi-years-table" in body and "Jan27 (live)" in body and "days before expiry" in body
+    assert "Pick a contract" in str(years_body(None))
+    svc = service_with(base_frame)
+    monkeypatch.setattr(occ, "container", Container(oi_service=svc))
+    assert "oi-years-table" in str(occ.render_years(LIVE, {"contracts": 15}))
+    assert "Pick a contract" in str(occ.render_years(None, None))
+    assert occ._years_for_month(svc, "CL", 1)["label"] == "Jan27"
+
+
 # ----------------------------------------------------------------------
 # Research tables by month
 # ----------------------------------------------------------------------

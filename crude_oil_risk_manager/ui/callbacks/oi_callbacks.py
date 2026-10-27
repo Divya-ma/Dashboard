@@ -20,7 +20,7 @@ from dash.exceptions import MissingCallbackContextException
 from core.curve_calendar import PRODUCTS, product_of_symbol as product_of
 from core.oi_monitor import STATUS_SUDDEN, MonitorParams, validate_params
 from ui.container import container
-from ui.layouts.oi_monitor_view import PARAM_INPUTS, build_monitor_chart, monitor_body
+from ui.layouts.oi_monitor_view import PARAM_INPUTS, build_monitor_chart, monitor_body, years_body
 from ui.layouts.oi_tab import default_month, research_body, status_text
 from ui.layouts.shell import COLORS
 
@@ -54,6 +54,31 @@ def update_status(n_intervals, n_clicks, current_version=None):
     return status_text(status), version
 
 
+def _years_for_month(service, product, month):
+    """The nearest live contract of this delivery month against its earlier years; None if there is none or it cannot be built."""
+    try:
+        engine, _ = service.monitor(product, service.monitor_params())
+        symbol = None if engine._empty else engine.live_symbol_of_month(month)
+        return engine.years_table(symbol) if symbol else None
+    except Exception:  # noqa: BLE001 - the rest of the research must still show
+        logger.exception("OI years table failed")
+        return None
+
+
+def render_years(symbol, params_dict):
+    """The earlier years of the chosen live contract's delivery month, at today's days before expiry (Live monitor)."""
+    service = container.oi_service
+    product = product_of(symbol) if symbol else None
+    if service is None or product is None or not params_dict:
+        return years_body(None)
+    try:
+        engine, _ = service.monitor(product, validate_params(params_dict))
+        return years_body(engine.years_table(symbol))
+    except Exception:  # noqa: BLE001
+        logger.exception("OI years table failed")
+        return html.Div("Could not build the earlier-years table; see the log.", style=_ERROR)
+
+
 def render_research(version, product, active_tab="research", month=None):
     """Research tables and charts of the chosen product and delivery month, built only when the Research tab is open.
 
@@ -66,7 +91,8 @@ def render_research(version, product, active_tab="research", month=None):
         return html.Div()
     try:
         product = product or "CL"
-        return research_body(service.research_for(product), product, int(month or default_month()))
+        month = int(month or default_month())
+        return research_body(service.research_for(product), product, month, _years_for_month(service, product, month))
     except Exception:  # noqa: BLE001 - never leave the tab blank without a reason
         logger.exception("OI research failed")
         return html.Div("Could not build the research tables; see the log.", style=_ERROR)
@@ -154,3 +180,9 @@ def register_oi_callbacks(app) -> None:
         Input("oi-contract", "value"),
         Input("oi-params", "data"),
     )(render_chart)
+
+    app.callback(
+        Output("oi-years-wrap", "children"),
+        Input("oi-contract", "value"),
+        Input("oi-params", "data"),
+    )(render_years)

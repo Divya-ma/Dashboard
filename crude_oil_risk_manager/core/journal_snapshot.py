@@ -12,7 +12,8 @@ from the hourly candles:
            there are no hourly ones), and the last one-minute candle at or before the trade (blank when the minute history is gone)
   curves   for each product, the shape (core.journal.curve_shape) of its first six values of the structure's curve type, built
            from the outright prices (spread = M1 - M2, fly = M1 - 2 M2 + M3 ...), so a back month that did not trade still has a value
-  atr      the average true range of the whole structure, per lot, in the structure's own points (structure_atr)
+  atr      the average true range of the whole structure, per lot, in the structure's own points (structure_atr), with
+           atr_basis: "quoted" (a contract's own ATR) or "estimated ±30%/65%" (k x the volatility of the legs' combined price)
 
 The same code serves a trade entered now and an old one (backfill): for a past trade the daily candle of its date and whatever
 one-minute candles the API still keeps are used. Nothing here raises: a part that cannot be worked out is None.
@@ -121,15 +122,32 @@ def _atr_of(part: pd.DataFrame, period: int, skip_idle: bool, as_of: date) -> fl
     return float(atr.iloc[-1]) if len(atr) else None
 
 
+SIGMA_WINDOW = 60  # daily changes whose standard deviation scales into an estimated ATR
+MIN_SIGMA_DAYS = 30
+# ATR / standard deviation of the daily settlement change, measured on the quoted contracts in the ATR store (Brent and WTI):
+# about 1.55 for outrights and spreads, about 1.0 for flies; a structure built from legs has no true range of its own.
+ATR_PER_SIGMA_SPREAD, ATR_PER_SIGMA_OTHER = 1.55, 1.0
+ESTIMATE_ERROR_SPREAD, ESTIMATE_ERROR_OTHER = 0.3, 0.65  # typical error seen against quoted spreads (20%, widened) and flies
+
+
 def structure_atr(structure: Structure, frame_of, period: int, as_of: date, skip_idle: bool = True) -> float | None:
     """Average true range of the whole structure per lot, in the structure's points; None if the stored data cannot give one.
+    (structure_atr_with_basis says where the figure comes from.)"""
+    return structure_atr_with_basis(structure, frame_of, period, as_of, skip_idle)[0]
+
+
+def structure_atr_with_basis(structure: Structure, frame_of, period: int, as_of: date, skip_idle: bool = True) -> tuple[float | None, str | None]:
+    """(ATR, basis): basis is "quoted" for a contract's own ATR and "estimated +/-30%" (or 65%) for a figure built from legs.
 
     `frame_of(product)` is the ATR store's frame (symbol, date, open, high, low, close, volume).
     1. The structure is one quoted contract (an outright, or a spread / fly of consecutive months): that contract's own ATR,
        exactly as the ATR page shows it.
-    2. Otherwise its price is built from the legs' stored closes (ratio x close, summed) and its ATR is the average of the
-       absolute day-to-day change of that price over `period` days (close to close: highs and lows of a combination are
-       not known).
+    2. Otherwise it is ESTIMATED as k x sigma, where sigma is the standard deviation of the structure's daily change over the
+       last SIGMA_WINDOW days (ratio x close of every leg, summed: the daily closes are synchronous, so the legs' correlation
+       is already in it) and k = ATR / sigma measured on quoted contracts. Adding or averaging the legs' ATRs would be wrong
+       (a range does not add; variance does) and so would the mean close-to-close move (that is not a true range).
+       A fly or d-fly carries a wide error band (see ESTIMATE_ERROR_*): its weights make it very sensitive to the legs'
+       correlation, and there is no quoted d-fly to calibrate on.
     """
     legs = structure.legs
     symbols = [_api(leg.contract.symbol) for leg in legs]
@@ -149,28 +167,33 @@ def structure_atr(structure: Structure, frame_of, period: int, as_of: date, skip
         if len(legs) == 1:
             part = frame_for(symbols[0])
             value = _atr_of(part, period, skip_idle, as_of) if part is not None and len(part) else None
-            return None if value is None else value * abs(legs[0].ratio)
+            return (None, None) if value is None else (value * abs(legs[0].ratio), "quoted")
         if len(legs) in _STANDARD_RATIOS and ratios == _STANDARD_RATIOS[len(legs)]:
             composite = SymbolTranslator.structure_to_api_symbol(legs)
             part = frame_for(composite)
             if part is not None and len(part):
                 value = _atr_of(part, period, skip_idle, as_of)
                 if value is not None:
-                    return value
+                    return value, "quoted"
     except (ValueError, NotImplementedError):
         pass
     closes = []
     for leg, symbol in zip(legs, symbols):
         part = frame_for(symbol)
         if part is None or part.empty:
-            return None
+            return None, None
         series = part[part["date"] <= pd.Timestamp(as_of)].set_index("date")["close"]
         closes.append(series * leg.ratio)
     price = pd.concat(closes, axis=1, join="inner").dropna().sum(axis=1).sort_index()
-    moves = price.diff().abs().dropna()
-    if len(moves) < period:
-        return None
-    return float(moves.iloc[-period:].mean())
+    moves = price.diff().dropna().iloc[-SIGMA_WINDOW:]
+    if len(moves) < MIN_SIGMA_DAYS:
+        return None, None
+    sigma = float(moves.std())
+    if not sigma == sigma:
+        return None, None
+    is_spread = len(legs) == 2
+    k, error = (ATR_PER_SIGMA_SPREAD, ESTIMATE_ERROR_SPREAD) if is_spread else (ATR_PER_SIGMA_OTHER, ESTIMATE_ERROR_OTHER)
+    return k * sigma, f"estimated ±{error:.0%}"
 
 
 def structure_price_path(structure: Structure, loader) -> pd.Series | None:
@@ -316,10 +339,10 @@ class MarketSnapshotter:
                 bar = minute_bars.iloc[-1]
                 move_min = classify_move(bar["open"], bar["high"], bar["low"], bar["close"], tick)
 
-        atr = None
+        atr = atr_basis = None
         if self._atr_frame_of is not None:
             try:
-                atr = structure_atr(structure, self._atr_frame_of, int(self._atr_period()), day)
+                atr, atr_basis = structure_atr_with_basis(structure, self._atr_frame_of, int(self._atr_period()), day)
             except Exception:  # noqa: BLE001
                 logger.exception("Journal: ATR failed")
         vol_ratio, volume_ratio = activity_ratios(hourly.get(front), at)
@@ -334,7 +357,7 @@ class MarketSnapshotter:
                 logger.exception("Journal: Curve Kinks score failed")
         return {
             "at": when.isoformat(), "product": own, "curve_family": family, "prices": prices,
-            "move_day": move_day, "move_min": move_min, "curve": curves, "atr": atr,
+            "move_day": move_day, "move_min": move_min, "curve": curves, "atr": atr, "atr_basis": atr_basis,
             "vol_ratio": vol_ratio, "volume_ratio": volume_ratio, "spread_ticks": spread_ticks,
             "brent_wti": None if co is None or cl is None else round(co - cl, 3),
             "crack": None if go is None or co is None else round(go / BARRELS_PER_TONNE - co, 3),

@@ -223,6 +223,7 @@ def _packet_card(packet: dict) -> dbc.Card:
         _stat("Lots", f"{packet['lots']:,g}"), _stat("Entry", _price(packet["entry"])), _stat("Live", _price(packet["live"])),
         _stat("Target", _price(packet.get("target"))), _stat("Stop", _price(packet.get("stop"))),
         _stat("Risk (1d VaR 95%)", _risk(packet["risk"])), _stat("Unrealized", _pnl_span(packet["unrealized"])),
+        _stat("Unrealized net of TC", _pnl_span(packet.get("unrealized_net", packet["unrealized"]))),
     ], style={"display": "flex", "flexWrap": "wrap", "margin": "8px 0 10px"})
     legs = html.Table([
         html.Thead(html.Tr([html.Th(c, style={**_HEAD, "textAlign": "left" if c == "Contract" else "right"}) for c in _LEG_COLUMNS])),

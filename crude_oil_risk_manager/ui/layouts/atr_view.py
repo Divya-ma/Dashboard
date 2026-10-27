@@ -32,6 +32,8 @@ PARAM_INPUTS = [
     ("atr-p-z", "Deviation threshold (z)", "z_threshold", 0.1, "How many standard deviations from the usual counts as unusually high or low"),
 ]
 
+ATR_SCALE = 100  # every ATR in points is shown multiplied by this: 0.0731 reads as 7.31; the stored figures are unchanged
+
 _INT = Format(group=Group.yes, precision=0, scheme=Scheme.fixed)
 _TWO = Format(precision=2, scheme=Scheme.fixed)
 _THREE = Format(precision=3, scheme=Scheme.fixed)
@@ -49,6 +51,11 @@ def _number(value, digits=3):
     if value is None or (isinstance(value, float) and not np.isfinite(value)):
         return None
     return round(float(value), digits)
+
+
+def _scaled(value, digits=2):
+    """An ATR in points as shown: times ATR_SCALE."""
+    return _number(None if value is None else value * ATR_SCALE, digits)
 
 
 def atr_controls(params: AtrParams, default_month: int) -> html.Div:
@@ -74,7 +81,7 @@ def atr_controls(params: AtrParams, default_month: int) -> html.Div:
 # ----------------------------------------------------------------------
 
 COLUMN_TIPS = {
-    "atr": "Standard ATR: the average true range over the period set above, in price points.",
+    "atr": f"Standard ATR: the average true range over the period set above, in price points, shown multiplied by {ATR_SCALE}.",
     "atr_pct": "The ATR as a % of the contract's price (outrights only).",
     "tr": "Today's true range: the larger of the day's high-low and the gaps from yesterday's close.",
     "tr_vs_atr": "Today's true range divided by the ATR: above 1 means a bigger-than-average day.",
@@ -85,12 +92,12 @@ COLUMN_TIPS = {
 
 
 def live_columns(family: str, params: AtrParams) -> list[dict]:
-    columns = [_col("Contract", "label"), _col("Days to expiry", "dte", _INT), _col("Last", "close", _TWO), _col("ATR", "atr", _THREE)]
+    columns = [_col("Contract", "label"), _col("Days to expiry", "dte", _INT), _col("Last", "close", _TWO), _col(f"ATR (x{ATR_SCALE})", "atr", _TWO)]
     if family == "outright":
         columns.append(_col("ATR % of price", "atr_pct", _TWO))
     columns += [
-        _col("Today's range", "tr", _THREE), _col("Today ÷ ATR", "tr_vs_atr", _TWO), _col("ATR ÷ front ATR", "vs_front", _TWO),
-        _col(f"Usual (same month, {params.years}y)", "usual", _THREE), _col("Past range", "range"), _col("z", "z", _ONE), _col("Status", "status"),
+        _col(f"Today's range (x{ATR_SCALE})", "tr", _TWO), _col("Today ÷ ATR", "tr_vs_atr", _TWO), _col("ATR ÷ front ATR", "vs_front", _TWO),
+        _col(f"Usual (same month, {params.years}y, x{ATR_SCALE})", "usual", _TWO), _col("Past range", "range"), _col("z", "z", _ONE), _col("Status", "status"),
     ]
     return columns
 
@@ -100,9 +107,9 @@ def live_rows(table, family: str) -> list[dict]:
     for r in table.itertuples():
         low, high = r.usual_min, r.usual_max
         rows.append({
-            "label": r.label, "dte": r.dte, "close": _number(r.close, 2), "atr": _number(r.atr), "atr_pct": _number(r.atr_pct, 2),
-            "tr": _number(r.tr), "tr_vs_atr": _number(r.tr_vs_atr, 2), "vs_front": _number(r.vs_front, 2), "usual": _number(r.usual_median),
-            "range": f"{low:.3f} to {high:.3f}" if np.isfinite(low) and np.isfinite(high) and r.usual_n else "", "z": _number(r.z, 1), "status": r.status,
+            "label": r.label, "dte": r.dte, "close": _number(r.close, 2), "atr": _scaled(r.atr), "atr_pct": _number(r.atr_pct, 2),
+            "tr": _scaled(r.tr), "tr_vs_atr": _number(r.tr_vs_atr, 2), "vs_front": _number(r.vs_front, 2), "usual": _scaled(r.usual_median),
+            "range": f"{low * ATR_SCALE:.2f} to {high * ATR_SCALE:.2f}" if np.isfinite(low) and np.isfinite(high) and r.usual_n else "", "z": _number(r.z, 1), "status": r.status,
         })
     return rows
 
@@ -173,6 +180,11 @@ def atr_body(engine: AtrEngine | None, family: str, unit: str, month: int, param
     table.tooltip_duration = None
     in_pct = unit == "pct" and family == "outright"
     by_month = engine.month_table(family, "pct" if in_pct else "atr")
+    if not in_pct:  # points: shown times ATR_SCALE
+        by_month = by_month.copy()
+        for column in by_month.columns:
+            if str(column).startswith(("median_", "sd_")):
+                by_month[column] = by_month[column] * ATR_SCALE
     relative = engine.month_table(family, "atr", relative=True)
     pieces = [
         html.Div(
@@ -183,10 +195,10 @@ def atr_body(engine: AtrEngine | None, family: str, unit: str, month: int, param
         ),
         table,
         _section(
-            f"ATR by delivery month, N months before expiry ({'% of price' if in_pct else 'points'})",
+            f"ATR by delivery month, N months before expiry ({'% of price' if in_pct else f'points x{ATR_SCALE}'})",
             "Each row is one delivery month over its finished contracts: the median (SD) of the ATR a given number of months before expiry. "
             "Read across a row to see how a contract's ATR changes as it comes in towards expiry.",
-            _table("atr-month-table", month_columns(), month_rows(by_month, digits=2 if in_pct else 3), page_size=12),
+            _table("atr-month-table", month_columns(), month_rows(by_month, digits=2), page_size=12),
         ),
         _section(
             f"ATR as a multiple of the contract's own ATR when it became the front ({FRONT_DAYS} days out)",
@@ -218,6 +230,11 @@ def build_atr_chart(data: dict | None) -> go.Figure:
     if data is None:
         return empty_figure("Pick a contract")
     figure = go.Figure()
+    if data["unit"] == "points":  # shown times ATR_SCALE
+        data = {**data, "unit": f"points x{ATR_SCALE}", "atr": np.asarray(data["atr"]) * ATR_SCALE}
+        usual = data["usual"]
+        data["usual"] = {**usual, **{key: np.asarray(usual[key]) * ATR_SCALE for key in ("median", "low", "high")},
+                         "lines": {label: np.asarray(y) * ATR_SCALE for label, y in usual["lines"].items()}}
     usual = data["usual"]
     horizon = float(np.max(data["dte"])) * 1.04 + 5
     keep = usual["dte"] <= horizon
@@ -288,7 +305,7 @@ def hedge_calculator_result(result, lots: float, window: int) -> html.Div:
         pieces.append(dbc.Row(cards, className="g-2"))
     ratio = result.atr_ratio
     pieces.append(html.Div(
-        (f"ATR basis (matches the size of the daily moves only, not their direction): ATR of {a} {result.atr_a:.3f} (as of {result.atr_date_a}) ÷ ATR of {b} {result.atr_b:.3f} "
+        (f"ATR basis (matches the size of the daily moves only, not their direction): ATR of {a} {result.atr_a * ATR_SCALE:.2f} (as of {result.atr_date_a}) ÷ ATR of {b} {result.atr_b * ATR_SCALE:.2f} "
          f"(as of {result.atr_date_b}) = {ratio:.2f}, so {ratio * lots:.2f} lot(s) of {b} per {lots:g} of {a}"
          + (" (not scaled for contract size)." if result.size_ratio != 1 else ".")) if np.isfinite(ratio) else "ATR basis not available.",
         style={**_MUTED, "marginTop": "6px"},

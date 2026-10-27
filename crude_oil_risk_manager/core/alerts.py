@@ -3,6 +3,12 @@
 AlertManager never raises. The Teams webhook URL is a secret: it is never
 logged, and request exceptions are logged by type only because their messages
 can embed the URL.
+
+@MENTION. Teams sends a push to a phone for a post in a channel only when the user is @mentioned (or watches the channel's every
+post). With an email saved in Settings the alert is sent as an ADAPTIVE CARD that @mentions that address; the dashboard's
+older MessageCard cannot mention anyone. The mention can be limited to warnings and critical alerts, or to critical ones. If
+the Teams workflow does not accept the Adaptive Card, the same alert is sent again as the MessageCard, so an alert is never
+lost to the mention (the reason is in `mention_problem`, and Settings > Test shows it). Without an email nothing changes.
 """
 
 import logging
@@ -18,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 WEBHOOK_SETTING_KEY = "teams_webhook_url"
 ENABLED_SETTING_KEY = "teams_alerts_enabled"
+MENTION_EMAIL_KEY = "teams_mention_email"
+MENTION_NAME_KEY = "teams_mention_name"
+MENTION_LEVELS_KEY = "teams_mention_levels"
+MENTION_ALL, MENTION_WARNING, MENTION_CRITICAL = "all", "warning", "critical"
+MENTION_LEVEL_CHOICES = {MENTION_ALL: "All alerts", MENTION_WARNING: "Warnings and critical alerts", MENTION_CRITICAL: "Critical alerts only"}
 
 # Stop-loss / target alerts resend every this many seconds until stopped (see
 # AlertManager.stop_repeating_alert) or until the price moves back off the level.
@@ -29,8 +40,68 @@ _TEAMS_THEME_COLORS = {
     AlertLevel.WARNING: "FF8C00",
     AlertLevel.CRITICAL: "FF0000",
 }
+_MENTION_COVERS = {
+    MENTION_ALL: {AlertLevel.INFO, AlertLevel.WARNING, AlertLevel.CRITICAL},
+    MENTION_WARNING: {AlertLevel.WARNING, AlertLevel.CRITICAL},
+    MENTION_CRITICAL: {AlertLevel.CRITICAL},
+}
+_ADAPTIVE_COLORS = {AlertLevel.INFO: "Accent", AlertLevel.WARNING: "Warning", AlertLevel.CRITICAL: "Attention"}
+_AUTO = object()  # "decide the mention from the saved settings and the alert's level"
 _MAX_TITLE_LENGTH = 100
 _MAX_BODY_LENGTH = 500
+
+
+def mention_display_name(email: str, name: str | None = None) -> str:
+    """The name shown in the mention: the one typed in Settings, else made from the email ("jane.doe@x.com" -> "Jane Doe")."""
+    typed = (name or "").replace("<", "").replace(">", "").strip()
+    if typed:
+        return typed
+    local = (email or "").split("@")[0].replace("<", "").replace(">", "")
+    return " ".join(local.replace(".", " ").replace("_", " ").replace("-", " ").split()).title() or "You"
+
+
+def message_card_payload(alert: Alert) -> dict:
+    """The older MessageCard: no @mention is possible in it."""
+    return {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "themeColor": _TEAMS_THEME_COLORS[alert.level],
+        "summary": alert.title,
+        "sections": [
+            {
+                "activityTitle": alert.title,
+                "activitySubtitle": f"Crude Oil Risk Manager — {alert.timestamp.isoformat()}",
+                "facts": [
+                    {"name": "Level", "value": alert.level.value},
+                    {"name": "Details", "value": alert.body},
+                    {"name": "Structure", "value": alert.structure_id or "Portfolio"},
+                ],
+                "markdown": True,
+            }
+        ],
+    }
+
+
+def mention_payload(alert: Alert, email: str, name: str) -> dict:
+    """The alert as an Adaptive Card in the envelope a Teams workflow posts ("Post card in a chat or channel"), with an @mention
+    of `email` in its first line, which is what makes Teams push it to the phone."""
+    tag = f"<at>{name}</at>"
+    card = {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+            {"type": "TextBlock", "text": f"{tag} {alert.title}", "weight": "Bolder", "size": "Medium", "wrap": True, "color": _ADAPTIVE_COLORS[alert.level]},
+            {"type": "TextBlock", "text": alert.body, "wrap": True},
+            {"type": "FactSet", "facts": [
+                {"title": "Level", "value": alert.level.value},
+                {"title": "Structure", "value": alert.structure_id or "Portfolio"},
+                {"title": "Time (UTC)", "value": alert.timestamp.strftime("%Y-%m-%d %H:%M:%S")},
+            ]},
+        ],
+        "msteams": {"entities": [{"type": "mention", "text": tag, "mentioned": {"id": email, "name": name}}]},
+    }
+    return {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None, "content": card}]}
 
 
 def _trade_alert_checks(trade: Trade, live: float) -> tuple[tuple[str, float | None, bool], ...]:
@@ -54,6 +125,9 @@ class AlertManager:
         self._fallback_webhook_url = fallback_webhook_url
         # Why the last Teams send failed (exception type or HTTP status); never contains the URL.
         self.last_error: str | None = None
+        # Which format the last successful send used ("mention" or "card"), and why an @mention was dropped (if it was).
+        self.last_format: str | None = None
+        self.mention_problem: str | None = None
 
     def _get_teams_webhook(self) -> str | None:
         """Teams webhook URL from the settings table (falling back to the configured
@@ -219,50 +293,75 @@ class AlertManager:
             active.append(kind)
         return active
 
-    def send_test_alert(self, webhook_url: str | None = None) -> bool:
+    def _mention_target(self, level: AlertLevel) -> tuple[str, str] | None:
+        """(email, display name) to @mention for an alert of this level, or None (no email saved, or the level is not covered)."""
+        try:
+            email = (self.repository.get_setting(MENTION_EMAIL_KEY, "") or "").strip()
+            if not email:
+                return None
+            covers = _MENTION_COVERS.get(self.repository.get_setting(MENTION_LEVELS_KEY, MENTION_ALL), _MENTION_COVERS[MENTION_ALL])
+            if level not in covers:
+                return None
+            return email, mention_display_name(email, self.repository.get_setting(MENTION_NAME_KEY, ""))
+        except Exception as exc:  # noqa: BLE001 - alerting must never raise
+            logger.error("Could not read the Teams mention settings: %s", type(exc).__name__)
+            return None
+
+    def send_test_alert(self, webhook_url: str | None = None, mention_email: str | None = None, mention_name: str | None = None) -> bool:
         """Send a test message to Teams. It is not saved as an alert.
 
         Uses `webhook_url` if given (e.g. a value typed in Settings but not saved
         yet), else the configured webhook. Sends even if Teams alerts are
-        disabled, since it is an explicit user action. On failure `last_error` says why.
+        disabled, since it is an explicit user action. With a mention email (typed, else the saved one) the test @mentions it
+        whatever the alert levels chosen; `last_format` and `mention_problem` then say what happened. On failure `last_error` says why.
         """
         alert = Alert(
             level=AlertLevel.INFO,
             title="Test Alert from Crude Oil Risk Manager",
             body="This is a test message.",
         )
-        return self._send_teams_alert(alert, webhook_url=webhook_url)
+        email = (mention_email or "").strip()
+        if email:
+            mention = (email, mention_display_name(email, mention_name))
+        else:
+            try:
+                saved = (self.repository.get_setting(MENTION_EMAIL_KEY, "") or "").strip()
+                mention = (saved, mention_display_name(saved, self.repository.get_setting(MENTION_NAME_KEY, ""))) if saved else None
+            except Exception:  # noqa: BLE001
+                mention = None
+        return self._send_teams_alert(alert, webhook_url=webhook_url, mention=mention)
 
-    def _send_teams_alert(self, alert: Alert, webhook_url: str | None = None) -> bool:
-        """POST the alert to the Teams incoming webhook as a MessageCard.
+    def _send_teams_alert(self, alert: Alert, webhook_url: str | None = None, mention=_AUTO) -> bool:
+        """POST the alert to the Teams incoming webhook: as an Adaptive Card that @mentions the saved email when there is one
+        for this level, else (or if that is not accepted) as a MessageCard.
 
-        `webhook_url` overrides the configured webhook. Returns True on HTTP 200,
+        `webhook_url` overrides the configured webhook. Returns True on HTTP 200 / 202,
         False (logged, never raised) otherwise.
         """
         self.last_error = None
+        self.last_format = None
+        self.mention_problem = None
         webhook = webhook_url or self._get_teams_webhook()
         if not webhook:
             self.last_error = "no webhook URL configured"
             return False
 
-        payload = {
-            "@type": "MessageCard",
-            "@context": "http://schema.org/extensions",
-            "themeColor": _TEAMS_THEME_COLORS[alert.level],
-            "summary": alert.title,
-            "sections": [
-                {
-                    "activityTitle": alert.title,
-                    "activitySubtitle": f"Crude Oil Risk Manager — {alert.timestamp.isoformat()}",
-                    "facts": [
-                        {"name": "Level", "value": alert.level.value},
-                        {"name": "Details", "value": alert.body},
-                        {"name": "Structure", "value": alert.structure_id or "Portfolio"},
-                    ],
-                    "markdown": True,
-                }
-            ],
-        }
+        if mention is _AUTO:
+            mention = self._mention_target(alert.level)
+        if mention:
+            if self._post(webhook, mention_payload(alert, *mention)):
+                self.last_format = "mention"
+                return True
+            self.mention_problem = self.last_error
+            logger.warning("Teams did not accept the @mention format (%s); sending the alert without it", self.mention_problem)
+            self.last_error = None
+        if self._post(webhook, message_card_payload(alert)):
+            self.last_format = "card"
+            return True
+        return False
+
+    def _post(self, webhook: str, payload: dict) -> bool:
+        """One POST to the webhook; sets `last_error` and returns False if it failed."""
         try:
             response = requests.post(webhook, json=payload, timeout=_TEAMS_TIMEOUT_SECONDS)
         except requests.exceptions.RequestException as exc:

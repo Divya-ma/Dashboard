@@ -113,7 +113,7 @@ def build_packets(
             "entry": entry_price(s), "live": live_price(s, prices), "risk": risk.var([s]),
             "target": latest_level((trades_by_structure or {}).get(s.structure_id), "target_price"),
             "stop": latest_level((trades_by_structure or {}).get(s.structure_id), "stop_loss_price"),
-            "unrealized": info["unrealized"], "total": info["total"], "is_stale": info.get("is_stale", False),
+            "unrealized": info["unrealized"], "unrealized_net": info["unrealized"] - info.get("open_costs", 0.0), "total": info["total"], "is_stale": info.get("is_stale", False),
             "legs": _leg_rows(s, prices, risk),
         })
     packets.sort(key=lambda p: abs(p["unrealized"]), reverse=True)

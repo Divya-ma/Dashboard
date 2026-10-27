@@ -217,6 +217,29 @@ def front_rows(front: dict) -> list[dict]:
     } for m in front["metrics"]]
 
 
+YEARS_COLUMNS = [_col("Year contract", "label"), _col("OI at the same days before expiry", "oi", _INT), _col("% of that contract's peak", "pct", _ONE)]
+
+
+def years_body(data: dict | None) -> html.Div:
+    """The same delivery month in earlier years at today's number of days before expiry (MonitorEngine.years_table)."""
+    if not data:
+        return html.Div("Pick a contract.", style=_MUTED)
+    rows = [{
+        "label": r["label"] + " (live)" if r["live"] else r["label"], "oi": _number(r["oi"]),
+        "pct": _number(r["pct_of_peak"] * 100, 1) if np.isfinite(r["pct_of_peak"]) else None,
+    } for r in data["rows"]]
+    live = {"if": {"filter_query": '{label} contains "(live)"'}, "color": COLORS["ACCENT_GREEN"], "fontWeight": "bold"}
+    return html.Div([
+        html.H6(f"{data['label']}: earlier years of the same month, {data['dte']} days before expiry", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "22px"}),
+        html.Div(
+            f"OI of each earlier contract of this delivery month when it was {data['dte']} days from expiry (today's distance, from the OI of {data['data_date']}), "
+            "and that OI as a share of the contract's highest OI over its whole life. The live row's share is of its peak so far.",
+            style={**_MUTED, "marginBottom": "8px"},
+        ),
+        _table("oi-years-table", YEARS_COLUMNS, rows, [live], page_size=15) if len(rows) > 1 else html.Div("No finished contracts of this month yet.", style=_MUTED),
+    ])
+
+
 def front_check_body(front: dict | None, params: MonitorParams) -> html.Div:
     """Is the contract closest to expiry draining like finished contracts did at this point?"""
     if not front:

@@ -320,3 +320,13 @@ def test_every_editor_id_used_by_a_callback_is_in_the_archive_layout():
     wanted = {part.rsplit(".", 1)[0] for key in app.callback_map for part in key.strip(".").split("...") if part}
     editor_ids = {i for i in wanted if i.startswith("archive-edit")}
     assert editor_ids and editor_ids <= present, editor_ids - present
+
+
+def test_the_atr_is_shown_times_100_and_typed_back_into_stored_points():
+    from core.archive import display_atr
+    from ui.callbacks.archive_callbacks import _shown, _stored
+
+    assert display_atr(0.0731) == 7.31 and display_atr(None) is None and display_atr("quoted") == "quoted"
+    assert _shown("atr", 0.0731) == 7.31 and _shown("px_cl", 71.5) == 71.5
+    assert _stored("atr", 7.31) == pytest.approx(0.0731) and _stored("atr", "") == "" and _stored("atr", None) is None
+    assert _stored("px_cl", 71.5) == 71.5 and _stored("atr", "big") == "big"

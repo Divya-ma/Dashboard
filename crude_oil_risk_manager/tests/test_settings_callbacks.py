@@ -479,3 +479,52 @@ def test_baseline_status_is_active_from_realized_baseline_alone():
     read as "no reset active" when a real, non-zero realized baseline was captured."""
     assert sc._baseline_status(0.0, 29582.2) != "No reset active — Total PnL shows the true account total."
     assert "+$29,582" in sc._baseline_status(0.0, 29582.2)
+
+
+# ---------- Teams @mention ----------
+
+
+def test_save_teams_stores_the_mention_and_load_returns_it(env, repo):
+    button, status = sc.save_teams(1, "https://new.example/hook", True, " jane.doe@desk.example ", " Jane ", "warning")
+    assert button == "✅ Saved" and "will @mention you" in status and "warnings and critical" in status
+    assert (repo.get_setting("teams_mention_email"), repo.get_setting("teams_mention_name"), repo.get_setting("teams_mention_levels")) == ("jane.doe@desk.example", "Jane", "warning")
+    assert sc.load_teams_mention("/settings") == ("jane.doe@desk.example", "Jane", "warning")
+    with pytest.raises(sc.PreventUpdate):
+        sc.load_teams_mention("/home")
+    sc.save_teams(1, "https://new.example/hook", True, "", "", None)  # clearing the email turns the mention off; no level means all
+    assert sc.load_teams_mention("/settings") == ("", "", "all")
+
+
+def test_a_bad_mention_saves_nothing(env, repo):
+    for email, name, levels in (("not an email", "", "all"), ("a@b.example", "<script>", "all"), ("a@b.example", "x" * 61, "all"), ("a@b.example", "", "sometimes")):
+        button, status = sc.save_teams(1, "https://new.example/hook", True, email, name, levels)
+        assert button == "❌ Not saved" and status.startswith("❌")
+    assert repo.get_all_settings() == {}
+
+
+def test_the_test_message_says_whether_the_mention_worked(env, repo, mocker):
+    post = mocker.patch("core.alerts.requests.post", return_value=mocker.Mock(status_code=200))
+    assert "with an @mention of you" in sc.test_teams(1, "https://typed.example/hook", "jane.doe@desk.example", "")
+    assert post.call_args.kwargs["json"]["type"] == "message"
+    mocker.patch("core.alerts.requests.post", side_effect=[mocker.Mock(status_code=400), mocker.Mock(status_code=200)])
+    result = sc.test_teams(1, "https://typed.example/hook", "jane.doe@desk.example", "")
+    assert result.startswith("⚠️ Sent, but without the @mention") and "HTTP 400" in result
+    assert sc.test_teams(1, "https://typed.example/hook", "nonsense").startswith("❌ Failed:")
+
+
+def test_the_mention_fields_are_on_the_settings_page_and_wired():
+    from ui.layouts.settings import settings_layout
+
+    def ids(component):
+        found, stack = set(), [component]
+        while stack:
+            item = stack.pop()
+            if getattr(item, "id", None):
+                found.add(item.id)
+            children = getattr(item, "children", None)
+            stack.extend(children if isinstance(children, (list, tuple)) else [children] if children is not None else [])
+        return found
+
+    present = ids(settings_layout())
+    assert {"settings-teams-mention-email", "settings-teams-mention-name", "settings-teams-mention-levels"} <= present
+    assert set(sc._TEAMS_FIELDS) <= present

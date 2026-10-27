@@ -8,6 +8,7 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html
 
 from config.settings import settings
+from core.alerts import MENTION_ALL, MENTION_LEVEL_CHOICES
 from core.curve_settings import DEFAULT_OPEN_TIME, DEFAULT_OPEN_TZ, TIMEZONE_CHOICES
 from core.oi_settings import (
     DEFAULT_ATR_HISTORY_DAYS, DEFAULT_OI_HISTORY_DAYS, MAX_ATR_HISTORY_DAYS, MAX_OI_HISTORY_DAYS, MIN_ATR_HISTORY_DAYS, MIN_OI_HISTORY_DAYS,
@@ -251,6 +252,23 @@ def _teams_section() -> dbc.AccordionItem:
                 dbc.Input(id="settings-teams-webhook", type="password", placeholder="https://..."),
             ),
             dbc.Switch(id="settings-teams-enabled", label="Enable Teams Alerts", value=False, className="mb-3"),
+            html.Div("@mention me (so Teams pushes the alert to my phone)", style={**_STATUS_STYLE, "marginTop": "4px", "fontWeight": "bold"}),
+            html.Div(
+                "Teams pushes a channel post to your phone only if it @mentions you. Type the email you sign in to Teams with; leave it "
+                "empty for no mention. The alert is then sent as an Adaptive Card (your workflow must post the card as it receives it); "
+                "if Teams does not accept that, the alert is sent in the old format instead and is never lost. Use Test Teams Alert to check.",
+                style={"fontSize": "12px", "color": COLORS["TEXT_SECONDARY"], "marginBottom": "8px"},
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(_field("Your Teams email", dbc.Input(id="settings-teams-mention-email", type="email", placeholder="you@company.com")), md=5),
+                    dbc.Col(_field("Name shown (optional)", dbc.Input(id="settings-teams-mention-name", placeholder="made from the email if empty", maxLength=60)), md=3),
+                    dbc.Col(_field("Mention me for", dbc.Select(
+                        id="settings-teams-mention-levels", value=MENTION_ALL,
+                        options=[{"label": label, "value": key} for key, label in MENTION_LEVEL_CHOICES.items()],
+                    )), md=4),
+                ]
+            ),
             dbc.Button("Test Teams Alert", id="settings-test-teams", color="secondary", className="me-2"),
             dbc.Button("Save Teams Settings", id="settings-save-teams", color="primary"),
             html.Div("", id="settings-teams-status", style=_STATUS_STYLE),

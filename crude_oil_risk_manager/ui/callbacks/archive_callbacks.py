@@ -17,7 +17,7 @@ from core.journal_analysis import equity_curve, group_table, headline, separatio
 from ui.layouts.archive_analysis import (
     build_bar_figure, build_cards, build_equity_figure, separation_records, table_records, two_way_records,
 )
-from core.archive import build_archive_rows, delete_archived_structures, filter_archive_rows, journal_columns, structure_id_of, summarize
+from core.archive import ATR_DISPLAY_SCALE, build_archive_rows, delete_archived_structures, display_atr, filter_archive_rows, journal_columns, structure_id_of, summarize
 from core.models import StructureStatus
 from core.pnl import calculate_net_realized_pnl
 from core.user_settings import KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE
@@ -204,6 +204,21 @@ def toggle_editor(n_clicks, is_open):
     return not is_open
 
 
+def _shown(column, value):
+    """The editor shows the ATR times ATR_DISPLAY_SCALE, like the table."""
+    return display_atr(value) if column == "atr" else value
+
+
+def _stored(column, value):
+    """What was typed in the editor back into stored points (a number typed in the ATR cell is divided by ATR_DISPLAY_SCALE)."""
+    if column != "atr" or value is None or (isinstance(value, str) and not value.strip()):
+        return value
+    try:
+        return round(float(str(value).replace(",", "")) / ATR_DISPLAY_SCALE, 8)
+    except ValueError:
+        return value  # not a number: the normal check names it
+
+
 def fill_trade_editor(selected_id, _changes):
     """The selected trade's own values in every editor field (after a save too, so the panel shows what is stored)."""
     empty = (None, None, "", [], [], [], None, None, None, None)
@@ -215,7 +230,7 @@ def fill_trade_editor(selected_id, _changes):
     if structure is None:
         return empty
     cells = journal_columns(repository.get_journal(selected_id), [])
-    market = [{"id": column, "field": label, "entry": cells.get("e_" + column), "exit": cells.get("x_" + column)} for column, label in MARKET_FIELDS]
+    market = [{"id": column, "field": label, "entry": _shown(column, cells.get("e_" + column)), "exit": _shown(column, cells.get("x_" + column))} for column, label in MARKET_FIELDS]
     legs = [{"id": i, "leg": f"Leg {i + 1}", "symbol": leg.contract.symbol, "ratio": leg.ratio} for i, leg in enumerate(structure.legs)]
     return (
         structure.name, structure.structure_type.value, structure.notes or "", trade_rows(repository.get_trades_for_structure(selected_id)),
@@ -273,8 +288,8 @@ def save_market_edit(n_clicks, selected_id, rows, mfe_i, mae_i, mfe_d, mae_d, co
     if container.journal is None:
         return _status("The journal is not available.", False), no_update
     rows = rows or []
-    entry = {r["id"]: r.get("entry") for r in rows}
-    exit_ = {r["id"]: r.get("exit") for r in rows}
+    entry = {r["id"]: _stored(r["id"], r.get("entry")) for r in rows}
+    exit_ = {r["id"]: _stored(r["id"], r.get("exit")) for r in rows}
     excursion = dict(zip(EXCURSION_KEYS, (mfe_i, mae_i, mfe_d, mae_d)))
     return _save(selected_id, counter, lambda sid: (container.journal.set_market(sid, entry, exit_, excursion), "Saved the market data.")[1])
 

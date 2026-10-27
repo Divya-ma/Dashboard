@@ -30,6 +30,7 @@ from core.pnl import calculate_portfolio_pnl
 from core.oi_settings import (
     KEY_ATR_HISTORY_DAYS, KEY_OI_HISTORY_DAYS, load_atr_history_days, load_history_days, validate_atr_history_days, validate_history_days,
 )
+from core.alerts import MENTION_ALL, MENTION_LEVEL_CHOICES
 from core.user_settings import KEY_REQUIRE_STOP_TARGET
 from core.user_settings import (
     KEY_API_TOKEN,
@@ -42,9 +43,15 @@ from core.user_settings import (
     KEY_STALENESS,
     KEY_STRUCTURE_MAX_LOSS,
     KEY_TEAMS_ENABLED,
+    KEY_TEAMS_MENTION_EMAIL,
+    KEY_TEAMS_MENTION_LEVELS,
+    KEY_TEAMS_MENTION_NAME,
     KEY_TEAMS_WEBHOOK,
     KEY_VAR_CONFIDENCE,
     validate_defaults,
+    validate_mention_email,
+    validate_mention_levels,
+    validate_mention_name,
     validate_thresholds,
     validate_token,
     validate_webhook_url,
@@ -71,7 +78,9 @@ _THRESHOLD_FIELDS = [
     "settings-margin-limit",
 ]
 _DEFAULT_FIELDS = ["settings-var-confidence", "settings-correlation-rolling", "settings-correlation-lookback"]
-_TEAMS_FIELDS = ["settings-teams-webhook", "settings-teams-enabled"]
+_TEAMS_FIELDS = [
+    "settings-teams-webhook", "settings-teams-enabled", "settings-teams-mention-email", "settings-teams-mention-name", "settings-teams-mention-levels",
+]
 
 
 def _token_status(token: str) -> str:
@@ -309,33 +318,60 @@ def _reset_label(label: str):
 # ----------------------------------------------------------------------
 
 
-def save_teams(n_clicks, webhook_url, enabled):
-    """Validate and store the Teams webhook and enabled flag."""
+def load_teams_mention(pathname):
+    """The saved @mention email, name and alert levels (only when the Settings tab is open)."""
+    if pathname != "/settings":
+        raise PreventUpdate
+    repo = container.repository
+    return (
+        repo.get_setting(KEY_TEAMS_MENTION_EMAIL, ""), repo.get_setting(KEY_TEAMS_MENTION_NAME, ""),
+        repo.get_setting(KEY_TEAMS_MENTION_LEVELS, MENTION_ALL),
+    )
+
+
+def save_teams(n_clicks, webhook_url, enabled, mention_email=None, mention_name=None, mention_levels=None):
+    """Validate and store the Teams webhook, the enabled flag and the @mention (email, name, which alerts)."""
     try:
         webhook = validate_webhook_url(webhook_url)
+        email = validate_mention_email(mention_email)
+        name = validate_mention_name(mention_name)
+        levels = validate_mention_levels(mention_levels)
     except ValueError as exc:
         return "❌ Not saved", f"❌ {exc}"
 
-    container.repository.set_setting(KEY_TEAMS_WEBHOOK, webhook)
-    container.repository.set_setting(KEY_TEAMS_ENABLED, bool(enabled))
+    repo = container.repository
+    repo.set_setting(KEY_TEAMS_WEBHOOK, webhook)
+    repo.set_setting(KEY_TEAMS_ENABLED, bool(enabled))
+    repo.set_setting(KEY_TEAMS_MENTION_EMAIL, email)
+    repo.set_setting(KEY_TEAMS_MENTION_NAME, name)
+    repo.set_setting(KEY_TEAMS_MENTION_LEVELS, levels)
     container.alert_manager.clear_cache()
 
     if enabled and not webhook:
         return "✅ Saved", "✅ Saved — no webhook URL set, so no Teams alerts will be sent"
+    if email:
+        return "✅ Saved", f"✅ Teams settings saved — alerts will @mention you ({MENTION_LEVEL_CHOICES[levels].lower()}). Use Test Teams Alert to check your phone."
     return "✅ Saved", "✅ Teams settings saved"
 
 
-def test_teams(n_clicks, webhook_url):
-    """Send a test message to Teams using the typed webhook (or, if blank, the saved one)."""
+def test_teams(n_clicks, webhook_url, mention_email=None, mention_name=None):
+    """Send a test message to Teams using the typed webhook (or, if blank, the saved one), @mentioning the typed email (or the saved one)."""
     try:
         webhook = validate_webhook_url(webhook_url) or None
+        email = validate_mention_email(mention_email) or None
+        name = validate_mention_name(mention_name) or None
     except ValueError as exc:
         return f"❌ Failed: {exc}"
 
     manager = container.alert_manager
-    if manager.send_test_alert(webhook_url=webhook):
-        return "✅ Test message sent"
-    return f"❌ Failed: {manager.last_error or 'unknown error'}"
+    if not manager.send_test_alert(webhook_url=webhook, mention_email=email, mention_name=name):
+        return f"❌ Failed: {manager.last_error or 'unknown error'}"
+    if manager.last_format == "mention":
+        return "✅ Test message sent with an @mention of you: check that your phone buzzes"
+    if manager.mention_problem:
+        return (f"⚠️ Sent, but without the @mention: Teams did not accept the Adaptive Card format ({manager.mention_problem}). "
+                "Your workflow probably needs to be the one that posts a card it receives (the 'Post card in a chat or channel' action).")
+    return "✅ Test message sent"
 
 
 # ----------------------------------------------------------------------
@@ -614,9 +650,18 @@ def register_settings_callbacks(app) -> None:
     )(save_teams)
 
     app.callback(
+        Output("settings-teams-mention-email", "value"),
+        Output("settings-teams-mention-name", "value"),
+        Output("settings-teams-mention-levels", "value"),
+        Input("url", "pathname"),
+    )(load_teams_mention)
+
+    app.callback(
         Output("settings-teams-status", "children"),
         Input("settings-test-teams", "n_clicks"),
         State("settings-teams-webhook", "value"),
+        State("settings-teams-mention-email", "value"),
+        State("settings-teams-mention-name", "value"),
         prevent_initial_call=True,
         running=[(Output("settings-test-teams", "disabled"), True, False)],
     )(test_teams)

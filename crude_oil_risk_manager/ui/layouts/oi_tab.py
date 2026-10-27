@@ -25,7 +25,7 @@ from core.oi_research import OFFSET_LABELS, OI_AT_DAYS, ProductResearch, last_mo
 from ui.container import container
 from ui.layouts.atr_view import atr_tab_content
 from ui.layouts.curve_tab import _LABEL, _MUTED, _layout, _table, empty_figure
-from ui.layouts.oi_monitor_view import monitor_controls
+from ui.layouts.oi_monitor_view import monitor_controls, years_body
 from ui.layouts.shell import COLORS
 
 REFRESH_MS = 3000
@@ -221,8 +221,9 @@ def _section(title: str, hint: str, body) -> html.Div:
     ])
 
 
-def research_body(research: ProductResearch, product: str, month: int) -> html.Div:
-    """The research of ONE product, with the month-specific parts for ONE delivery month."""
+def research_body(research: ProductResearch, product: str, month: int, years_data: dict | None = None) -> html.Div:
+    """The research of ONE product, with the month-specific parts for ONE delivery month. `years_data` is the live
+    contract of that month against its earlier years (MonitorEngine.years_table), shown before the month's own tables."""
     if research is None or research.empty:
         return html.Div((research.error if research is not None else None) or "No research yet: waiting for the OI download.", style=_MUTED)
     graph = {"displayModeBar": False}
@@ -269,6 +270,7 @@ def research_body(research: ProductResearch, product: str, month: int) -> html.D
             "This is what the live monitor compares today's OI with.",
             _table("oi-month-at-table", month_at_columns(), month_at_rows(research), page_size=12),
         ),
+        years_body(years_data) if years_data else html.Div(),
         month_part,
     ])
 
@@ -295,6 +297,7 @@ def oi_layout() -> html.Div:
                 html.H6("One contract against its usual path", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "22px"}),
                 dbc.Row([dbc.Col([html.Div("Contract", style=_LABEL), dcc.Dropdown(id="oi-contract", options=[], clearable=False)], md=3)], className="mb-2"),
                 dcc.Graph(id="oi-chart", figure=empty_figure("Pick a contract"), config={"displayModeBar": False}, style={"height": "460px"}),
+                html.Div(id="oi-years-wrap"),
             ], style={"paddingTop": "14px"}), label="Live monitor", tab_id="monitor"),
             dbc.Tab(html.Div([
                 dbc.Row([dbc.Col([html.Div("Delivery month", style=_LABEL), dcc.Dropdown(id="oi-month", options=month_options, value=default_month(), clearable=False)], md=3)],

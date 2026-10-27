@@ -9,8 +9,8 @@ For each structure with exits this replays its trades both ways (core.trade_entr
 False) and changes only what the ENGINE itself had produced:
 
   * an exit's realized P&L, if the stored figure equals what the old average-cost replay gives;
-  * the entry price of the lots still open. An open structure whose legs do NOT show what the old replay gives (real per-leg fills, a
-    hand-corrected entry price) is left entirely alone: its exits and its open lots must move together or total P&L would shift.
+  * the entry price of the lots still open, moved by exactly the amount FIFO moves it in the replay, so the exits and the open lots
+    move together and total P&L is unchanged. Real per-leg fills or a hand-corrected price on the open lots stay in the legs.
 
 A structure with ANY exit whose stored P&L differs from the old replay (typed in the Archive editor, or from real per-leg fills) is
 left entirely alone, so a typed figure is never combined with a moved entry price.
@@ -27,7 +27,7 @@ from core.trade_entry import TradeError, recompute_structure_from_trades
 
 logger = logging.getLogger(__name__)
 
-KEY_FIFO_MIGRATED = "fifo_migrated"
+KEY_FIFO_MIGRATED = "fifo_migrated_v2"  # v1 skipped a structure whose open lots carried real fills or a corrected price; v2 moves it too
 _OPEN_STATUSES = (StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED)
 _EXIT_EVENTS = (TradeEventType.STRUCTURE_PARTIAL_EXIT, TradeEventType.FULL_EXIT, TradeEventType.DISSOLVE)
 _TOLERANCE = 1e-6
@@ -67,10 +67,13 @@ def migrate_to_fifo(repository) -> dict:
         legs = None
         if structure.status in _OPEN_STATUSES:
             stored_c, old_c, new_c = (composite_entry(x) for x in (structure.legs, average.structure.legs, fifo.structure.legs))
-            if None in (stored_c, old_c, new_c) or not _same(stored_c, old_c):
-                continue  # the legs are not what the trades give (real per-leg fills, a corrected price): the exits and the lots left open must move together, so neither does
+            if None in (stored_c, old_c, new_c):
+                continue
+            # The exits and the lots left open must move together (the total is unchanged), so the open lots' entry price moves by
+            # exactly what FIFO moves it in the replay. Real per-leg fills or a corrected price on the open lots stay in the legs:
+            # it is the same shift whatever the stored price is, because the exits took lots the typed prices describe.
             if not _same(new_c, old_c):
-                legs = with_entry_price(structure.legs, new_c)
+                legs = with_entry_price(structure.legs, stored_c + (new_c - old_c))
         if not pnl_updates and legs is None:
             continue
         for trade_id, (_old, new_pnl) in pnl_updates.items():

@@ -377,3 +377,85 @@ def test_missing_price_or_structure_is_skipped(manager):
     trade = alert_trade(s, "buy", stop=73.0)
     assert manager.check_price_alerts({}, [trade], {s.structure_id: s}) == []
     assert manager.check_price_alerts({"CLZ26": 70.0}, [trade], {}) == []
+
+
+# ---------- @mention (a phone push) ----------
+
+from core.alerts import mention_display_name, mention_payload, message_card_payload  # noqa: E402
+
+
+def ok(mocker):
+    return mocker.Mock(status_code=200)
+
+
+def test_without_an_email_nothing_changes_and_the_old_card_is_sent(teams_manager, mocker):
+    post = mocker.patch("core.alerts.requests.post", return_value=ok(mocker))
+    assert teams_manager.send_alert(AlertLevel.CRITICAL, "Stop", "body").channels_sent == ["in_app", "teams"]
+    assert post.call_args.kwargs["json"]["@type"] == "MessageCard" and teams_manager.last_format == "card"
+
+
+def test_with_an_email_the_alert_is_an_adaptive_card_that_mentions_it(teams_manager, repo, mocker):
+    repo.set_setting("teams_mention_email", "jane.doe@desk.example")
+    post = mocker.patch("core.alerts.requests.post", return_value=ok(mocker))
+    alert = teams_manager.send_alert(AlertLevel.CRITICAL, "🛑 Stop Loss Hit: BRN Jan28 DFly", "Live price 0.1 crossed the stop.", "s-1")
+    assert alert.channels_sent == ["in_app", "teams"] and teams_manager.last_format == "mention" and post.call_count == 1
+    body = post.call_args.kwargs["json"]
+    card = body["attachments"][0]["content"]
+    assert body["type"] == "message" and body["attachments"][0]["contentType"] == "application/vnd.microsoft.card.adaptive"
+    assert card["type"] == "AdaptiveCard" and card["body"][0]["text"] == "<at>Jane Doe</at> 🛑 Stop Loss Hit: BRN Jan28 DFly"
+    assert card["body"][0]["color"] == "Attention" and card["body"][1]["text"] == "Live price 0.1 crossed the stop."
+    assert card["msteams"]["entities"] == [{"type": "mention", "text": "<at>Jane Doe</at>", "mentioned": {"id": "jane.doe@desk.example", "name": "Jane Doe"}}]
+    assert {"title": "Structure", "value": "s-1"} in card["body"][2]["facts"]
+
+
+def test_the_mention_can_be_limited_to_some_levels(teams_manager, repo, mocker):
+    repo.set_setting("teams_mention_email", "jane.doe@desk.example")
+    post = mocker.patch("core.alerts.requests.post", return_value=ok(mocker))
+    for choice, mentioned in (("all", (True, True, True)), ("warning", (False, True, True)), ("critical", (False, False, True))):
+        repo.set_setting("teams_mention_levels", choice)
+        seen = []
+        for level in (AlertLevel.INFO, AlertLevel.WARNING, AlertLevel.CRITICAL):
+            teams_manager.send_alert(level, "t", "b")
+            seen.append(post.call_args.kwargs["json"].get("type") == "message")
+        assert tuple(seen) == mentioned, choice
+
+
+def test_a_rejected_mention_format_falls_back_to_the_old_card_so_the_alert_is_not_lost(teams_manager, repo, mocker):
+    repo.set_setting("teams_mention_email", "jane.doe@desk.example")
+    post = mocker.patch("core.alerts.requests.post", side_effect=[mocker.Mock(status_code=400), ok(mocker)])
+    alert = teams_manager.send_alert(AlertLevel.CRITICAL, "Stop", "body")
+    assert alert.channels_sent == ["in_app", "teams"] and post.call_count == 2
+    assert post.call_args_list[0].kwargs["json"]["type"] == "message" and post.call_args_list[1].kwargs["json"]["@type"] == "MessageCard"
+    assert teams_manager.last_format == "card" and "HTTP 400" in teams_manager.mention_problem and teams_manager.last_error is None
+    both_fail = mocker.patch("core.alerts.requests.post", return_value=mocker.Mock(status_code=500))
+    assert teams_manager.send_alert(AlertLevel.CRITICAL, "Stop", "body").channels_sent == ["in_app"] and both_fail.call_count == 2
+    assert teams_manager.last_error == "Teams rejected the message (HTTP 500)"
+
+
+def test_the_test_message_mentions_the_typed_or_saved_email_whatever_the_levels(teams_manager, repo, mocker):
+    post = mocker.patch("core.alerts.requests.post", return_value=ok(mocker))
+    assert teams_manager.send_test_alert(mention_email="typed@desk.example", mention_name="Typed Name")
+    entity = post.call_args.kwargs["json"]["attachments"][0]["content"]["msteams"]["entities"][0]
+    assert entity["mentioned"] == {"id": "typed@desk.example", "name": "Typed Name"} and teams_manager.last_format == "mention"
+    repo.set_setting("teams_mention_email", "saved@desk.example")
+    repo.set_setting("teams_mention_levels", "critical")  # an info-level test still mentions: it is an explicit check
+    teams_manager.send_test_alert()
+    assert post.call_args.kwargs["json"]["attachments"][0]["content"]["msteams"]["entities"][0]["mentioned"]["id"] == "saved@desk.example"
+    repo.set_setting("teams_mention_email", "")
+    teams_manager.send_test_alert()
+    assert post.call_args.kwargs["json"]["@type"] == "MessageCard"
+
+
+def test_the_display_name_comes_from_the_email_unless_typed_and_never_carries_markup():
+    assert mention_display_name("jane.doe@desk.example") == "Jane Doe" and mention_display_name("a_b-c@x.example") == "A B C"
+    assert mention_display_name("jane@x.example", "  <b>Jane D</b> ") == "bJane D/b" and mention_display_name("", None) == "You"
+    alert = make_alert()
+    assert "<at>A B</at>" in str(mention_payload(alert, "a@b.example", "A B")) and message_card_payload(alert)["summary"] == alert.title
+
+
+def test_the_mention_email_is_not_logged(teams_manager, repo, mocker, caplog):
+    repo.set_setting("teams_mention_email", "jane.doe@desk.example")
+    mocker.patch("core.alerts.requests.post", side_effect=requests.exceptions.ConnectionError("down"))
+    with caplog.at_level("DEBUG"):
+        teams_manager.send_alert(AlertLevel.CRITICAL, "Stop", "body")
+    assert "jane.doe@desk.example" not in caplog.text and WEBHOOK not in caplog.text

@@ -261,6 +261,32 @@ def test_a_structure_with_no_quoted_contract_uses_the_combined_closes():
     assert one is not None and one == pytest.approx(2 * structure_atr(outright.model_copy(update={"legs": [outright.legs[0].model_copy(update={"ratio": 1})]}), atr_frame_of([("CLF27", "CL")]), 14, date(2026, 9, 25)))
 
 
+def test_an_unquoted_structure_is_estimated_from_the_volatility_of_its_combined_price_and_says_so():
+    from core.journal_snapshot import ATR_PER_SIGMA_OTHER, structure_atr_with_basis
+
+    store = atr_frame_of([("CLF27", "CL"), ("CLG27", "CL"), ("CLH27", "CL")])
+    value, basis = structure_atr_with_basis(fly_structure(), store, 14, date(2026, 9, 25))
+    frame = store("CL").set_index("date")
+    price = sum(frame[frame["symbol"] == s]["close"] * r for s, r in (("CLF27", 1), ("CLG27", -2), ("CLH27", 1)))
+    assert value == pytest.approx(ATR_PER_SIGMA_OTHER * price.diff().dropna().iloc[-60:].std())
+    assert basis == "estimated ±65%"
+    quoted, quoted_basis = structure_atr_with_basis(fly_structure(), atr_frame_of([("CLF27-G27-H27", "CL"), ("CLF27", "CL"), ("CLG27", "CL"), ("CLH27", "CL")]), 14, date(2026, 9, 25))
+    assert quoted_basis == "quoted" and quoted is not None
+    assert structure_atr_with_basis(fly_structure(), atr_frame_of([("CLF27", "CL")]), 14, date(2026, 9, 25)) == (None, None)
+    assert structure_atr_with_basis(fly_structure(), atr_frame_of([("CLF27", "CL"), ("CLG27", "CL"), ("CLH27", "CL")], days=20), 14, date(2026, 9, 25)) == (None, None)  # too little history
+
+
+def test_perfectly_correlated_legs_give_a_near_zero_estimate_not_the_sum_of_leg_atrs():
+    from core.journal_snapshot import structure_atr_with_basis
+
+    days = pd.bdate_range("2026-07-01", periods=60)
+    walk = 70.0 + np.cumsum(np.random.default_rng(3).normal(0, 0.5, 60))
+    rows = [{"symbol": s, "date": d, "open": walk[i], "high": walk[i] + 1, "low": walk[i] - 1, "close": walk[i], "volume": 10} for s in ("CLF27", "CLG27", "CLH27") for i, d in enumerate(days)]
+    frame = pd.DataFrame(rows)
+    value, _ = structure_atr_with_basis(fly_structure(), lambda product: frame, 14, date(2026, 10, 30))
+    assert value == pytest.approx(0.0, abs=1e-9)  # (1, -2, 1) of identical prices is flat
+
+
 # ---------- the service ----------
 
 
