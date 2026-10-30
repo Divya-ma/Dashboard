@@ -48,6 +48,7 @@ from typing import Callable
 
 from adapters.base import LiveDataAdapter, LivePrice, SymbolTranslator
 from adapters.qh_api import QHApi, make_api
+from core.box import is_box_symbol
 from core.derived_prices import components_needed, derive_price
 from core.models import StructureStatus
 from db.repository import Repository
@@ -200,7 +201,7 @@ class FairValueLiveAdapter(LiveDataAdapter):
         already = set(internal_by_api) | set(extras)
         codes: list[str] = []
         for api_code, internal in internal_by_api.items():
-            if "-" not in api_code or (self._missing_last is not None and api_code not in self._missing_last):
+            if ("-" not in api_code and not is_box_symbol(internal)) or (self._missing_last is not None and api_code not in self._missing_last):
                 continue
             for component in components_needed(internal):
                 try:
@@ -251,13 +252,19 @@ class FairValueLiveAdapter(LiveDataAdapter):
             )
 
         if extra_codes:
+            for api_code in extra_codes:  # a CL-BZ box the API did not price is built from its CL and BZ legs
+                if api_code not in extra_prices and api_code not in returned:
+                    internal = self._internal_box_symbol(api_code)
+                    built = self._derive(internal, returned, now) if internal else None
+                    if built is not None:
+                        extra_prices[api_code] = (built.price, built.timestamp.timestamp())
             self._curve_prices = extra_prices
         missing: set[str] = set()
         for api_code, symbol in internal_by_api.items():
             if symbol in results:
                 self._reported.discard(symbol)
                 continue
-            if "-" in api_code:
+            if "-" in api_code or is_box_symbol(symbol):
                 missing.add(api_code)
             derived = self._derive(symbol, returned, now)
             if derived is not None:
@@ -268,6 +275,15 @@ class FairValueLiveAdapter(LiveDataAdapter):
         if component_codes is not None:  # a real poll, not a connection test
             self._missing_last = frozenset(missing)
         return results
+
+    @staticmethod
+    def _internal_box_symbol(api_code: str) -> str | None:
+        """The internal symbol of an API code if it is a CL-BZ box (WTCLCOF27, CLBZZXF27-G27), else None."""
+        try:
+            internal = SymbolTranslator.api_to_internal(api_code)
+        except ValueError:
+            return None
+        return internal if is_box_symbol(internal) else None
 
     def _derive(self, symbol: str, returned: dict[str, tuple[float, float]], now: datetime) -> LivePrice | None:
         """A price for `symbol` built from the contracts in the reply, or None (see core.derived_prices)."""

@@ -66,7 +66,7 @@ def test_the_atr_and_holding_settings_are_gone_and_old_saved_values_are_ignored(
     assert not {"atr_threshold", "hold_short", "hold_long", "session_hour"} & set(ChurnParams().__dict__)
     params = validate_params({"atr_threshold": 2, "hold_short": 3, "hold_long": 20, "session_hour": 22, "start_from": 4})
     assert params.start_from == 4 and params.osc_days == 5 and (params.window_start, params.window_end) == (9.0, 19.0)
-    assert params.spread_dfly == 0.0 and params.stop_mult == 3.0 and params.patience_min == 60.0
+    assert params.spread_dfly == 0.0 and params.stop_mult == 2.0 and params.patience_min == 60.0
     with pytest.raises(ValueError):
         validate_params({"contracts": 6, "start_from": 7})
     with pytest.raises(ValueError):
@@ -179,7 +179,7 @@ def test_a_scored_row_outside_your_hours_is_closed_and_a_recent_only_profit_is_f
 # ----------------------------------------------------------------------
 
 LIVE: dict = {}
-PARAMS = ChurnParams(contracts=4, start_from=1, min_volume=1)
+PARAMS = ChurnParams(contracts=4, start_from=1, min_volume=1, min_z=0.0, atr_share=0.0)  # the plain ladder; the new options have their own tests
 
 
 class FakeRepo:
@@ -230,7 +230,7 @@ def _fill_live(service, age=5.0):
 def test_every_contract_is_simulated_but_only_those_from_the_start_are_shown(service):
     results = service.results(PARAMS)
     assert set(results.rows["position"]) == {1, 2, 3, 4}  # the front contracts are simulated too
-    shown = service.scored(ChurnParams(contracts=4, start_from=3, min_volume=1))  # same simulation: the start is a view setting
+    shown = service.scored(ChurnParams(contracts=4, start_from=3, min_volume=1, min_z=0.0, atr_share=0.0))  # same simulation: the start is a view setting
     assert set(shown["position"]) == {3, 4} and not shown.empty
     everything = service.scored(PARAMS).set_index(["symbol", "direction"])["score"]  # the edge part ranks among the rows shown
     later = shown.set_index(["symbol", "direction"])["score"]
@@ -262,7 +262,7 @@ def test_the_figures_that_rank_a_row_are_out_of_sample(service):
 
 
 def test_thin_contracts_are_shown_but_not_scored(service):
-    params = ChurnParams(contracts=4, start_from=1, min_volume=10)
+    params = ChurnParams(contracts=4, start_from=1, min_volume=10, min_z=0.0, atr_share=0.0)
     rows = service.scored(params)
     thin = rows[~rows["eligible"]]
     assert len(thin) == 2 * 2 * 2 and (thin["score"] == 0).all()  # the silent fly and the d-fly built on it, both sides, both products
@@ -287,7 +287,7 @@ def test_the_table_is_none_until_the_simulation_exists_then_fills_in(service):
     _fill_live(service)
     table = service.live_table(PARAMS)
     live = table[table["verdict"].isin(["GO", "WAIT"])]
-    assert len(live) > 3 and live["price"].notna().all() and (live["entry"] != live["price"]).all() and np.allclose(live["age"], 5.0)
+    assert len(live) > 3 and live["price"].notna().all() and (live["entry"] != live["price"])[live["family"] != "dfly"].all() and np.allclose(live["age"], 5.0)
     assert set(service.live_table(PARAMS, family="dfly")["family"]) == {"dfly"} and set(service.live_table(PARAMS, direction="short")["direction"]) == {"short"}
     LIVE.clear()
     assert set(service.live_table(PARAMS)["verdict"]) <= {"NO PRICE", "NOT SCORED"} and service.live_table(PARAMS)["osc"].isna().all()
@@ -307,7 +307,7 @@ def test_outside_your_trading_hours_the_rows_say_closed(service, monkeypatch):
 def test_the_oscillation_count_is_that_of_the_live_price_level(service):
     results = service.results(PARAMS)
     _fill_live(service)
-    params = ChurnParams(contracts=4, start_from=1, min_volume=1, osc_days=3)
+    params = ChurnParams(contracts=4, start_from=1, min_volume=1, osc_days=3, min_z=0.0, atr_share=0.0)
     table = service.live_table(params, product="CL", family="outright").set_index(["symbol", "direction"])
     assert len(table) > 0
     for (symbol, direction), row in table.iterrows():
@@ -316,7 +316,7 @@ def test_the_oscillation_count_is_that_of_the_live_price_level(service):
         sign = 1 if direction == "long" else -1
         level = LIVE[symbol][0] + sign * spec.half_spread * spec.tick
         assert row["osc"] == count_oscillations(detail["path"], direction, level, detail["best"], spec.tick, 3)
-    wide = service.live_table(ChurnParams(contracts=4, start_from=1, min_volume=1, osc_days=10), product="CL", family="outright").set_index(["symbol", "direction"])
+    wide = service.live_table(ChurnParams(contracts=4, start_from=1, min_volume=1, osc_days=10, min_z=0.0, atr_share=0.0), product="CL", family="outright").set_index(["symbol", "direction"])
     assert (wide["osc"] >= table["osc"]).all()  # a longer range can only find more
 
 
@@ -329,7 +329,7 @@ def test_a_dfly_is_priced_live_from_its_two_flies(service):
 
 
 def test_detail_grid_has_every_target_and_worse_fill(service):
-    params = ChurnParams(contracts=4, start_from=1, min_volume=1, max_target=4)
+    params = ChurnParams(contracts=4, start_from=1, min_volume=1, max_target=4, min_z=0.0, atr_share=0.0)
     assert service.cached(params) is None
     service.results(params)  # max_target is a simulation setting: this builds a second simulation
     row = service.scored(params).iloc[0]
@@ -359,7 +359,7 @@ def test_params_persist(tmp_path):
 # Page
 # ----------------------------------------------------------------------
 
-USER_COLUMNS = ["Contract", "Live Price", "Volume/day", "ATR", "Cost", "Per lot Net Profit", "Number of oscillation", "Score", "Side", "Worse Price Score"]
+USER_COLUMNS = ["Contract", "Live Price", "Volume/day", "ATR", "Cost", "Per lot Net Profit", "Number of oscillation", "Score", "Tradability", "Proof", "Side", "Worse Price Score"]
 
 
 def test_the_table_has_the_columns_asked_for_and_nothing_else_visible():
@@ -447,3 +447,30 @@ def test_the_store_refreshes_the_newest_candles_during_the_day(tmp_path):
     later = datetime(2026, 10, 14, 9, 25, tzinfo=timezone.utc)
     assert not store.is_current(TODAY, 6, 3, later, 10) and store.is_current(TODAY, 6, 3, later, 60)
     assert store.is_current(TODAY, 6, 3)  # the daily check ignores the age
+
+
+def test_tradability_does_not_depend_on_profit_and_proof_says_whether_a_profit_is_backed_by_the_earlier_days():
+    from core.churn_service import _score
+
+    rows = pd.DataFrame({
+        "volume_day": [500.0, 500.0, 500.0, 5.0], "net_day": [30.0, 30.0, -50.0, -5.0], "insample_net_day": [10.0, -4.0, -9.0, 1.0], "split": [True, True, True, True],
+        "hit_prob": [0.6, 0.6, 0.5, 0.9], "worse_score": [0.8] * 4, "pos_days": [0.7] * 4, "blowup": [0.0] * 4,
+        "trips_day": [3.0, 3.0, 2.0, 5.0], "cost_rt": [4.0] * 4, "target_usd": [60.0] * 4,
+    })
+    scored = _score(rows, 100.0)
+    assert list(scored["proof"]) == ["Proven", "Recent only", "No edge", "No edge"]
+    assert scored["score"][2] == 0 and scored["tradable"][2] > 0  # a loser has no score but is still workable
+    assert scored["tradable"][3] == 0  # too thin to judge
+    assert scored["tradable"].between(0, 100).all()
+
+
+def test_saved_settings_that_still_hold_the_old_defaults_take_the_new_ones_but_changed_ones_stay():
+    from core.churn_service import KEY_CHURN_PARAMS, load_params
+
+    repo = FakeRepo()
+    repo.set_setting(KEY_CHURN_PARAMS, {"window_days": 60, "max_target": 6, "stop_mult": 3.0, "patience_min": 45})
+    moved = load_params(repo)
+    assert (moved.window_days, moved.max_target, moved.stop_mult, moved.patience_min) == (120, 15, 2.0, 45.0)
+    repo.set_setting(KEY_CHURN_PARAMS, {"window_days": 60, "max_target": 8, "stop_mult": 3.0})
+    kept = load_params(repo)
+    assert (kept.window_days, kept.max_target, kept.stop_mult) == (60, 8, 3.0)

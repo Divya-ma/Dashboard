@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from core.curve_calendar import PRODUCTS
+from core.curve_calendar import OI_PRODUCTS
 from core.models import AlertLevel
 from core.oi_monitor import STATUS_SUDDEN, MonitorEngine, MonitorParams, MonitorResult, load_params, save_params
 from core.oi_research import ProductResearch, build_research
@@ -143,7 +143,7 @@ class OiService:
 
     def research(self) -> dict[str, ProductResearch]:
         """Research of every product (each built once; see research_for)."""
-        return {p: self.research_for(p) for p in PRODUCTS}
+        return {p: self.research_for(p) for p in OI_PRODUCTS}
 
     # -- live monitor ---------------------------------------------------
 
@@ -177,7 +177,7 @@ class OiService:
             return 0
         remembered = list(self._repository.get_setting(KEY_ALERTS_SENT, []) or [])
         sent = 0
-        for product in PRODUCTS:
+        for product in OI_PRODUCTS:
             _, result = self.monitor(product, params)
             if result.rows.empty:
                 continue

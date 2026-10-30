@@ -278,7 +278,7 @@ def research_body(research: ProductResearch, product: str, month: int, years_dat
 def oi_layout() -> html.Div:
     service = container.oi_service
     params = service.monitor_params() if service is not None else MonitorParams()
-    product_options = [{"label": p.name, "value": code} for code, p in PRODUCTS.items()]
+    product_options = [{"label": p.name, "value": code} for code, p in PRODUCTS.items()]  # the CL-BZ box is listed for its ATR tab; it has no OI
     month_options = [{"label": MONTH_NAMES[m], "value": m} for m in range(1, 13)]
     return html.Div([
         dcc.Interval(id="oi-refresh", interval=REFRESH_MS, n_intervals=0),

@@ -101,6 +101,8 @@ class FakeOhlcApi:
         lookup = {i.symbol: i for p in PRODUCTS for i in instrument_universe(p, self.today)}
         candles = []
         for symbol in instruments:
+            if symbol not in lookup:  # like the real API, an instrument it does not know (a box's BZ leg) comes back empty
+                continue
             expiry = pd.Timestamp(lookup[symbol].expiry)
             days = pd.bdate_range(expiry - pd.Timedelta(days=500), min(expiry, pd.Timestamp(self.today) - pd.Timedelta(days=1)))
             for d in days:

@@ -42,6 +42,9 @@ PARAM_INPUTS = [
     ("churn-p-wend", "Trading hours end (London)", "window_end", 0.5, "A trade still open at this hour is closed by crossing the spread"),
     ("churn-p-stop", "Stop (x target)", "stop_mult", 0.5, "A trade is stopped out when the price moves this many targets against the fill; the simulation then moves on to a new price"),
     ("churn-p-patience", "Wait for the level (min)", "patience_min", 15, "After a win, wait this long for the price to come back to the level and buy again there; otherwise move on to a new price"),
+    ("churn-p-minz", "Entry stretch (z)", "min_z", 0.5, "0 = buy at any price. Above 0, a new price is taken only when it is this many standard deviations below its last-day average (above, for a short): you buy dips, not strength"),
+    ("churn-p-hours", "Best hours only", "best_hours", 1, "0 = trade all your hours. Otherwise trade only this many London hours, the ones whose entries earned most on the days the target is picked on (never on the days that score it)"),
+    ("churn-p-atrshare", "Targets up to ATR share", "atr_share", 0.1, "0 = ticks only. Otherwise also try bigger targets up to this share of the daily ATR, so a wide outright gets targets that fit its range"),
     ("churn-p-minvol", "Min volume / day (lots)", "min_volume", 10, "Rows trading less than this are shown but not scored"),
 ]
 COST_FIELDS = [("tick_size", "Tick size", 0.01), ("tick_value", "Tick value ($)", 1), ("tc", "TC per side per lot ($)", 0.01), ("rebate", "Rebate per side per lot ($)", 0.01)]
@@ -81,7 +84,7 @@ def churn_controls(params: ChurnParams) -> html.Div:
         for component_id, name, field, step, hint in PARAM_INPUTS
     ]
     filters = dbc.Row([
-        _field("Product", dcc.Dropdown(id="churn-product", options=[{"label": "All", "value": "all"}, {"label": "CL", "value": "CL"}, {"label": "BRN", "value": "BRN"}, {"label": "Gasoil", "value": "G"}], value="all", clearable=False), 2),
+        _field("Product", dcc.Dropdown(id="churn-product", options=[{"label": "All", "value": "all"}, {"label": "CL", "value": "CL"}, {"label": "BRN", "value": "BRN"}, {"label": "Gasoil", "value": "G"}, {"label": "CL-BZ box", "value": "CLBZ"}], value="all", clearable=False), 2),
         _field("Curve", dcc.Dropdown(id="churn-family", options=[{"label": "All", "value": "all"}, *({"label": FAMILY_NAMES[f], "value": f} for f in FAMILIES)], value="all", clearable=False), 2),
         _field("Direction", dcc.Dropdown(id="churn-direction", options=[{"label": "Both", "value": "all"}, {"label": "Long", "value": "long"}, {"label": "Short", "value": "short"}], value="all", clearable=False), 2),
     ], className="g-2")
@@ -114,14 +117,14 @@ def cost_panel(costs, combo, use_rebates: bool = False) -> html.Details:
     ], style={"marginBottom": "12px"})
 
 
-def breakeven_table(costs) -> html.Div:
+def breakeven_table(costs, combo_rebates=None) -> html.Div:
     """Round-trip cost and break-even ticks of each product's outright, spread and fly (cost on the net lots of the structure)."""
     rows = []
-    for product in ("CL", "BRN", "BZ", "WBS", "G"):
+    for product in ("CL", "BRN", "BZ", "WBS", "G", "CLBZ"):
         cells = [html.Td(product, style={"color": COLORS["TEXT_PRIMARY"], "paddingRight": "14px"})]
         for family in ("outright", "spread", "fly", "dfly"):
-            cost = round_trip_cost(product, family, costs)
-            cells.append(html.Td(f"${cost:.2f} = {breakeven_ticks(product, family, costs):.2f} tick", style={"color": COLORS["TEXT_SECONDARY"], "paddingRight": "14px", "fontSize": "13px"}))
+            cost = round_trip_cost(product, family, costs, combo_rebates)
+            cells.append(html.Td(f"${cost:.2f} = {breakeven_ticks(product, family, costs, combo_rebates):.2f} tick", style={"color": COLORS["TEXT_SECONDARY"], "paddingRight": "14px", "fontSize": "13px"}))
         rows.append(html.Tr(cells))
     head = html.Tr([html.Th("Round trip, per lot", style=_LABEL), *(html.Th(f"{f} ({STRUCTURE_LOTS[f]} lots)", style=_LABEL) for f in ("outright", "spread", "fly", "dfly"))])
     return html.Table([html.Thead(head), html.Tbody(rows)])
@@ -140,16 +143,18 @@ COLUMN_TIPS = {
     "net_hit": "What one lot earns when the target is reached: the target in dollars minus the round-trip cost.",
     "osc": "How many times, in the chosen range of days, the market came back to the entry level of this trade (the live price, plus half the spread for a long) and then moved the target in the trade's favour within one trading day.",
     "score": "0-100: geometric mean of edge (net $/day rank among the rows shown), hit probability, worse-price survival, positive days and 1 - blow-up rate, all measured on the last 40% of the days (the target is picked on the first 60%). 0 = not scored: loses money or too thin, hover for the numbers. Green = GO now, amber = WAIT, grey = closed: hover for why.",
+    "tradable": "0-100, does not depend on profit: reach of the target (hit rate), trips per day, volume and the share of a win left after costs, ranked among the rows with enough volume. Shows which contracts are workable even when none has an edge; the Score shows which are proven.",
+    "proof": "Proven = profitable on the last days AND on the earlier days the target was picked on. Recent only = profitable only on the last days (possibly a market phase). Unchecked = too few days to split. No edge = loses money after costs.",
     "side": "long = buy and sell the target above; short = sell and buy back the target below.",
     "worse": "Share of the net $/day that survives an entry fill 1 and 2 ticks worse than planned (average), 0-100%.",
 }
 
 COLUMNS = [
     _col("Contract", "contract"), _col("Live Price", "price", _THREE), _col("Volume/day", "volume_day", _INT), _col("ATR", "atr", _TWO), _col("Cost", "cost_rt", _TWO),
-    _col("Per lot Net Profit", "net_hit", _TWO), _col("Number of oscillation", "osc", _INT), _col("Score", "score", _ONE), _col("Side", "direction"),
+    _col("Per lot Net Profit", "net_hit", _TWO), _col("Number of oscillation", "osc", _INT), _col("Score", "score", _ONE), _col("Tradability", "tradable", _ONE), _col("Proof", "proof"), _col("Side", "direction"),
     _col("Worse Price Score", "worse_score", _PCT), {"name": "Verdict", "id": "verdict"},
 ]
-TIP_KEYS = {"contract": "contract", "price": "price", "volume_day": "volume_day", "atr": "atr", "cost_rt": "cost", "net_hit": "net_hit", "osc": "osc", "score": "score", "direction": "side", "worse_score": "worse"}
+TIP_KEYS = {"contract": "contract", "price": "price", "volume_day": "volume_day", "atr": "atr", "cost_rt": "cost", "net_hit": "net_hit", "osc": "osc", "score": "score", "tradable": "tradable", "proof": "proof", "direction": "side", "worse_score": "worse"}
 
 
 def table_data(table) -> tuple[list[dict], list[dict]]:
@@ -158,12 +163,12 @@ def table_data(table) -> tuple[list[dict], list[dict]]:
     for r in table.itertuples():
         rows.append({
             "contract": f"{r.product} {FAMILY_NAMES[r.family]} {r.label}", "price": _num(r.price, 3), "volume_day": _num(r.volume_day, 0), "atr": _num(r.atr, 2), "cost_rt": _num(r.cost_rt),
-            "net_hit": _num(r.net_hit), "osc": None if not np.isfinite(r.osc) else int(r.osc), "score": _num(r.score, 1), "direction": r.direction, "worse_score": _num(r.worse_score, 4),
+            "net_hit": _num(r.net_hit), "osc": None if not np.isfinite(r.osc) else int(r.osc), "score": _num(r.score, 1), "tradable": _num(r.tradable, 1), "proof": r.proof, "direction": r.direction, "worse_score": _num(r.worse_score, 4),
             "verdict": r.verdict,
         })
         levels = (f"Target {int(r.target)} ticks: enter about {r.entry:.3f}, exit {r.target_price:.3f}. " if np.isfinite(r.entry) else f"Target {int(r.target)} ticks. ")
         tips.append({
-            "contract": {"value": levels + f"Net per day in the window: ${r.net_day:.2f} per lot.", "type": "text"},
+            "contract": {"value": levels + f"Net per day in the window: ${r.net_day:.2f} per lot." + (f" Trades only at {r.hours} London." if getattr(r, "hours", "") else ""), "type": "text"},
             "score": {"value": f"{r.verdict}: {r.reason}", "type": "text"},
         })
     return rows, tips
@@ -174,6 +179,9 @@ def table_styles() -> list[dict]:
     return [
         *styles,
         {"if": {"column_id": "score", "filter_query": "{score} = 0"}, "color": COLORS["TEXT_SECONDARY"]},
+        {"if": {"column_id": "proof", "filter_query": '{proof} = "Proven"'}, "color": "#3cb371", "fontWeight": "bold"},
+        {"if": {"column_id": "proof", "filter_query": '{proof} = "Recent only"'}, "color": "#f5a623"},
+        {"if": {"column_id": "proof", "filter_query": '{proof} = "No edge"'}, "color": COLORS["TEXT_SECONDARY"]},
         {"if": {"column_id": "osc", "filter_query": "{osc} = 0"}, "color": COLORS["TEXT_SECONDARY"]},
         {"if": {"column_id": "net_hit", "filter_query": "{net_hit} < 0"}, "color": COLORS["ACCENT_RED"]},
     ]

@@ -315,3 +315,43 @@ def test_curve_prices_drop_symbols_the_api_stopped_returning(adapter, repo, mock
     adapter.get_live_prices([])
     adapter.get_live_prices([])
     assert set(adapter.curve_prices()) == {"COZ26"}
+
+
+# ---------- CL-BZ boxes the API does not price ----------
+
+
+def test_a_curve_box_the_api_does_not_return_is_built_from_its_cl_and_bz_legs(adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    adapter.set_curve_symbols_provider(lambda: ["WTCLCOF27", "CLBZZXF27-G27", "CLF27", "BZZF27", "CLG27", "BZZG27"])
+    mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: _rows(("CLF27", 70.0), ("BZZF27", 72.0), ("CLG27", 69.0), ("BZZG27", 71.6))),
+    )
+    adapter.get_live_prices([])
+    prices = adapter.curve_prices()
+    assert prices["WTCLCOF27"][0] == pytest.approx(-2.0)  # CL Jan27 - BZ Jan27
+    assert prices["CLBZZXF27-G27"][0] == pytest.approx(0.6)  # (70 - 72) - (69 - 71.6)
+
+
+def test_a_box_the_api_does_return_is_used_as_it_is(adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    adapter.set_curve_symbols_provider(lambda: ["WTCLCOF27", "CLF27", "BZZF27"])
+    mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: _rows(("WTCLCOF27", -1.9), ("CLF27", 70.0), ("BZZF27", 72.0))),
+    )
+    adapter.get_live_prices([])
+    assert adapter.curve_prices()["WTCLCOF27"][0] == -1.9
+
+
+def test_an_open_box_position_is_priced_from_its_legs_when_the_api_has_no_price(adapter, repo, mocker):
+    repo.set_setting("api_access_token", "tok")
+    box = make_contract(product="CLBZ", contract_month=1, contract_year=2027, symbol="CLBZF27")
+    save_open_structure(repo, "Box", [make_leg(contract=box)])
+    request = mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: _rows(("CLF27", 70.0), ("BZZF27", 72.5))),
+    )
+    prices = adapter.get_live_prices([])
+    assert request.call_args.kwargs["params"]["products"].split(",") == ["WTCLCOF27", "CLF27", "BZZF27"]  # the legs are asked for with it
+    assert prices["CLBZF27"].price == pytest.approx(-2.5) and prices["CLBZF27"].derived

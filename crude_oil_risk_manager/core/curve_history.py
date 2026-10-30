@@ -34,10 +34,14 @@ import pandas as pd
 
 from adapters.base import LETTER_TO_MONTH, APIError
 from adapters.qh_api import QHApi
-from core.curve_calendar import DFLY, FAMILIES, FAMILY_WEIGHTS, FLY, N_MONTHS, OUTRIGHT, PRODUCTS, SPREAD
+from core.curve_calendar import (
+    DFLY, FAMILIES, FAMILY_WEIGHTS, FLY, N_MONTHS, OUTRIGHT, PRODUCTS, SPREAD, month_token, parse_contract,
+)
 
 logger = logging.getLogger(__name__)
 
+PRODUCTS_LEGS = ("CL", "BZ")  # a box is CL minus BZ (internal product codes)
+BZ_GENERIC = "BZZ"  # API code of NYMEX Brent, whose generic series are BZZ1, BZZ1-2, ...
 GROUPS_PER_CALL = 14
 # The API fails a whole batch once the days requested across its series get large. Measured on
 # the real API, with "Length mismatch: Expected axis has 0 elements" as the failure: 3 series at
@@ -53,7 +57,8 @@ def generic_code(product: str, family: str, position: int) -> str:
     """History code for a family/position: ("BRN", "fly", 2) -> "CO2-3-4". Dflies have none."""
     if family == DFLY:
         raise ValueError("a dfly has no generic code; it is derived from two flies")
-    api = PRODUCTS[product].api_code
+    spec = PRODUCTS[product]
+    api = spec.api_code if family == OUTRIGHT else spec.structure_api_code
     legs = len(FAMILY_WEIGHTS[family])
     return api + "-".join(str(position + i) for i in range(legs))
 
@@ -248,11 +253,116 @@ class CurveHistoryStore:
             for code, reason in failed.items():
                 report.errors[code] = reason
                 logger.error("No generic history stored for %s %s: %s", product, code, reason)
+        if report.errors and PRODUCTS[product].is_box:
+            self._refresh_box_from_legs(product, years, today, n, report, end_ms)
         if report.series_updated:
             with self._lock:
                 self._matrices.clear()
                 self.version += 1
         return report
+
+    # ------------------------------------------------------------------
+    # CL-BZ boxes built from their legs (used when the API has no generic series for the box codes)
+    # ------------------------------------------------------------------
+
+    def _leg_closes(self, codes: list[str], count: int, end_ms: int, today: date, report: RefreshReport) -> dict[str, pd.DataFrame]:
+        """Generic daily closes of leg codes ("CL1", "BZZ1", ...) as {code: DataFrame(date, close, contract)}."""
+        out: dict[str, pd.DataFrame] = {}
+        for batch in self._batches([(code, count) for code in codes]):
+            payload = self._call("legs", batch, end_ms, report)
+            if payload is None:
+                continue
+            for code, _ in batch:
+                frame = self._parse(payload, code, today)
+                if not frame.empty:
+                    out[code] = frame
+        return out
+
+    @staticmethod
+    def _month_index(contract: str) -> float:
+        try:
+            _, month, year = parse_contract(contract)
+        except (KeyError, ValueError, IndexError):
+            return np.nan
+        return float(year * 12 + month - 1)
+
+    def box_outrights(self, legs: dict[str, dict[str, pd.DataFrame]], n: int) -> pd.DataFrame:
+        """Outbox k = CL(month m) - BZ(month m) for k = 1..n, per day, from the legs' generic series.
+
+        The legs' generic positions hold different months on some days (BZ expires before CL, so for a few weeks CL1 is a month
+        earlier than BZ1), so each day's legs are matched by DELIVERY MONTH, not by position. Month m starts at the later of the
+        two front months. Returns columns 1..n plus "m0" (the month index of position 1), indexed by date; days where a box month
+        has no price on either leg are left out."""
+        series: dict[str, dict[int, pd.Series]] = {}
+        for leg, frames in legs.items():
+            by_month: dict[int, pd.Series] = {}
+            for frame in frames.values():
+                months = frame["contract"].map(self._month_index)
+                indexed = frame.assign(month=months).dropna(subset=["month"])
+                for month, part in indexed.groupby("month"):
+                    by_month[int(month)] = pd.concat([by_month[int(month)], part.set_index("date")["close"]]) if int(month) in by_month else part.set_index("date")["close"]
+            series[leg] = {m: s[~s.index.duplicated(keep="last")] for m, s in by_month.items()}
+        front = {}
+        for leg, frames in legs.items():
+            firsts = [f.assign(month=f["contract"].map(self._month_index)).set_index("date")["month"] for f in frames.values()]
+            front[leg] = pd.concat(firsts, axis=1).min(axis=1) if firsts else pd.Series(dtype=float)
+        if not all(len(f) for f in front.values()):
+            return pd.DataFrame()
+        m0 = pd.concat(front.values(), axis=1).max(axis=1).dropna().astype(int)
+        cl_leg, bz_leg = PRODUCTS_LEGS
+        rows = {}
+        for day, start in m0.items():
+            values = []
+            for k in range(n):
+                month = start + k
+                cl, bz = series[cl_leg].get(month), series[bz_leg].get(month)
+                if cl is None or bz is None or day not in cl.index or day not in bz.index:
+                    break
+                values.append(float(cl[day] - bz[day]))
+            if len(values) == n:
+                rows[day] = [*values, start]
+        frame = pd.DataFrame.from_dict(rows, orient="index", columns=[*range(1, n + 1), "m0"]).sort_index()
+        frame.index.name = "date"
+        return frame
+
+    def _refresh_box_from_legs(self, product: str, years: int, today: date, n: int, report: RefreshReport, end_ms: int) -> None:
+        """Rebuild a CL-BZ box's stored series (outright 1 and the n-1 spreads) from CL and BZ generic closes."""
+        spec = PRODUCTS[product]
+        lasts = [self.last_date(product, code) for _f, _k, code in self.codes(product, n)]
+        full = any(last is None for last in lasts)
+        count = int(years * TRADING_DAYS_PER_YEAR) + 30 if full else min(1500, (today - min(lasts)).days + 7)
+        positions = range(1, n + 3)
+        wanted = {PRODUCTS_LEGS[0]: [f"{PRODUCTS[PRODUCTS_LEGS[0]].api_code}{i}" for i in positions],
+                  PRODUCTS_LEGS[1]: [f"{BZ_GENERIC}{i}" for i in positions]}
+        legs = {leg: self._leg_closes(codes, count, end_ms, today, report) for leg, codes in wanted.items()}
+        leg_codes = {code for codes in wanted.values() for code in codes}
+        report.errors = {code: reason for code, reason in report.errors.items() if code not in leg_codes}
+        outrights = self.box_outrights(legs, n)
+        failed = {code: "no CL/BZ leg history to build the box from" for _f, _k, code in self.codes(product, n)}
+        if outrights.empty:
+            report.errors.update(failed)
+            return
+        start = outrights["m0"].astype(int)
+
+        def token(month_index: int) -> str:
+            return month_token(month_index % 12 + 1, month_index // 12)
+
+        for family, k, code in self.codes(product, n):
+            if family == OUTRIGHT:
+                close = outrights[1]
+                contract = start.map(lambda m: spec.api_code + token(m))
+            else:
+                close = outrights[k] - outrights[k + 1]
+                contract = start.map(lambda m, k=k: spec.structure_api_code + token(m + k - 1) + "-" + token(m + k))
+            frame = pd.DataFrame({"date": outrights.index, "close": close.to_numpy(), "contract": contract.to_numpy()})
+            try:
+                report.rows_added += self._merge(product, code, frame)
+                report.series_updated += 1
+                report.errors.pop(code, None)
+                failed.pop(code, None)
+            except Exception as exc:  # noqa: BLE001 - one bad series must not lose the others
+                report.errors[code] = str(exc)
+        logger.info("%s history built from its CL and BZ legs (%d days)", product, len(outrights))
 
     def _merge(self, product: str, code: str, new: pd.DataFrame) -> int:
         old = self.read_series(product, code)

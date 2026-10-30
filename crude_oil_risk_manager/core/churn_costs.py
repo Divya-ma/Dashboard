@@ -11,12 +11,18 @@ structures both hold in opposite directions nets down. So
 and a round trip is two sides. Quoted CL/BZ structures on NYMEX pay a higher rebate (CL 0.87, BZ 0.81), used
 when `combo` is set.
 
+A CL-BZ BOX (product "CLBZ", core.box) is exactly such a quoted structure: one lot of an outbox is a CL lot against a BZ lot, so a
+side costs the CL TC plus the BZ TC per lot of the CL structure (an outbox 1 + 1 lots, a spreadbox 2 + 2, a flybox 4 + 4, a dflybox
+8 + 8). With rebates switched on it earns the combo rebates above instead of each leg's own.
+
 TICKS. A target is set in ticks; `tick_value` is the dollar value of one tick of one lot (CL and Brent:
 0.01 x 1,000 barrels = $10; Gasoil: 0.25 x 100 tonnes = $25, as in core.contract_specs). The rates are kept in the settings table and edited on the Churn page.
 """
 
 from dataclasses import dataclass
 
+from core.box import BZ_LEG, CL_LEG, OUTBOX
+from core.contract_specs import spec_for_product
 from core.curve_calendar import FAMILY_WEIGHTS
 from core.user_settings import parse_number
 
@@ -24,7 +30,7 @@ KEY_CHURN_COSTS = "churn_costs"
 KEY_CHURN_COMBO = "churn_combo_rebates"
 KEY_CHURN_USE_REBATES = "churn_use_rebates"  # off by default: churning is judged on TC alone
 
-STRUCTURE_LOTS = {"outright": 1, "spread": 2, "fly": 4, "dfly": 8}  # gross lots when every month appears once
+STRUCTURE_LOTS = {"outright": 1, "spread": 2, "fly": 4, "dfly": 8}  # gross lots when every month appears once (a CL-BZ box has this many of EACH leg)
 STRUCTURE_WEIGHTS = FAMILY_WEIGHTS  # one definition of the structures: core.curve_calendar
 
 
@@ -124,16 +130,31 @@ def side_cost(net: dict[tuple[str, str], float], costs: dict[str, ProductCost], 
     return total
 
 
-def structure_side_cost(product: str, family: str, costs: dict[str, ProductCost]) -> float:
-    """Dollars per side of one lot of a consecutive-month structure of one product (every month held once)."""
+def tick_of(product: str, costs: dict[str, ProductCost]) -> ProductCost:
+    """The tick size and value of a product; a box has no cost row of its own and ticks like a CL or BZ leg ($10)."""
+    if product in costs:
+        return costs[product]
+    spec = spec_for_product(product)
+    return ProductCost(product, spec.tick_size, spec.tick_value, 0.0, 0.0)
+
+
+def structure_side_cost(product: str, family: str, costs: dict[str, ProductCost], combo_rebates: dict[str, float] | None = None) -> float:
+    """Dollars per side of one lot of a consecutive-month structure of one product (every month held once).
+
+    `combo_rebates` (CL-BZ boxes only) replaces the legs' rebates with the quoted-structure ones; None = full TC."""
+    if product == OUTBOX:
+        months = [(CL_LEG, str(i), w) for i, w in enumerate(STRUCTURE_WEIGHTS[family])] + [(BZ_LEG, str(i), -w) for i, w in enumerate(STRUCTURE_WEIGHTS[family])]
+        if combo_rebates is None:
+            return side_cost(net_lots(months), without_rebates(costs))
+        return side_cost(net_lots(months), costs, combo=True, combo_rebates=combo_rebates)
     months = [(product, str(i), w) for i, w in enumerate(STRUCTURE_WEIGHTS[family])]
     return side_cost(net_lots(months), costs)
 
 
-def round_trip_cost(product: str, family: str, costs: dict[str, ProductCost]) -> float:
-    return 2.0 * structure_side_cost(product, family, costs)
+def round_trip_cost(product: str, family: str, costs: dict[str, ProductCost], combo_rebates: dict[str, float] | None = None) -> float:
+    return 2.0 * structure_side_cost(product, family, costs, combo_rebates)
 
 
-def breakeven_ticks(product: str, family: str, costs: dict[str, ProductCost]) -> float:
+def breakeven_ticks(product: str, family: str, costs: dict[str, ProductCost], combo_rebates: dict[str, float] | None = None) -> float:
     """Ticks of price move per lot that just pay for the round trip."""
-    return round_trip_cost(product, family, costs) / costs[product].tick_value
+    return round_trip_cost(product, family, costs, combo_rebates) / tick_of(product, costs).tick_value

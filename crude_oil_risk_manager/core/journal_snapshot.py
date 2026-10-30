@@ -318,7 +318,9 @@ class MarketSnapshotter:
             prices[PRODUCT_LABELS[product]] = outrights[0]
             curves[product] = curve_shape(curve_values(outrights, family), min_tol=spec_for_product(product).tick_size)
 
-        own = (structure_products(structure) or [products[0]])[0]
+        traded = structure_products(structure)
+        # A CL-BZ box has no curve of its own in the journal; its day's move and ATR basis are read on CL, its first leg.
+        own = next((p for p in traded if p in contracts), "CL" if "CLBZ" in traded else products[0])
         front = contracts[own][0]
         tick = spec_for_product(own).tick_size
         move_day = move_min = None

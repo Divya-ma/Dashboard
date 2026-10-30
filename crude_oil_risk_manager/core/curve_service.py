@@ -27,6 +27,7 @@ import numpy as np
 
 from adapters.base import APIError
 from adapters.qh_api import QHApi
+from core.box import outbox_components, price_with_components
 from core.curve_calendar import (
     FAMILIES,
     FAMILY_LABELS,
@@ -200,7 +201,8 @@ class CurveService:
 
     def outright_symbols(self) -> list[str]:
         today = self._clock().date()
-        return sorted({s.symbol for p in self.products for s in self.ladder(p, today)[OUTRIGHT]})
+        outrights = {s.symbol for p in self.products for s in self.ladder(p, today)[OUTRIGHT]}
+        return sorted(outrights | {part for symbol in outrights for part in (outbox_components(symbol) or ())})
 
     def on_prices(self, prices: PriceMap) -> None:
         """Recompute everything from a fresh live poll. Never raises (the poll must not break)."""
@@ -649,7 +651,8 @@ class CurveService:
             if history.last_date and (today - history.last_date).days > STALE_HISTORY_DAYS:
                 flags.append(QualityFlag("WARNING", product, f"{label.capitalize()} history ends {history.last_date.isoformat()}"))
 
-        settled = [s.symbol for s in ladder[OUTRIGHT] if s.symbol not in self.settlements.prices()]
+        settlement_prices = self.settlements.prices()
+        settled = [s.symbol for s in ladder[OUTRIGHT] if price_with_components(settlement_prices, s.symbol) is None]
         if self.settlements.fetched_on is None:
             flags.append(QualityFlag("WARNING", product, "Previous settlements not fetched yet"))
         elif settled:

@@ -51,8 +51,9 @@ from typing import Callable
 
 from core.contract_specs import spec_for_product
 from core.curve_calendar import (
-    DFLY, FAMILY_WEIGHTS, FLY, OUTRIGHT, PRODUCTS, SPREAD, CurveContract, generic_contracts, month_token, product_of_symbol,
+    DFLY, FAMILY_WEIGHTS, FLY, OUTRIGHT, PRODUCTS, SPREAD, CurveContract, generic_contracts, product_of_symbol, structure_symbol,
 )
+from core.box import outbox_components, price_with_components
 
 MAX_MONTHS = 36
 FRESH_SECONDS = 86_400.0  # a direct price this young is used as it stands
@@ -150,14 +151,19 @@ def build_price_book(
 # ----------------------------------------------------------------------
 
 
+def _structure_code(contracts: list[CurveContract]) -> str:
+    """The product code a multi-month structure of these contracts is quoted under (differs from the outright's for CL-BZ boxes)."""
+    product = product_of_symbol(contracts[0].symbol)
+    return PRODUCTS[product].structure_code if product else ""
+
+
 def _chain(contracts: list[CurveContract], start: int, length: int) -> str:
     legs = contracts[start:start + length]
-    return legs[0].symbol + "".join(f"-{month_token(c.month, c.year)}" for c in legs[1:])
+    return structure_symbol(legs, _structure_code(legs) if length > 1 else "")
 
 
 def _spread3_symbol(contracts: list[CurveContract], start: int) -> str:
-    far = contracts[start + 3]
-    return f"{contracts[start].symbol}-{month_token(far.month, far.year)}"
+    return structure_symbol([contracts[start], contracts[start + 3]], _structure_code(contracts))
 
 
 def _symbols(contracts: list[CurveContract], family: str, method: str) -> list[str]:
@@ -183,6 +189,8 @@ def symbol_tiers(product: str, as_of: date, n: int, family: str, method: str = D
         DFLY: (FLY, SPREAD, OUTRIGHT) if method == DFLY_FLIES else (SPREAD, OUTRIGHT),
     }[family]
     tiers = [_symbols(contracts, fam, method) for fam in order]
+    if PRODUCTS[product].is_box:  # a box outright falls back to its CL and BZ outrights
+        tiers.append([part for c in contracts for part in (outbox_components(c.symbol) or ())])
     if family == DFLY and method == DFLY_SPREAD3:
         tiers.insert(0, _symbols(contracts, DFLY, DFLY_SPREAD3))
     return [tier for tier in tiers if tier]
@@ -260,7 +268,11 @@ def build_curve(
     def outright(i: int):
         key = (OUTRIGHT, i)
         if key not in memo:
-            memo[key] = pick(contracts[i].symbol)
+            parts = outbox_components(contracts[i].symbol)
+            memo[key] = pick(
+                contracts[i].symbol,
+                (lambda: _sum([(1, pick(parts[0])), (-1, pick(parts[1]))], "CL outright - BZ outright")) if parts else None,
+            )
         return memo[key]
 
     def spread(i: int):
@@ -343,10 +355,11 @@ def settlement_curve(
     values = []
     for i in range(n - len(weights) + 1):
         legs = [c.symbol for c in contracts[i:i + len(weights)]]
-        if any(leg not in settlements for leg in legs):
+        prices = [price_with_components(settlements, leg) for leg in legs]
+        if any(price is None for price in prices):
             values.append(None)
         else:
-            values.append(float(sum(w * settlements[leg] for w, leg in zip(weights, legs))))
+            values.append(float(sum(w * price for w, price in zip(weights, prices))))
     return values
 
 
@@ -425,7 +438,8 @@ class CurveCompare:
     # -- settlements ----------------------------------------------------
 
     def _all_outrights(self, as_of: date) -> list[str]:
-        return sorted({c.symbol for p in PRODUCTS for c in generic_contracts(p, as_of, MAX_MONTHS)})
+        outrights = {c.symbol for p in PRODUCTS for c in generic_contracts(p, as_of, MAX_MONTHS)}
+        return sorted(outrights | {part for symbol in outrights for part in (outbox_components(symbol) or ())})
 
     def fetch_settlements(self, as_of: date) -> None:
         """Fetch the previous settlement of every outright out to MAX_MONTHS for both products."""

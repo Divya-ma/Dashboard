@@ -13,8 +13,9 @@ Anything else (WBS, a symbol that does not parse) returns None and the caller fa
 import pandas as pd
 
 from adapters.base import SymbolTranslator
+from core.box import BOX_API_CODES, OUTBOX, is_box_symbol, outbox_weights
 from core.data_loader import DataLoader
-from core.structure_utils import decompose_to_outrights
+from core.structure_utils import decompose_to_outrights, parse_symbol
 
 PROXY_NOTE = "BZ legs are priced from the ICE Brent settlement of the same month (BZ has no stored settlements)."
 
@@ -27,6 +28,8 @@ def settlement_code(symbol: str) -> tuple[str, str, bool] | None:
         api = SymbolTranslator.internal_to_api(symbol)
     except ValueError:
         return None
+    if api.startswith(BOX_API_CODES[OUTBOX]):  # a same-month CL-BZ outbox settles as its own contract
+        return OUTBOX, api, False
     if api.startswith("CL"):
         return "CL", api, False
     if api.startswith("BZZ"):
@@ -99,7 +102,7 @@ class SettlementFirstLoader(DataLoader):
 
     def _from_settlements(self, symbol: str) -> pd.Series | None:
         try:
-            parts = decompose_to_outrights(symbol, 1.0)
+            parts = self._box_parts(symbol) or decompose_to_outrights(symbol, 1.0)
         except ValueError:
             return None
         levels = []
@@ -113,6 +116,14 @@ class SettlementFirstLoader(DataLoader):
             return None
         price.name = symbol
         return price
+
+    @staticmethod
+    def _box_parts(symbol: str) -> dict[str, float] | None:
+        """A CL-BZ box as outboxes ({outbox: weight}), whose own settlements are stored; None for any other symbol.
+
+        Built from the boxes' own settlements, a box needs neither the BZ proxy nor the CL and BZ legs separately."""
+        legs = parse_symbol(symbol) if is_box_symbol(symbol) else None
+        return None if legs is None else outbox_weights(legs[0]["product"], [f"{leg['month']}{leg['year']}" for leg in legs])
 
     def _derived_series(self, symbol: str) -> pd.Series | None:
         version = self._settlements.version

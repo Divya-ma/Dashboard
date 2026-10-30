@@ -31,7 +31,8 @@ from typing import Callable
 
 import pandas as pd
 
-from core.curve_calendar import PRODUCTS, api_symbol, contract_expiry
+from core.box_settlements import fill_missing_box_rows
+from core.curve_calendar import PRODUCTS, api_symbol, contract_expiry, product_spec
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,10 @@ def _clean(rows: list[dict]) -> pd.DataFrame:
 
 
 class OiStore:
-    def __init__(self, data_dir: str | Path, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+    def __init__(
+        self, data_dir: str | Path, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc), products: tuple[str, ...] | None = None,
+    ):
+        self.products = tuple(products or PRODUCTS)  # the products this store downloads (the extras of core.rollover have a store of their own)
         self._dir = Path(data_dir)
         self._clock = clock
         self._lock = threading.RLock()
@@ -150,11 +154,11 @@ class OiStore:
             return self._cache[product][1]
 
     def has_data(self) -> bool:
-        return any(self._path(p).exists() for p in PRODUCTS)
+        return any(self._path(p).exists() for p in self.products)
 
     def has_every_product(self) -> bool:
-        """False while a product in PRODUCTS has never been downloaded (one added after the last daily update)."""
-        return all(self._path(p).exists() for p in PRODUCTS)
+        """False while a product of the store has never been downloaded (one added after the last daily update)."""
+        return all(self._path(p).exists() for p in self.products)
 
     # -- planning -------------------------------------------------------
 
@@ -223,7 +227,7 @@ class OiStore:
         interrupted or failed run resumes where it stopped. Raises the API error that stopped it."""
         today = today or self._clock().date()
         work: list[tuple[str, list[tuple[OiContract, date]], bool]] = []
-        for product in PRODUCTS:
+        for product in self.products:
             todo = self.plan(product, history_days, today)
             full = [item for item in todo if item[0].symbol not in self._meta["contracts"] or self._needs_full(item, history_days)]
             top_up = [item for item in todo if item not in full]
@@ -240,6 +244,8 @@ class OiStore:
                 f"({self.progress.done + 1} of {self.progress.total})"
             )
             rows = self._fetch(api, [c.symbol for c, _ in chunk], start, today)
+            if product_spec(product).is_box:  # a box the API has no settlements for is built from its CL and BZ legs
+                rows += fill_missing_box_rows(lambda codes: self._fetch(api, codes, start, today), [c.symbol for c, _ in chunk], rows)
             report["requests"] += 1
             report["rows"] += len(rows)
             report["contracts"] += len(chunk)

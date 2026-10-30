@@ -1,6 +1,6 @@
 """Contract size and tick of every product the dashboard trades: the one place the numbers live.
 
-    CL, BRN, BZ, WBS   1,000 barrels  -> $1,000 per 1.0 point, tick 0.01 = $10
+    CL, BRN, BZ, WBS, CLBZ, CLBZS   1,000 barrels  -> $1,000 per 1.0 point, tick 0.01 = $10
     G (ICE gasoil, API GO)   100 tonnes  -> $100 per 1.0 point, tick 0.25 = $25
 
 `multiplier` is the dollar value of a 1.0 move of the quoted price for one lot, `tick_size` the smallest price step and
@@ -26,6 +26,9 @@ class ContractSpec:
 _EXTRA = {
     "BZ": ContractSpec("BZ", 1000.0, 0.01, 10.0),
     "WBS": ContractSpec("WBS", 1000.0, 0.01, 10.0),
+    # CL-BZ boxes: both legs are 1,000 barrels quoted in dollars, so a box ticks like either leg
+    "CLBZ": ContractSpec("CLBZ", 1000.0, 0.01, 10.0),
+    "CLBZS": ContractSpec("CLBZS", 1000.0, 0.01, 10.0),
 }
 SPECS: dict[str, ContractSpec] = {
     **{code: ContractSpec(code, p.multiplier, p.tick_size, p.tick_value) for code, p in PRODUCTS.items()},

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from dash import Input, Output, State, callback_context, html, no_update
 from dash.exceptions import MissingCallbackContextException
 
-from core.curve_calendar import PRODUCTS, product_of_symbol as product_of
+from core.curve_calendar import OI_PRODUCTS, PRODUCTS, product_of_symbol as product_of
 from core.oi_monitor import STATUS_SUDDEN, MonitorParams, validate_params
 from ui.container import container
 from ui.layouts.oi_monitor_view import PARAM_INPUTS, build_monitor_chart, monitor_body, years_body
@@ -65,6 +65,9 @@ def _years_for_month(service, product, month):
         return None
 
 
+NO_OI_NOTE = "The CL-BZ box has no open interest or volume analysis (it is not a product with an OI of its own). Its ATR is on the ATR tab."
+
+
 def render_years(symbol, params_dict):
     """The earlier years of the chosen live contract's delivery month, at today's days before expiry (Live monitor)."""
     service = container.oi_service
@@ -89,6 +92,8 @@ def render_research(version, product, active_tab="research", month=None):
         return no_update
     if service is None or version is None:
         return html.Div()
+    if product and product not in OI_PRODUCTS:
+        return html.Div(NO_OI_NOTE, style=_ERROR)
     try:
         product = product or "CL"
         month = int(month or default_month())
@@ -103,6 +108,8 @@ def render_monitor(version, product, *values):
     service = container.oi_service
     if service is None or version is None:
         return html.Div(), [], None, no_update
+    if product and product not in OI_PRODUCTS:
+        return html.Div(NO_OI_NOTE, style=_ERROR), [], None, no_update
     raw = dict(zip(_PARAM_FIELDS, values[: len(_PARAM_FIELDS)]))
     raw["alerts_enabled"] = bool(values[len(_PARAM_FIELDS)]) if len(values) > len(_PARAM_FIELDS) else True
     current_contract = values[len(_PARAM_FIELDS) + 1] if len(values) > len(_PARAM_FIELDS) + 1 else None

@@ -223,13 +223,13 @@ def test_validate_params_accepts_defaults_and_rejects_bad_values():
 
 def test_alert_structures_default_to_the_dflies_and_reject_unknown_keys():
     defaults = CurveParams().__dict__
-    assert CurveParams().alert_structures == ["CL:dfly", "BRN:dfly", "G:dfly"]
+    assert CurveParams().alert_structures == ["CL:dfly", "BRN:dfly", "G:dfly", "CLBZ:dfly"]
     assert validate_params({**defaults, "alert_structures": ["BRN:fly"]}).alert_structures == ["BRN:fly"]
     assert validate_params({**defaults, "alert_structures": []}).alert_structures == []
     with pytest.raises(ValueError):
         validate_params({**defaults, "alert_structures": ["WTI:fly"]})
     old_settings = {k: v for k, v in defaults.items() if k != "alert_structures"}  # saved before this option existed
-    assert validate_params(old_settings).alert_structures == ['CL:dfly', 'BRN:dfly', 'G:dfly']
+    assert validate_params(old_settings).alert_structures == ["CL:dfly", "BRN:dfly", "G:dfly", "CLBZ:dfly"]
 
 
 def test_params_roundtrip_through_the_settings_table(tmp_db_path):

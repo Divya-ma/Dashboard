@@ -156,7 +156,7 @@ def test_finished_contracts_are_never_requested_again_and_live_ones_are_topped_u
     live = {c.symbol for p in PRODUCTS for c in contract_universe(p, tomorrow) if c.expiry >= tomorrow - timedelta(days=3)}
     assert asked <= live  # nothing that had already expired and been fetched
     assert all(call["start"] >= (TODAY - timedelta(days=oi_data.OVERLAP_DAYS)).isoformat() for call in api.calls)
-    assert len(api.calls) <= 3  # one small top-up request per product
+    assert len(api.calls) <= 4  # one small top-up request per product (CL, BRN, gasoil and the CL-BZ box)
 
 
 def test_a_longer_history_setting_downloads_the_extra_days(tmp_path, small_universe):

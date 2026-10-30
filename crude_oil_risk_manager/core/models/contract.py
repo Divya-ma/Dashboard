@@ -4,7 +4,7 @@ from datetime import date
 
 from pydantic import BaseModel, Field, field_validator
 
-VALID_PRODUCTS = {"CL", "CO", "BRN", "BZ", "BZZ", "WBS", "WTCL", "G", "GO", "LGO"}
+VALID_PRODUCTS = {"CL", "CO", "BRN", "BZ", "BZZ", "WBS", "WTCL", "G", "GO", "LGO", "CLBZ", "CLBZS", "WTCLCO", "CLBZZX"}
 
 _MONTH_ABBREVIATIONS = {
     1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",

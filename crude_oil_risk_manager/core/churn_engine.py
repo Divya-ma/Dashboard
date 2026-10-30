@@ -243,8 +243,26 @@ class DayArrays:
     stops: np.ndarray
 
 
-def day_ladder(ctx: Context, target: float, stop_ticks: float, patience_minutes: float, half_spread: float, worse: float, tick_value: float, cost_rt: float) -> DayArrays:
-    """The day ladder (see the module docstring) for every calendar day."""
+def _next_allowed(allowed: np.ndarray, start: int, end: int) -> int:
+    """The first allowed candle in start..end-1 (there must be a candle after it to trade); -1 if none."""
+    if start >= end:
+        return -1
+    found = np.flatnonzero(allowed[start:end])
+    return start + int(found[0]) if len(found) else -1
+
+
+def day_ladder(ctx: Context, target: float, stop_ticks: float, patience_minutes: float, half_spread: float, worse: float, tick_value: float, cost_rt: float,
+               hour_ok: np.ndarray | None = None, min_z: float = 0.0) -> DayArrays:
+    """The day ladder (see the module docstring) for every calendar day.
+
+    `hour_ok` (a bool per candle) limits trading to those candles: a new price is taken, and the level bought back at, only on them.
+    `min_z` > 0 takes a new price only when the entry is STRETCHED: z <= -min_z (the price that far below its recent average for a
+    long, above it for a short). Both off (None, 0) is the plain ladder; a day with no allowed candle is flat."""
+    gated = hour_ok is not None or min_z > 0
+    market_ok = np.ones(len(ctx.close), dtype=bool) if hour_ok is None else hour_ok.copy()
+    if min_z > 0:
+        market_ok &= ctx.z <= -min_z  # NaN (not enough history yet) is False
+
     h, l, c = ctx.high / ctx.tick, ctx.low / ctx.tick, ctx.close / ctx.tick
     t = ctx.t_ns
     patience = int(patience_minutes * 60e9)
@@ -257,6 +275,10 @@ def day_ladder(ctx: Context, target: float, stop_ticks: float, patience_minutes:
         if e <= s:  # no candle, or only one: nothing can be traded
             continue
         i = s
+        if gated:
+            i = _next_allowed(market_ok, i, e)
+            if i < 0:  # no allowed candle that day
+                continue
         level = c[i] + half_spread
         fill = level + worse
         value, count, won, stopped = 0.0, 0, 0, 0
@@ -275,6 +297,10 @@ def day_ladder(ctx: Context, target: float, stop_ticks: float, patience_minutes:
                 i = i + 1 + int(js)
                 if i >= e:
                     break
+                if gated:
+                    i = _next_allowed(market_ok, i, e)
+                    if i < 0:
+                        break
                 level = c[i] + half_spread
                 fill = level + worse
                 continue
@@ -283,7 +309,10 @@ def day_ladder(ctx: Context, target: float, stop_ticks: float, patience_minutes:
             won += 1
             if j >= e:
                 break
-            back = np.flatnonzero(l[j + 1:e] <= level)  # the price comes back to the level, before the last candle
+            came_back = l[j + 1:e] <= level
+            if hour_ok is not None:
+                came_back &= hour_ok[j + 1:e]
+            back = np.flatnonzero(came_back)  # the price comes back to the level, before the last candle
             if len(back) and t[j + 1 + back[0]] - t[j] <= patience:
                 i = j + 1 + int(back[0])
                 fill = level + worse
@@ -292,6 +321,10 @@ def day_ladder(ctx: Context, target: float, stop_ticks: float, patience_minutes:
             if not len(beyond):  # the window ends before the wait does: stay flat
                 break
             i = j + int(beyond[0])
+            if gated:
+                i = _next_allowed(market_ok, i, e)
+                if i < 0:
+                    break
             level = c[i] + half_spread
             fill = level + worse
         total[d], trades[d], wins[d], stops[d] = value, count, won, stopped
@@ -384,6 +417,43 @@ class Settings:
     end_hour: float = 19.0
     stop_mult: float = 3.0
     patience_minutes: float = 60.0
+    min_z: float = 0.0  # > 0: take a new price only when it is this many standard deviations on the good side of its recent average
+    best_hours: int = 0  # > 0: trade only this many best London hours, picked on the days the target is picked on
+    atr_share: float = 0.0  # > 0: also try targets up to this share of the daily ATR (see target_grid)
+
+
+MIN_HOUR_ENTRIES = 30
+EXTRA_TARGETS = 8
+
+
+def target_grid(max_target: int, atr_share: float, atr: float | None, tick: float) -> list[int]:
+    """The targets (ticks) to try: 1..max_target, and with `atr_share` > 0 also up to that share of the daily ATR, a few evenly spread
+    steps beyond the largest (a quiet fly stays on the small ticks, a wide outright gets targets that fit its range)."""
+    grid = list(range(1, max_target + 1))
+    if atr_share > 0 and atr and tick > 0:
+        top = int(round(atr_share * atr / tick))
+        if top > max_target:
+            extra = np.unique(np.round(np.linspace(max_target, top, EXTRA_TARGETS + 1)[1:]).astype(int))
+            grid += [int(t) for t in extra if t > max_target]
+    return grid
+
+
+def hours_for(ctx: Context, target: float, stop_ticks: float, half_spread: float, tick_value: float, cost_rt: float, train_days: int, keep: int) -> np.ndarray | None:
+    """Bool per candle: the `keep` London hours whose entries earned most per trade on the first `train_days` days; None if there are
+    too few entries to tell hours apart (then every hour is traded)."""
+    if keep <= 0:
+        return None
+    trials = simulate(ctx, target, stop_ticks, half_spread, 0)
+    day = np.searchsorted(ctx.start, trials.entry, "right") - 1
+    use = day < train_days
+    net = trials.pnl_ticks * tick_value - cost_rt
+    hour = np.floor(ctx.hour[trials.entry]).astype(int)
+    frame = pd.DataFrame({"hour": hour[use], "net": net[use]}).groupby("hour").agg(n=("net", "size"), net=("net", "mean"))
+    frame = frame[frame["n"] >= MIN_HOUR_ENTRIES]
+    if frame.empty or len(frame) <= keep:
+        return None
+    chosen = frame.sort_values("net", ascending=False).head(keep).index.to_numpy()
+    return np.isin(np.floor(ctx.hour).astype(int), chosen)
 
 
 def analyse(bars: pd.DataFrame, spec: InstrumentSpec, direction: str, targets: list[int], margin: float, settings: Settings, calendar: np.ndarray) -> dict | None:
@@ -396,15 +466,17 @@ def analyse(bars: pd.DataFrame, spec: InstrumentSpec, direction: str, targets: l
     if not allowed:
         return None
 
+    n_days = len(calendar)
+    split = int(round(n_days * TRAIN_SHARE)) if n_days >= SPLIT_MIN_DAYS else 0
+    train, test = slice(0, split) if split else slice(0, n_days), slice(split, n_days)
+    hours = {t: hours_for(ctx, t, settings.stop_mult * t, spec.half_spread, spec.tick_value, spec.cost_rt, train.stop, settings.best_hours) for t in allowed}
+
     def ladder(t: int, k: int) -> DayArrays:
-        return day_ladder(ctx, t, settings.stop_mult * t, settings.patience_minutes, spec.half_spread, k, spec.tick_value, spec.cost_rt)
+        return day_ladder(ctx, t, settings.stop_mult * t, settings.patience_minutes, spec.half_spread, k, spec.tick_value, spec.cost_rt, hours[t], settings.min_z)
 
     def stop_loss(t: int) -> float:
         return (settings.stop_mult * t + spec.half_spread) * spec.tick_value + spec.cost_rt
 
-    n_days = len(calendar)
-    split = int(round(n_days * TRAIN_SHARE)) if n_days >= SPLIT_MIN_DAYS else 0
-    train, test = slice(0, split) if split else slice(0, n_days), slice(split, n_days)
     runs = {t: ladder(t, 0) for t in allowed}
     grid = {t: result_of(runs[t], slice(0, n_days), t, 0, stop_loss(t)) for t in allowed}
     grid = {t: r for t, r in grid.items() if r is not None}
@@ -425,6 +497,7 @@ def analyse(bars: pd.DataFrame, spec: InstrumentSpec, direction: str, targets: l
         "spec": spec, "direction": direction, "best": best, "grid": grid, "worse": worse, "insample": result_of(runs[best], train, best, 0, stop_loss(best)),
         "entry": entry_stats(ctx, trials, spec.tick_value, spec.cost_rt), "bars_per_day": ctx.bars_per_day, "path": path, "volume_day": float(volume.sum()) / len(calendar),
         "active": float((volume > 0).mean()), "last_ts": ctx.ts[-1], "stop_loss_usd": stop_loss(best), "test_days": int(test.stop - test.start), "split": bool(split),
+        "hours": None if hours[best] is None else sorted({int(h) for h in np.floor(ctx.hour[hours[best]])}),
     }
 
 

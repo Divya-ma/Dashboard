@@ -44,6 +44,7 @@ NAV_ITEMS = [
     ("/trade-analyzer", "🎯 Trade Analyzer"),
     ("/curve-compare", "📉 Curve Compare"),
     ("/seasonality", "🗓️ Seasonality"),
+    ("/strategy-rollover", "🔁 Strategy Rollover"),
     ("/oi-volume-atr", "📊 OI · Volume · ATR"),
     ("/churn", "♻️ Churn"),
     ("/archive", "📁 Archive"),

@@ -1,4 +1,4 @@
-"""Daily OHLC of every outright, spread and fly of CL and BRN, cached as Parquet, for the ATR views.
+"""Daily OHLC of every outright, spread and fly of CL, BRN, gasoil and the CL-BZ box, cached as Parquet, for the ATR views.
 
 Source: GET /ohlc/ (interval 1D), which with a start and an end returns EVERY daily candle of up to 50
 instruments in that range, one list with a `product` field. (Giving start, end AND count is refused.)
@@ -28,7 +28,8 @@ from typing import Callable
 import pandas as pd
 
 from adapters.base import APIError
-from core.curve_calendar import PRODUCTS, month_token
+from core.box_candles import fill_missing_boxes
+from core.curve_calendar import PRODUCTS, structure_symbol
 from core.oi_data import EXPIRED_AFTER_DAYS, OiContract, OiProgress, contract_universe
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def instrument_universe(product: str, today: date, first_year: int | None = None
     for family, length in (("outright", 1), ("spread", 2), ("fly", 3)):
         for i in range(len(contracts) - length + 1):
             legs = contracts[i:i + length]
-            symbol = legs[0].symbol + "".join(f"-{month_token(c.month, c.year)}" for c in legs[1:])
+            symbol = structure_symbol(legs, PRODUCTS[product].structure_code if length > 1 else "")
             label = "/".join(c.label for c in legs)
             out.append(AtrInstrument(product, family, symbol, legs[0], label, legs[0].expiry))
     return out
@@ -210,6 +211,8 @@ class AtrStore:
             first, last = batch[0][0], batch[-1][0]
             self.progress.message = f"Downloading ATR data: {product} {first.family}s {first.label} to {last.label} ({self.progress.done + 1} of {self.progress.total})"
             candles = self._fetch(api, [i.symbol for i, _, _ in batch], start, end)
+            if PRODUCTS[product].is_box:  # a box /ohlc/ has no candles for is built from its CL and BZ legs
+                candles += fill_missing_boxes(lambda symbols: self._fetch(api, symbols, start, end), [i.symbol for i, _, _ in batch], candles, daily=True)
             frame = _clean(candles)
             if not frame.empty:  # keep each instrument's own window (the request range spans the whole batch)
                 limits = {i.symbol: (pd.Timestamp(s), pd.Timestamp(i.expiry + timedelta(days=TAIL_DAYS))) for i, s, _ in batch}

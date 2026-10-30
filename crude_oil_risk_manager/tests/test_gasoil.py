@@ -20,7 +20,7 @@ from db.repository import Repository
 
 
 def test_gasoil_is_a_registered_curve_product_with_its_own_size_and_tick():
-    assert PRODUCTS["G"].api_code == "GO" and list(PRODUCTS) == ["CL", "BRN", "G"]
+    assert PRODUCTS["G"].api_code == "GO" and list(PRODUCTS) == ["CL", "BRN", "G", "CLBZ"]
     g, cl = spec_for_product("G"), spec_for_product("CL")
     assert (g.multiplier, g.tick_size, g.tick_value) == (100.0, 0.25, 25.0)
     assert (cl.multiplier, cl.tick_size, cl.tick_value) == (1000.0, 0.01, 10.0)

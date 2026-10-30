@@ -401,7 +401,7 @@ def test_the_page_layout_has_the_dropdown_the_controls_and_the_monitor_first(ser
                          *(c for c, *_ in view.PARAM_INPUTS)):
         assert component_id in text, component_id
     product = next(x for x in _walk(layout) if getattr(x, "id", None) == "oi-product")
-    assert [o["value"] for o in product.options] == ["CL", "BRN", "G"] and product.value == "CL"
+    assert [o["value"] for o in product.options] == ["CL", "BRN", "G", "CLBZ"] and product.value == "CL"
     svc.save_monitor_params(MonitorParams(contracts=9))
     contracts = next(x for x in _walk(oi_tab.oi_layout()) if getattr(x, "id", None) == "oi-p-contracts")
     assert contracts.value == 9  # the inputs start from what was last used

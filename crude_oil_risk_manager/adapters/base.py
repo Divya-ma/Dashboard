@@ -33,6 +33,8 @@ PRODUCT_TO_API_CODE: dict[str, str] = {
     "BZ": "BZZ",
     "WBS": "WTCL",
     "G": "GO",
+    "CLBZ": "WTCLCO",  # CL - BZ outbox: WTCLCOF27 = CL Jan27 - BZ Jan27 (see core.box)
+    "CLBZS": "CLBZZX",  # CL - BZ spreadbox: CLBZZXF27-G27 = CL Jan27/Feb27 spread - BZ Jan27/Feb27 spread
 }
 
 API_CODE_TO_PRODUCT: dict[str, str] = {v: k for k, v in PRODUCT_TO_API_CODE.items()}
@@ -111,6 +113,13 @@ class SymbolTranslator:
 
         if leg_count == 1:
             return front_symbol
+
+        if products == {"CLBZ"}:
+            # Several CL-BZ outboxes make a spreadbox / flybox, which the exchange quotes under its own code (core.box).
+            front_symbol = (
+                f"{PRODUCT_TO_API_CODE['CLBZS']}"
+                f"{SymbolTranslator._month_year_token(front.contract_month, front.contract_year)}"
+            )
 
         if leg_count == 2:
             SymbolTranslator._warn_if_nonstandard_ratios(legs, expected={1, -1}, structure_name="spread")

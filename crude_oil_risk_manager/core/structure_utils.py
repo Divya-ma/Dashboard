@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 
 from adapters.base import PRODUCT_TO_API_CODE, SymbolTranslator
+from core.box import OUTBOX, SPREADBOX, box_legs, is_box_product
 from core.models import Structure, StructureStatus
 
 # Default leg ratios by number of legs in an exchange-quoted symbol.
@@ -64,7 +65,7 @@ def parse_symbol(symbol: str) -> list[dict]:
     try:
         product, rest = SymbolTranslator._match_product_prefix(sym, PRODUCT_TO_API_CODE)
     except ValueError:
-        raise ValueError(f"{sym!r}: product code not recognized (use e.g. CL, BRN, BZ, WBS, G)") from None
+        raise ValueError(f"{sym!r}: product code not recognized (use e.g. CL, BRN, BZ, WBS, G, CLBZ, CLBZS)") from None
     if not _TENORS_RE.fullmatch(rest):
         raise ValueError(f"{sym!r}: expected a month letter and 2-digit year, e.g. {product}Z26 or {product}Z26-F27")
 
@@ -99,6 +100,8 @@ def decompose_to_outrights(
     Raises ValueError for a malformed symbol or a ratio list of the wrong length.
     """
     legs = parse_symbol(structure_symbol)
+    if is_box_product(legs[0]["product"]):
+        return _decompose_box(structure_symbol, legs, lots, ratio_override)
     ratios = ratio_override if ratio_override is not None else DEFAULT_RATIOS.get(len(legs))
     if ratios is None:
         raise ValueError(f"{structure_symbol!r}: no default ratios for a {len(legs)}-leg symbol")
@@ -108,6 +111,16 @@ def decompose_to_outrights(
     net: dict[str, float] = {}
     for leg, ratio in zip(legs, ratios):
         net[leg["outright"]] = net.get(leg["outright"], 0.0) + ratio * lots
+    return net
+
+
+def _decompose_box(symbol: str, legs: list[dict], lots: float, ratio_override: list[int] | None) -> dict[str, float]:
+    """The CL and BZ outrights of a CL-BZ box (see core.box); `ratio_override` is not meaningful for a box and is rejected."""
+    if ratio_override is not None:
+        raise ValueError(f"{symbol!r}: a CL-BZ box has fixed ratios")
+    net: dict[str, float] = {}
+    for outright, weight in box_legs(legs[0]["product"], [f"{leg['month']}{leg['year']}" for leg in legs]):
+        net[outright] = net.get(outright, 0.0) + weight * lots
     return net
 
 
@@ -165,6 +178,8 @@ def compose_structure_symbol(leg_symbols: list[str], ratios: list[int] | None = 
 
     tokens = [f"{p[0]['letter']}{p[0]['year']}" for p in parsed]
     head = symbols[0][: len(symbols[0]) - len(tokens[0])]
+    if head == OUTBOX:  # several CL-BZ outboxes make a spreadbox / flybox, which has its own product code
+        head = SPREADBOX
     if len(tokens) == 4:
         return f"{head}{tokens[0]}-{tokens[1]}-{tokens[2]}+{tokens[3]}"
     return head + tokens[0] + "".join(f"-{t}" for t in tokens[1:])

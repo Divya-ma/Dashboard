@@ -33,6 +33,7 @@ import pandas as pd
 
 from adapters.base import APIError
 from core.atr_data import AtrInstrument, instrument_universe
+from core.box_candles import fill_missing_boxes
 from core.curve_calendar import PRODUCTS
 from core.oi_data import OiProgress
 
@@ -262,7 +263,10 @@ class ChurnStore:
         for product, chunk, start, end in work:
             first, last = chunk[0][0], chunk[-1][0]
             self.progress.message = f"Downloading 5-minute candles: {product} {first.family}s {first.label} to {last.label}, {start} ({self.progress.done + 1} of {self.progress.total})"
-            frame = _clean(self._fetch(api, [i.symbol for i, _ in chunk], start, end))
+            candles = self._fetch(api, [i.symbol for i, _ in chunk], start, end)
+            if PRODUCTS[product].is_box:  # a box /ohlc/ has no candles for is built from its CL and BZ legs
+                candles += fill_missing_boxes(lambda symbols: self._fetch(api, symbols, start, end), [i.symbol for i, _ in chunk], candles, daily=False)
+            frame = _clean(candles)
             report["requests"] += 1
             report["rows"] += len(frame)
             self._save(product, frame, chunk, end, today, window_days)

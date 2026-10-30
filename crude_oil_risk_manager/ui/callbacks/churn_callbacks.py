@@ -163,7 +163,7 @@ def render_breakeven(_costs_version):
     service = container.churn_service
     if service is None:
         return html.Div()
-    return breakeven_table(service.effective_costs())
+    return breakeven_table(service.effective_costs(), service.combo_rebates())
 
 
 def register_churn_callbacks(app) -> None:

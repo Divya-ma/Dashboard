@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from adapters.qh_api import QHApi
+from core.box import price_with_components
 from core.curve_calendar import CurveStructure
 
 logger = logging.getLogger(__name__)
@@ -94,9 +95,10 @@ class PrevSettlementStore:
     def structure_settlement(self, structure: CurveStructure) -> float | None:
         """Settlement of an outright / spread / fly / dfly from its outright legs; None if any leg is missing."""
         prices = self.prices()
-        if any(leg not in prices for leg in structure.legs):
+        legs = [price_with_components(prices, leg) for leg in structure.legs]  # a CL-BZ outbox may be settled from its CL and BZ legs
+        if any(price is None for price in legs):
             return None
-        return float(sum(w * prices[leg] for w, leg in zip(structure.leg_weights, structure.legs)))
+        return float(sum(w * price for w, price in zip(structure.leg_weights, legs)))
 
 
 class SnapshotStore:

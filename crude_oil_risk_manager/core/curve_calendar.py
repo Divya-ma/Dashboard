@@ -30,6 +30,7 @@ from functools import lru_cache
 from dateutil.easter import easter
 
 from adapters.base import LETTER_TO_MONTH, MONTH_TO_LETTER
+from core.box import outbox_components
 
 N_MONTHS = 15
 
@@ -46,17 +47,44 @@ class ProductSpec:
     api_code: str  # API code, e.g. "CO"
     name: str
     calendar: str  # "nymex" | "ice_uk"
-    expiry_rule: str  # "cl" | "brent" | "gasoil"
+    expiry_rule: str  # "cl" | "brent" | "gasoil" | "box"
     multiplier: float = 1000.0  # dollars per 1.0 price point per lot (CL, Brent: 1,000 barrels; gasoil: 100 tonnes)
     tick_size: float = 0.01
     tick_value: float = 10.0  # dollars per tick per lot
+    structure_code: str = ""  # API code of its spreads, flies and condors when that differs from `api_code` (CL-BZ boxes)
+    legs: tuple[str, ...] = ()  # the products a box is made of (internal codes), e.g. ("CL", "BZ"); empty for a plain product
+
+    @property
+    def structure_api_code(self) -> str:
+        return self.structure_code or self.api_code
+
+    @property
+    def is_box(self) -> bool:
+        return bool(self.legs)
 
 
 PRODUCTS: dict[str, ProductSpec] = {
     "CL": ProductSpec("CL", "CL", "WTI (CL)", "nymex", "cl"),
     "BRN": ProductSpec("BRN", "CO", "Brent (BRN)", "ice_uk", "brent"),
     "G": ProductSpec("G", "GO", "Gasoil (G)", "ice_uk", "gasoil", multiplier=100.0, tick_size=0.25, tick_value=25.0),
+    # CL - BZ box: outbox WTCLCO (CL month - BZ month), spreadbox/flybox CLBZZX. Position k pairs CL k with BZ k.
+    "CLBZ": ProductSpec("CLBZ", "WTCLCO", "CL-BZ box (CLBZ)", "nymex", "box", structure_code="CLBZZX", legs=("CL", "BZ")),
 }
+# Products with settlements only for the Strategy Rollover page (core.rollover); they are not curve products. WBS (ICE WTI) is
+# assumed to expire like CL; a finished contract's real expiry is its last settlement day anyway.
+EXTRA_PRODUCTS: dict[str, ProductSpec] = {
+    "BZ": ProductSpec("BZ", "BZZ", "Brent NYMEX (BZ)", "nymex", "brent"),
+    "WBS": ProductSpec("WBS", "WTCL", "WTI ICE (WBS)", "ice_uk", "cl"),
+}
+
+
+def product_spec(product: str) -> ProductSpec:
+    """The spec of a curve product or of an extra settlements-only product."""
+    return PRODUCTS[product] if product in PRODUCTS else EXTRA_PRODUCTS[product]
+
+
+# Products with an open-interest history (the OI page): a box has none, only its two legs do.
+OI_PRODUCTS = tuple(code for code, spec in PRODUCTS.items() if not spec.is_box)
 
 
 # ----------------------------------------------------------------------
@@ -171,13 +199,19 @@ def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
 
 def contract_expiry(product: str, month: int, year: int) -> date:
     """Rule-based last trading day of the contract delivering in `month`/`year`."""
-    spec = PRODUCTS[product]
+    spec = product_spec(product)
     if spec.expiry_rule == "cl":
         prev_year, prev_month = _shift_month(year, month, -1)
         reference = _previous_business_day(date(prev_year, prev_month, 25), spec.calendar)
         return add_business_days(reference, -3, spec.calendar)
     if spec.expiry_rule == "gasoil":
         return add_business_days(date(year, month, 14), -2, spec.calendar)
+    if spec.expiry_rule == "box":
+        # A box stops trading with whichever leg expires first; BZ (NYMEX Brent, last business day of the second month
+        # before delivery) goes before CL, on the NYMEX calendar.
+        bz_year, bz_month = _shift_month(year, month, -2)
+        bz_last = date(bz_year + (bz_month == 12), bz_month % 12 + 1, 1) - timedelta(days=1)
+        return min(contract_expiry("CL", month, year), _previous_business_day(bz_last, spec.calendar))
     exp_year, exp_month = _shift_month(year, month, -2)
     last_day = date(exp_year + (exp_month == 12), exp_month % 12 + 1, 1) - timedelta(days=1)
     return _previous_business_day(last_day, spec.calendar)
@@ -185,12 +219,12 @@ def contract_expiry(product: str, month: int, year: int) -> date:
 
 def buffer_day(product: str, month: int, year: int) -> date:
     """The business day before the rule-based expiry: the first day the contract is treated as rolled."""
-    return add_business_days(contract_expiry(product, month, year), -1, PRODUCTS[product].calendar)
+    return add_business_days(contract_expiry(product, month, year), -1, product_spec(product).calendar)
 
 
 def api_symbol(product: str, month: int, year: int) -> str:
     """Outright API symbol, e.g. ("BRN", 12, 2026) -> "COZ26"."""
-    return f"{PRODUCTS[product].api_code}{MONTH_TO_LETTER[month]}{year % 100:02d}"
+    return f"{product_spec(product).api_code}{MONTH_TO_LETTER[month]}{year % 100:02d}"
 
 
 def month_token(month: int, year: int) -> str:
@@ -201,7 +235,8 @@ def product_of_symbol(symbol: str | None) -> str | None:
     """CL, BRN or G from an API-form contract symbol (Brent contracts are CO..., gasoil GO...), or None for anything else."""
     if not symbol:
         return None
-    return next((code for code, spec in PRODUCTS.items() if symbol.startswith(spec.api_code)), None)
+    codes = [(spec.api_code, code) for code, spec in PRODUCTS.items()] + [(spec.structure_code, code) for code, spec in PRODUCTS.items() if spec.structure_code]
+    return next((code for api, code in sorted(codes, key=lambda pair: -len(pair[0])) if symbol.startswith(api)), None)
 
 
 def parse_contract(symbol: str) -> tuple[str, int, int]:
@@ -263,7 +298,7 @@ def generic_contracts(product: str, as_of: date, n: int = N_MONTHS) -> list[Curv
 def buffer_rolls(product: str, as_of: date) -> list[CurveContract]:
     """Contracts that are on their buffer day today: rolled out one business day early, so the
     rule-based expiry date should be confirmed."""
-    calendar = PRODUCTS[product].calendar
+    calendar = product_spec(product).calendar
     month, year = front_month(product, as_of)
     # The contract just before the front one was dropped today if its buffer day is today.
     prev_year, prev_month = _shift_month(year, month, -1)
@@ -299,13 +334,16 @@ class CurveStructure:
         return self.label
 
 
-def _structure_symbol(contracts: list[CurveContract]) -> str:
-    return contracts[0].symbol + "".join(f"-{month_token(c.month, c.year)}" for c in contracts[1:])
+def structure_symbol(contracts: list[CurveContract], code: str = "") -> str:
+    """API symbol of consecutive contracts as one structure; `code` replaces the outright's product code (CL-BZ boxes)."""
+    first = contracts[0].symbol if not code else code + month_token(contracts[0].month, contracts[0].year)
+    return first + "".join(f"-{month_token(c.month, c.year)}" for c in contracts[1:])
 
 
 def build_structures(product: str, as_of: date, n: int = N_MONTHS) -> dict[str, list[CurveStructure]]:
     """{family: [structures by position]} for the live n-month ladder on `as_of`."""
-    api_code = PRODUCTS[product].api_code
+    api_code = PRODUCTS[product].structure_api_code
+    structure_code = PRODUCTS[product].structure_code
     contracts = generic_contracts(product, as_of, n)
     ladder: dict[str, list[CurveStructure]] = {family: [] for family in FAMILIES}
 
@@ -317,11 +355,11 @@ def build_structures(product: str, as_of: date, n: int = N_MONTHS) -> dict[str, 
             return CurveStructure(
                 family, start + 1, label, legs[0].month, tuple(c.symbol for c in legs),
                 FAMILY_WEIGHTS[family], "", "",
-                (_structure_symbol(contracts[start:start + 3]), _structure_symbol(contracts[start + 1:start + 4])),
+                (structure_symbol(contracts[start:start + 3], structure_code), structure_symbol(contracts[start + 1:start + 4], structure_code)),
                 (1, -1),
             )
-        symbol = _structure_symbol(legs)
-        generic = api_code + str(start + 1) + "".join(f"-{start + 1 + i}" for i in range(1, legs_count))
+        symbol = structure_symbol(legs, structure_code if family != OUTRIGHT else "")
+        generic = (PRODUCTS[product].api_code if family == OUTRIGHT else api_code) + str(start + 1) + "".join(f"-{start + 1 + i}" for i in range(1, legs_count))
         return CurveStructure(
             family, start + 1, label, legs[0].month, tuple(c.symbol for c in legs),
             FAMILY_WEIGHTS[family], symbol, generic, (symbol,), (1,),
@@ -341,4 +379,7 @@ def family_length(family: str, n: int = N_MONTHS) -> int:
 def live_symbols(product: str, as_of: date, n: int = N_MONTHS) -> list[str]:
     """Every API symbol the live feed must price for this product (outrights, spreads, flies)."""
     ladder = build_structures(product, as_of, n)
-    return [s.symbol for family in (OUTRIGHT, SPREAD, FLY) for s in ladder[family]]
+    symbols = [s.symbol for family in (OUTRIGHT, SPREAD, FLY) for s in ladder[family]]
+    if PRODUCTS[product].is_box:  # a box the API does not price is built from its CL and BZ outrights, which are polled with it
+        symbols += [part for s in ladder[OUTRIGHT] for part in outbox_components(s.symbol) or ()]
+    return symbols

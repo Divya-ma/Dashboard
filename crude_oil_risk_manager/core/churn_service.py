@@ -50,10 +50,10 @@ import numpy as np
 import pandas as pd
 
 from core.atr_calc import atr_frame
-from core.churn_costs import ProductCost, load_costs, load_use_rebates, round_trip_cost, save_costs, without_rebates
+from core.churn_costs import ProductCost, load_costs, load_use_rebates, round_trip_cost, save_costs, tick_of, without_rebates
 from core.churn_data import ChurnStore, derive_dfly_bars, dfly_instruments, tracked_instruments
 from core.churn_engine import (
-    WORSE_FILLS, InstrumentSpec, Settings, analyse, count_oscillations, day_ladder, london_now_hour, prepare, result_of, state_of, trading_calendar,
+    SPLIT_MIN_DAYS, TRAIN_SHARE, WORSE_FILLS, InstrumentSpec, Settings, analyse, hours_for, target_grid, count_oscillations, day_ladder, london_now_hour, prepare, result_of, state_of, trading_calendar,
 )
 from core.curve_calendar import PRODUCTS
 from core.user_settings import parse_number
@@ -77,22 +77,25 @@ PART_FLOOR = 0.05  # lowest value of the hit, worse-fill, stability and tail par
 @dataclass
 class ChurnParams:
     contracts: int = 12  # live instruments per family and product
-    window_days: int = 60  # calendar days of five-minute candles
+    window_days: int = 120  # calendar days of five-minute candles
     margin: float = 3.0  # dollars per lot a target must earn above the round-trip cost
-    max_target: int = 6  # ticks
+    max_target: int = 15  # ticks
     spread_outright: float = 1.0  # quoted bid-ask spread in ticks, paid half on entry (and on a forced exit)
     spread_spread: float = 1.0
     spread_fly: float = 1.0
     spread_dfly: float = 0.0  # a d-fly is built from its legs, so there is no bid-ask to cross
     window_start: float = 9.0  # your trading hours, London time
     window_end: float = 19.0
-    stop_mult: float = 3.0  # the stop is this many targets away from the fill
+    stop_mult: float = 2.0  # the stop is this many targets away from the fill
     patience_min: float = 60.0  # minutes to wait for the price to come back to the level before moving on
     min_volume: float = 100.0  # lots per day
     start_from: int = 4  # first contract (front = 1) shown and scored
     osc_days: int = 5  # trading days the oscillations are counted over
+    min_z: float = 1.0  # > 0: take a new price only when it is this many standard deviations below (above, for a short) its recent average; 0 = any price
+    best_hours: int = 0  # > 0: trade only this many best London hours (picked on the days the target is picked on); 0 = all hours
+    atr_share: float = 0.5  # > 0: also try targets up to this share of the daily ATR (beyond the largest target); 0 = ticks only
 
-    SIM_FIELDS = ("contracts", "window_days", "margin", "max_target", "spread_outright", "spread_spread", "spread_fly", "spread_dfly", "window_start", "window_end", "stop_mult", "patience_min")
+    SIM_FIELDS = ("contracts", "window_days", "margin", "max_target", "spread_outright", "spread_spread", "spread_fly", "spread_dfly", "window_start", "window_end", "stop_mult", "patience_min", "min_z", "best_hours", "atr_share")
 
     def key(self) -> tuple:
         return tuple(asdict(self).values())
@@ -121,6 +124,9 @@ PARAM_RULES = {  # name: (label, minimum, maximum, integer)
     "min_volume": ("Minimum volume per day", 0.0, 1e7, False),
     "start_from": ("Start from contract", 1, 36, True),
     "osc_days": ("Oscillation range (days)", 1, 30, True),
+    "min_z": ("Entry stretch (z)", 0.0, 5.0, False),
+    "best_hours": ("Best hours only", 0, 12, True),
+    "atr_share": ("Targets up to share of ATR", 0.0, 2.0, False),
 }
 
 
@@ -137,10 +143,18 @@ def validate_params(raw: dict) -> ChurnParams:
     return ChurnParams(**values)
 
 
+OLD_DEFAULTS = {"window_days": 60, "max_target": 6, "stop_mult": 3.0}  # before the wider target grid, the 2x stop and the longer history
+
+
 def load_params(repository) -> ChurnParams:
+    """The saved settings; a saved set that still has all of the OLD defaults (never changed by hand) takes the new ones."""
     try:
         raw = repository.get_setting(KEY_CHURN_PARAMS, None)
-        return validate_params(raw) if isinstance(raw, dict) else ChurnParams()
+        if not isinstance(raw, dict):
+            return ChurnParams()
+        if all(raw.get(name) == value for name, value in OLD_DEFAULTS.items()):
+            raw = {**raw, **{name: getattr(ChurnParams(), name) for name in OLD_DEFAULTS}}
+        return validate_params(raw)
     except (ValueError, TypeError):
         return ChurnParams()
 
@@ -157,18 +171,48 @@ class ChurnResults:
     as_of: str
 
 
+def _rank(values: pd.Series, mask: pd.Series) -> pd.Series:
+    """Percentile rank (0-1) of the values among the masked rows; 0 elsewhere."""
+    out = pd.Series(0.0, index=values.index)
+    if mask.any():
+        out[mask] = values[mask].rank(pct=True)
+    return out
+
+
+def _proof(row) -> str:
+    """Whether a profit is backed by the earlier days too: Proven (profitable out of sample AND on the days the target was picked on),
+    Recent only (profitable only on the last days, perhaps a market phase), Unchecked (too few days to split), No edge (loses money)."""
+    if row.net_day <= 0:
+        return "No edge"
+    if not getattr(row, "split", False) or not np.isfinite(getattr(row, "insample_net_day", np.nan)):
+        return "Unchecked"
+    return "Proven" if row.insample_net_day > 0 else "Recent only"
+
+
 def _score(rows: pd.DataFrame, min_volume: float) -> pd.DataFrame:
+    """The churn score (0-100, rows that lose money score 0), the TRADABILITY score (0-100, does not depend on profit: every row with
+    enough volume gets one, so the least bad is visible) and the proof column."""
     rows = rows.copy()
     rows["eligible"] = rows["volume_day"] >= min_volume
     eligible = rows["eligible"] & (rows["net_day"] > 0)
-    edge = pd.Series(0.0, index=rows.index)
-    if eligible.any():
-        edge[eligible] = rows.loc[eligible, "net_day"].rank(pct=True)
+    edge = _rank(rows["net_day"], eligible)
     parts = pd.DataFrame({"edge": edge, "hit": rows["hit_prob"], "worse": rows["worse_score"], "stability": rows["pos_days"], "tail": 1.0 - rows["blowup"]}).clip(0, 1).fillna(0)
     parts.loc[:, ["hit", "worse", "stability", "tail"]] = parts[["hit", "worse", "stability", "tail"]].clip(lower=PART_FLOOR)  # a weak part drags the score down, it does not erase it
     geometric = np.exp(np.log(parts.clip(lower=1e-9)).mean(axis=1))
     rows["score"] = np.where(eligible, 100.0 * geometric, 0.0)
+
+    zero = pd.Series(0.0, index=rows.index)
+    cost_share = (1.0 - rows.get("cost_rt", zero) / rows.get("target_usd", zero).where(rows.get("target_usd", zero) > 0)).clip(0, 1).fillna(0)  # how much of a win the costs leave
+    tradable = pd.DataFrame({
+        "reach": rows["hit_prob"], "trips": _rank(rows.get("trips_day", zero), rows["eligible"]), "volume": _rank(rows["volume_day"], rows["eligible"]), "cost": cost_share,
+    }).clip(0, 1).fillna(0).clip(lower=PART_FLOOR)
+    rows["tradable"] = np.where(rows["eligible"], 100.0 * np.exp(np.log(tradable).mean(axis=1)), 0.0)
+    rows["proof"] = [_proof(r) for r in rows.itertuples()]
     return rows
+
+
+def _hours_text(hours: list[int] | None) -> str:
+    return "" if not hours else ", ".join(f"{h:02d}:00" for h in hours)
 
 
 def _worse_score(worse: dict) -> float:
@@ -215,6 +259,10 @@ class ChurnService:
         """The costs the simulation uses: the saved table, with the rebates removed unless they are switched on."""
         costs = self.costs()[0]
         return costs if self.use_rebates() else without_rebates(costs)
+
+    def combo_rebates(self) -> dict[str, float] | None:
+        """The rebates a quoted CL/BZ structure (a CL-BZ box) earns, or None while rebates are off (the box then pays the full TC)."""
+        return self.costs()[1] if self.use_rebates() else None
 
     def save_costs(self, costs, combo, use_rebates: bool | None = None) -> None:
         save_costs(self._repository, costs, combo, use_rebates)
@@ -272,13 +320,13 @@ class ChurnService:
 
     @staticmethod
     def settings_of(params: ChurnParams) -> Settings:
-        return Settings(params.window_start, params.window_end, params.stop_mult, params.patience_min)
+        return Settings(params.window_start, params.window_end, params.stop_mult, params.patience_min, params.min_z, params.best_hours, params.atr_share)
 
     def _spec(self, instrument, costs: dict[str, ProductCost], params: ChurnParams, atr: float | None) -> InstrumentSpec:
-        cost = costs[instrument.product]
+        cost = tick_of(instrument.product, costs)
         return InstrumentSpec(
             instrument.symbol, instrument.product, instrument.family, instrument.label, cost.tick_size, cost.tick_value,
-            round_trip_cost(instrument.product, instrument.family, costs), params.spread_ticks(instrument.family) / 2.0, atr,
+            round_trip_cost(instrument.product, instrument.family, costs, self.combo_rebates()), params.spread_ticks(instrument.family) / 2.0, atr,
         )
 
     def _atr(self, product: str) -> dict[str, float]:
@@ -291,7 +339,9 @@ class ChurnService:
             return {}
 
     def _key(self, params: ChurnParams, costs, today: date) -> tuple:
-        return (self.store.daily_version, params.sim_key(), tuple(sorted((p, c.tick_size, c.tick_value, c.tc, c.rebate) for p, c in costs.items())), today)
+        combo = self.combo_rebates()
+        return (self.store.daily_version, params.sim_key(), tuple(sorted((p, c.tick_size, c.tick_value, c.tc, c.rebate) for p, c in costs.items())),
+                None if combo is None else tuple(sorted(combo.items())), today)
 
     def cached(self, params: ChurnParams) -> ChurnResults | None:
         """The simulation if it has already been built for these inputs (never builds it)."""
@@ -312,7 +362,6 @@ class ChurnService:
 
     def _build(self, params: ChurnParams, costs, today: date) -> ChurnResults:
         rows, details = [], {}
-        targets = list(range(1, params.max_target + 1))
         for product in PRODUCTS:
             frame = self.store.frame(product)
             if frame.empty:
@@ -332,7 +381,7 @@ class ChurnService:
                     continue
                 spec = self._spec(instrument, costs, params, self._instrument_atr(instrument, bars, atr))
                 for direction in DIRECTIONS:
-                    result = analyse(bars, spec, direction, targets, params.margin, self.settings_of(params), calendar)
+                    result = analyse(bars, spec, direction, target_grid(params.max_target, params.atr_share, spec.atr, spec.tick), params.margin, self.settings_of(params), calendar)
                     if result is None:
                         continue
                     details[(instrument.symbol, direction)] = result
@@ -370,7 +419,7 @@ class ChurnService:
             "stops_day": base.stops_per_day, "stop_usd": result["stop_loss_usd"], "net_trade": base.net_trade, "net_day": base.net_day,
             "insample_net_day": result["insample"].net_day if result["insample"] is not None else np.nan, "worse_score": _worse_score(worse),
             "pos_days": base.pos_days, "blowup": base.blowup, "worst_day": base.worst_day, "volume_day": result["volume_day"], "days": base.days,
-            "split": result["split"],
+            "split": result["split"], "hours": _hours_text(result.get("hours")),
         }
         for k in WORSE_FILLS[1:]:
             row[f"hit_w{k}"] = worse[k].hit_prob if k in worse else np.nan
@@ -460,18 +509,19 @@ class ChurnService:
     @staticmethod
     def _why_zero(r, params: ChurnParams) -> str:
         """In plain words, why a row has no score."""
+        tradable = f" Tradability {r.tradable:.0f}/100 (reach of the target, trips per day, volume, share of a win left after costs): how workable it is even without an edge." if getattr(r, "tradable", 0) > 0 else ""
         if r.volume_day < params.min_volume:
             return f"Not scored: only {r.volume_day:,.0f} lots a day trade here (minimum {params.min_volume:,.0f}), so its moves cannot be relied on."
         if r.net_day <= 0:
             needed = r.stop_usd / (r.net_hit + r.stop_usd) if r.net_hit + r.stop_usd > 0 else np.nan
             return (f"Not scored: loses ${-r.net_day:.0f} per lot a day over the last {r.days} days (the {r.target}-tick target was picked on the days before). "
-                    f"{r.wins_day:.1f} wins a day at +${r.net_hit:.2f} against {r.stops_day:.1f} stop-outs a day at -${r.stop_usd:.2f}; it needs {needed:.0%} of trades to win, it got {r.hit_prob:.0%}.")
-        return f"Not scored: it makes money but a part of the score is zero (positive days {r.pos_days:.0%}, worse-fill survival {r.worse_score:.0%}, blow-up {r.blowup:.0%})."
+                    f"{r.wins_day:.1f} wins a day at +${r.net_hit:.2f} against {r.stops_day:.1f} stop-outs a day at -${r.stop_usd:.2f}; it needs {needed:.0%} of trades to win, it got {r.hit_prob:.0%}." + tradable)
+        return f"Not scored: it makes money but a part of the score is zero (positive days {r.pos_days:.0%}, worse-fill survival {r.worse_score:.0%}, blow-up {r.blowup:.0%})." + tradable
 
     @staticmethod
     def _row_live(r, spec: InstrumentSpec, detail: dict, price, stats, now_ts: float, hour: int, inside: bool, params: ChurnParams) -> dict:
         row = ChurnService._verdict(r, spec, detail["entry"], price, stats, now_ts, hour)
-        row.update(volume_day=r.volume_day, atr=r.atr, cost_rt=r.cost_rt, net_hit=r.net_hit, worse_score=r.worse_score, position=r.position, net_day=r.net_day, osc=np.nan)
+        row.update(hours=getattr(r, "hours", ""), tradable=getattr(r, "tradable", 0.0), proof=getattr(r, "proof", ""), volume_day=r.volume_day, atr=r.atr, cost_rt=r.cost_rt, net_hit=r.net_hit, worse_score=r.worse_score, position=r.position, net_day=r.net_day, osc=np.nan)
         if price is not None:
             sign = 1 if r.direction == "long" else -1
             row["osc"] = count_oscillations(detail["path"], r.direction, price[0] + sign * spec.half_spread * spec.tick, r.target, spec.tick, params.osc_days)
@@ -540,9 +590,12 @@ class ChurnService:
         if ctx is None:
             return None
         out = []
-        for t in range(1, params.max_target + 1):
+        n_days = len(calendar)
+        train_days = int(round(n_days * TRAIN_SHARE)) if n_days >= SPLIT_MIN_DAYS else n_days
+        for t in target_grid(params.max_target, params.atr_share, spec.atr, spec.tick):
+            hour_ok = hours_for(ctx, t, settings.stop_mult * t, spec.half_spread, spec.tick_value, spec.cost_rt, train_days, settings.best_hours)
             for k in WORSE_FILLS:
-                arrays = day_ladder(ctx, t, settings.stop_mult * t, settings.patience_minutes, spec.half_spread, k, spec.tick_value, spec.cost_rt)
+                arrays = day_ladder(ctx, t, settings.stop_mult * t, settings.patience_minutes, spec.half_spread, k, spec.tick_value, spec.cost_rt, hour_ok, settings.min_z)
                 res = result_of(arrays, slice(0, len(calendar)), t, k, (settings.stop_mult * t + spec.half_spread) * spec.tick_value + spec.cost_rt)
                 if res is not None:
                     out.append({"target": t, "worse": k, "hit_prob": res.hit_prob, "net_day": res.net_day, "net_trade": res.net_trade, "trips_per_day": res.trips_per_day})

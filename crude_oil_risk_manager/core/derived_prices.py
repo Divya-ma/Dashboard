@@ -10,6 +10,9 @@ priced now from one priced hours ago gives a spread that is wrong by the market'
 for a structure worth cents is a large error. A way that mixes times is skipped, and no price is better
 than a misleading one (the caller then reports the structure as missing).
 
+    CL-BZ boxes (core.box): an outbox from its CL and BZ outrights; a spreadbox from its two outboxes, else from the CL
+    spread minus the BZ spread, else from the four outrights; a flybox from two spreadboxes (and so on).
+
     spread  A-B        = A - B
     fly     A-B-C      = (A-B) - (B-C)   or   A - 2B + C
     condor  A-B-C+D    = (A-B) - (C-D)   or   A - B - C + D
@@ -17,6 +20,7 @@ than a misleading one (the caller then reports the structure as missing).
 Symbols here are INTERNAL (CLZ26, BRNV28-X28-Z28); the caller translates them for the API. No I/O.
 """
 
+from core.box import box_derivation_options, is_box_product
 from core.structure_utils import DEFAULT_RATIOS, parse_symbol
 
 CONSISTENT_SECONDS = 1_800.0
@@ -30,6 +34,11 @@ def derivation_options(symbol: str) -> list[list[tuple[str, float]]]:
         legs = parse_symbol(symbol)
     except ValueError:
         return []
+    if is_box_product(legs[0]["product"]):
+        try:
+            return box_derivation_options(legs[0]["product"], [f"{leg['month']}{leg['year']}" for leg in legs])
+        except ValueError:
+            return []
     ratios = DEFAULT_RATIOS.get(len(legs))
     if ratios is None or len(legs) < 2:
         return []

@@ -340,3 +340,43 @@ def test_an_oscillation_cannot_start_on_one_day_and_finish_on_the_next():
 def test_a_day_with_no_candles_is_skipped():
     path = Path(np.array([70.02, 70.02]), np.array([70.00, 70.00]), np.array([0, 2]), np.array([1, 1]))  # the second day: end < start
     assert count_oscillations(path, "long", 70.00, 1, 0.01, 2) == 1
+
+
+# ----------------------------------------------------------------------
+# Stretch entries, best hours, ATR targets
+# ----------------------------------------------------------------------
+
+
+def test_the_options_off_are_the_plain_ladder_and_a_gate_that_allows_everything_changes_nothing():
+    bars = make_bars(days=21, seed=5)
+    ctx = prepare(bars, 0.01, "long", 9, 19, calendar_of(bars))
+    plain = day_ladder(ctx, 3, 6, 60, 0.5, 0, 10.0, 1.38)
+    open_gate = day_ladder(ctx, 3, 6, 60, 0.5, 0, 10.0, 1.38, hour_ok=np.ones(len(ctx.close), dtype=bool), min_z=0.0)
+    assert (plain.total == open_gate.total).all() and (plain.trades == open_gate.trades).all()
+
+
+def test_stretch_entries_only_start_on_candles_below_their_average_and_hours_limit_the_trading():
+    from core.churn_engine import hours_for
+
+    bars = make_bars(days=21, seed=6)
+    ctx = prepare(bars, 0.01, "long", 9, 19, calendar_of(bars))
+    plain = day_ladder(ctx, 3, 6, 60, 0.5, 0, 10.0, 1.38)
+    stretched = day_ladder(ctx, 3, 6, 60, 0.5, 0, 10.0, 1.38, min_z=1.0)
+    assert stretched.trades.sum() < plain.trades.sum()  # waiting for a dip means fewer trades
+    nothing = day_ladder(ctx, 3, 6, 60, 0.5, 0, 10.0, 1.38, min_z=50.0)
+    assert nothing.trades.sum() == 0 and (nothing.total == 0).all()  # never stretched that far: flat
+    morning = ctx.hour < 11
+    only_morning = day_ladder(ctx, 3, 6, 60, 0.5, 0, 10.0, 1.38, hour_ok=morning)
+    assert 0 < only_morning.trades.sum() < plain.trades.sum()
+    chosen = hours_for(ctx, 3, 6, 0.5, 10.0, 1.38, 12, 3)
+    assert chosen is not None and len({int(h) for h in np.floor(ctx.hour[chosen])}) == 3
+    assert hours_for(ctx, 3, 6, 0.5, 10.0, 1.38, 12, 0) is None and hours_for(ctx, 3, 6, 0.5, 10.0, 1.38, 12, 99) is None  # off, or no fewer hours than exist
+
+
+def test_the_atr_share_adds_targets_beyond_the_largest_only_for_wide_instruments():
+    from core.churn_engine import target_grid
+
+    assert target_grid(6, 0.0, 2.0, 0.01) == [1, 2, 3, 4, 5, 6]
+    assert target_grid(6, 0.5, 0.03, 0.01) == [1, 2, 3, 4, 5, 6]  # a quiet fly: 0.5 ATR is 1.5 ticks, nothing to add
+    wide = target_grid(6, 0.5, 2.0, 0.01)  # 100 ticks of ATR: targets up to 100 ticks
+    assert wide[:6] == [1, 2, 3, 4, 5, 6] and wide[-1] == 100 and wide == sorted(set(wide))

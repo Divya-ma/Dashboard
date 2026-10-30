@@ -15,6 +15,7 @@ from adapters.base import (
     SymbolTranslator,
 )
 from adapters.qh_api import QHApi, make_api
+from core.box_candles import fill_missing_boxes
 from core.models.structure import Structure
 from db.repository import Repository
 
@@ -156,14 +157,19 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         end: datetime | None,
         count: int | None,
     ) -> dict[str, pd.DataFrame]:
-        candles = self._api.ohlc(
-            interval,
-            instruments=api_symbols,
-            start=int(start.timestamp()) if start is not None else None,
-            end=int(end.timestamp()) if end is not None else None,
-            count=count,
-            token=token,
-        )
+        def request(symbols: list[str]) -> list[dict]:
+            return self._api.ohlc(
+                interval,
+                instruments=symbols,
+                start=int(start.timestamp()) if start is not None else None,
+                end=int(end.timestamp()) if end is not None else None,
+                count=count,
+                token=token,
+            )
+
+        candles = list(request(api_symbols))
+        # A CL-BZ box the API has no candles for is built from its CL and BZ legs (core.box_candles).
+        candles += fill_missing_boxes(request, api_symbols, candles, daily=interval == "1D")
         by_api_symbol: dict[str, list[dict]] = {}
         for candle in candles:
             by_api_symbol.setdefault(candle["product"], []).append(candle)

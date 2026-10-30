@@ -34,6 +34,7 @@ a setting, the default is given.
    - [Archive and the trade journal](#611-archive-and-the-trade-journal)
    - [Settings](#612-settings)
    - [Seasonality](#613-seasonality)
+   - [Strategy Rollover](#614-strategy-rollover)
 7. [Alerts](#7-alerts)
 8. [Storage: database, files, settings keys](#8-storage-database-files-settings-keys)
 9. [Configuration (.env)](#9-configuration-env)
@@ -121,10 +122,44 @@ SQLite ◄─► repository ◄─ structures, legs, trades, P&L snapshots, aler
 | ICE Low Sulphur Gasoil | `G` | `GO` | 100 tonnes | 0.25 | $25 | $100 | 2 business days before the 14th of the **delivery** month (UK calendar) |
 | NYMEX Brent | `BZ` | `BZZ` | 1,000 bbl | 0.01 | $10 | $1,000 | (positions/history only) |
 | WBS | `WBS` | `WTCL` | 1,000 bbl (assumed) | 0.01 | $10 | $1,000 | (positions / candle history only; not on the curve pages) |
+| CL-BZ outbox | `CLBZ` | `WTCLCO` | 1,000 bbl | 0.01 | $10 | $1,000 | the earlier of CL's and BZ's (BZ: last business day of the second month before delivery, NYMEX calendar) |
+| CL-BZ spreadbox / flybox | `CLBZS` | `CLBZZX` | 1,000 bbl | 0.01 | $10 | $1,000 | as the outbox |
 
-`core/contract_specs.py` holds these numbers; `core/curve_calendar.PRODUCTS` registers the three curve products
-(CL, BRN, G) that the curve-based pages (Trade Analyzer, Curve Compare, OI, ATR, Churn, Correlation matrix, journal)
+`core/contract_specs.py` holds these numbers; `core/curve_calendar.PRODUCTS` registers the curve products
+(CL, BRN, G and the CL-BZ box) that the curve-based pages (Trade Analyzer, Curve Compare, OI, ATR, Churn, Correlation matrix, journal)
 loop over. **Adding a product is one entry in `PRODUCTS` (plus its expiry rule) and one in `contract_specs`.**
+
+### The CL-BZ box (`core/box.py`)
+
+CL against NYMEX Brent in one instrument, quoted two ways, each with its own API code and so its own internal product code:
+
+| Internal | API | Meaning |
+|---|---|---|
+| `CLBZF27` | `WTCLCOF27` | **outbox**: CL Jan27 - BZ Jan27 |
+| `CLBZF27-G27` | `WTCLCOF27-G27` | outbox across months: CL Jan27 - BZ Feb27 (CL month first, then BZ month) |
+| `CLBZSF27-G27` | `CLBZZXF27-G27` | **spreadbox**: CL Jan27/Feb27 spread - BZ Jan27/Feb27 spread (= outbox Jan27 - outbox Feb27) |
+| `CLBZSF27-G27-H27` | `CLBZZXF27-G27-H27` | **flybox**: CL fly - BZ fly (spreadbox - next spreadbox, 1 : -1) |
+| (two flyboxes) | | **dflybox**: flybox - next flybox = three spreadboxes in 1 : -2 : 1 |
+
+`decompose_to_outrights` turns any box into CL and BZ outrights, so positions, exposure, P&L weights, VaR and the builder's
+correlation work on the legs. On the curve pages a box is an ordinary product: **position k pairs CL month k with BZ month k**
+(outbox = the outright curve, spreadbox = the spread curve, flybox, dflybox). It has no open interest or volume analysis (the OI
+page says so; its ATR tab works). Its costs (Churn) are the CL and BZ transaction costs on every lot (an outbox 1 + 1 lots, a
+spreadbox 2 + 2, a flybox 4 + 4, a dflybox 8 + 8); with rebates switched on it earns the quoted CL/BZ structure rebates.
+
+**Everything has a fallback built from the legs**, so a page still works if the API has no series for a box code (the box codes above
+have not been confirmed against the live API; the token stored when this was written had expired):
+
+| Data | First the API's box code | Else |
+|---|---|---|
+| Live price (`/fairvalue/`) | `WTCLCOF27`, `CLBZZXF27-G27`, ... | outbox = CL - BZ; spreadbox = outbox - next outbox, else CL spread - BZ spread, else the four outrights; flybox = spreadbox - spreadbox (`core/derived_prices.py`; the pieces must be priced within 30 minutes of each other) |
+| Curve history (generic charts) | `WTCLCO1`, `CLBZZX1-2`, ... | outbox k = CL(month m) - BZ(month m) from the `CL1..` and `BZZ1..` generic series, **matched by delivery month** (BZ expires before CL, so for a few weeks CL1 is a month earlier than BZ1) (`CurveHistoryStore._refresh_box_from_legs`) |
+| Previous settlement | the box code | CL settlement - BZ settlement (`core/curve_store.py`) |
+| Settlement history (Seasonality, correlation page) | `/common/dailymarketdata/` for `WTCLCO...` | CL - BZ from the legs' rows, kept in `data/oi/CLBZ.parquet` without open interest (`core/box_settlements.py`) |
+| Daily and 5-minute candles (ATR, Churn, daily history) | `/ohlc/` for the box code | the difference of the legs' candles, close to close (`core/box_candles.py`): the extremes inside a candle are not seen, so a daily range is a little small and a Churn target a little harder to reach than on a real box |
+
+The BZ in the builder's correlation / VaR / beta (which decompose to outrights) is priced from the ICE Brent contract of the same month,
+as for any BZ leg, and says so on screen. A box position's own correlation-page history uses the stored box settlements instead.
 
 Gasoil is priced in USD per tonne (about 1,400), so a "point" is $1 per tonne and the 0.25 tick is a quarter dollar.
 Price-point limits in the code (for example "widest usable bid-ask") are written in CL ticks and scaled by the product's
@@ -363,7 +398,7 @@ How much the whole book could lose if its stops were hit, allowing for correlati
 ### 6.1 Sidebar and shell
 
 Navigation: **Home, Structures, Correlation, Exposure Map, VaR & Scenarios, Trade Analyzer, Curve Compare, Seasonality,
-OI · Volume · ATR, Churn, Archive, Settings.** The sidebar also shows the time of the last price update, a stale-data
+Strategy Rollover, OI · Volume · ATR, Churn, Archive, Settings.** The sidebar also shows the time of the last price update, a stale-data
 indicator and a countdown. A banner appears until an API token is configured. Alert toasts appear on screen.
 
 Three clocks drive the app: a 10 s live-price poll, a 5 s portfolio refresh, a 1 s countdown.
@@ -612,7 +647,7 @@ Route `/churn`. "Which contracts offer the best intraday small-target churning?"
 of CL, BRN and gasoil, long and short, it simulates the trade you describe from **five-minute candles** and ranks them.
 
 **The trade (`core/churn_engine.py`).** Enter at a candle close by crossing the spread (fill = close + half the spread, +
-"worse" ticks when testing a worse fill). Target = `target` ticks above the fill, stop = a multiple (default 3×) below. A later
+"worse" ticks when testing a worse fill). Target = `target` ticks above the fill (any target up to the largest allowed, default 15), stop = a multiple (default 2×) below. A later
 candle's high at the target is a win (+target); its low at the stop is a stop-out (−stop and the spread to cross; if one candle
 holds both, the stop is assumed first). A trade open at the end of the window is closed at the close. Nothing is held outside
 **your trading window (London time, default 09:00–19:00; candles are UTC and converted, so summer time is handled)**.
@@ -637,8 +672,20 @@ ranked among eligible rows; rows that lose money score 0), **hit** (share of lad
 (how much of the net per day survives an entry 1 and 2 ticks worse), **stability** (share of positive days), **tail** (1 − blow-up
 rate; blow-up = a day losing more than three stop-outs' worth). A row below `min_volume` (100 lots/day) is shown but not scored.
 
-**Table columns:** Contract, Live Price, Volume/day, ATR, Cost, Per-lot net profit, Number of oscillations, Score, Side, Worse
-price score. *Oscillations* = from the live price, how many times in the last 5 trading days the market came back to that level
+**Tradability (0–100)** does not depend on profit, so every row with enough volume gets one and the least bad is visible: the
+geometric mean of the target's reach (hit rate), trips per day and volume (both ranked among the rows with enough volume) and the
+share of a win left after costs. **Proof** says whether a profit is backed by the earlier days: *Proven* (profitable out of sample
+and on the days the target was picked on), *Recent only* (only on the last days, perhaps a market phase), *Unchecked* (too few days
+to split), *No edge* (loses money). Three more options, tested on the stored candles: **Entry stretch (z)** (default 1: a new price is taken only when it is at least one
+standard deviation on the good side of its last-day average, so the ladder buys dips and sells strength and waits otherwise; 0 = any
+price), **Targets up to ATR share** (default 0.5: also tries bigger targets, up to that share of the daily ATR, so a wide outright
+gets targets that fit its range) and **Best hours only** (default 0 = off: trade only the N London hours whose entries earned most
+on the days the target is picked on, never on the days that score it; it raised the proven count but cut the profitable one, so it is
+left to you). On the stored data: profitable rows 42 -> 60 and rows also profitable on the earlier days 22 -> 38. Defaults were widened after testing on the stored candles: window 120 days (more test days), targets
+up to 15 ticks (the old cap of 6 cut most spreads off), stop 2×. Saved settings that still hold the old defaults take the new ones.
+
+**Table columns:** Contract, Live Price, Volume/day, ATR, Cost, Per-lot net profit, Number of oscillations, Score, Tradability,
+Proof, Side, Worse price score. *Oscillations* = from the live price, how many times in the last 5 trading days the market came back to that level
 and then moved the target in the trade's favour, in one day. The Score's colour and tooltip carry the **live verdict** — GO if
 the price is not on the bad side of its last-day average (z), volatility is within 0.5–2× usual, the current London hour is not
 clearly weak and the price is fresh; WAIT with reasons otherwise; CLOSED outside your window; none without a price younger than
@@ -798,6 +845,34 @@ nearer expiry than the reference day cannot be rebased and shows no data.
 No extra API calls are made by this page itself except Curve Compare's quote polling while it is open.
 
 ---
+
+### 6.14 Strategy Rollover
+
+Route `/strategy-rollover` (`core/rollover.py`, `ui/layouts/rollover_tab.py`). How a generic moved before the front contract
+expired and after it became the front, on **daily settlements** (the OI store; no live prices). One line per expiry E, drawn against
+trading days from E (0 on the expiry day):
+
+- **Generic n** (1 = front) and **Curve** (outright, spread, fly, dfly): the line follows the structure that is generic n just before
+  E, through E (it becomes generic n-1), on to the end of the window. The window starts **Days before** trading days before E.
+- **Expiries**: how many front expiries the line runs through; each gets a **vertical line** (E, then the later ones). The line ends
+  at the next expiry after them. A generic n can pass at most n-1 expiries (more are cut back, with a note). Generic 3 with 2
+  expiries: generic 3, then 2 after E, then 1 after the next expiry, up to the one after.
+- **Aligned expiries**: the gap between two expiries differs by a day or two from one contract to the next (holidays), so the days
+  between two expiries are stretched or squeezed to the longest gap among the lines, and every expiry sits on one vertical line.
+- **Comparisons**: how many expiries are drawn (the most recent first). Only contracts that have crossed every expiry line are drawn: the last
+  one (the end of the line) has passed or is still ahead, so with generic 4 and 3 expiries a contract that has not yet reached its first expiry is left out. The dotted line is the average of the finished ones (a line
+  still being drawn is white and not averaged; at least two are needed; the average is yellow).
+- **Zero base**: each line has its price on day 0 subtracted, so all meet at 0 on the expiry day, and it starts again from 0 on each
+  later expiry line (the line is 0 on every vertical line). An expiry still to come has no day 0 and is left out.
+- Diamonds on a line mark the later expiries it passes. Expiries of finished contracts are the last day they settled.
+
+**CL-BZ** works differently, because its legs expire on different days. Its line is the *front box* through one calendar month:
+from the first trading day to the CL expiry (day 0) the front is CL month c − BZ month c+1 (different months); from the CL expiry
+to the BZ expiry both legs are the same month; after the BZ expiry the months differ again until the next CL expiry, where the
+line ends (**Expiries** adds more months). It has a vertical line on every CL and BRN (BZ) expiry; zero base restarts at each. The different-month box is built as the CL spread plus the stored same-month box, so
+no BZ price series is needed. Curve, Generic and Days before do not apply.
+
+Products: CL, Brent, Gasoil and CL-BZ use the OI store. BZ (API `BZZ`) and WBS (ICE WTI, API `WTCL`) have a settlements-only store of their own (`data/oi_extra`), downloaded in the background the first time one is shown (depth = the OI history setting; the first view says it is downloading). They are not curve products, so no other page lists them; WBS is assumed to expire like CL (finished contracts use their last settlement day).
 
 ## 7. Alerts
 

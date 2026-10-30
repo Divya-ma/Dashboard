@@ -28,7 +28,7 @@ _STATUS_OPTIONS = [
     {"label": "Open Only", "value": "open"},
 ]
 _PRODUCT_OPTIONS = [{"label": "All Products", "value": "all"}] + [
-    {"label": product, "value": product} for product in ("CL", "BRN", "BZ", "WBS", "G")
+    {"label": product, "value": product} for product in ("CL", "BRN", "BZ", "WBS", "G", "CLBZ", "CLBZS")
 ]
 _SORT_OPTIONS = [
     {"label": "Sort: Total PnL", "value": "total_pnl"},
