@@ -31,6 +31,7 @@ from typing import Callable
 
 import pandas as pd
 
+from adapters.base import APIError
 from core.box_settlements import fill_missing_box_rows
 from core.curve_calendar import PRODUCTS, api_symbol, contract_expiry, product_spec
 
@@ -88,6 +89,11 @@ class OiProgress:
     message: str = ""
     error: str | None = None
     finished_at: str | None = None
+
+
+def _is_not_found(exc: APIError) -> bool:
+    """The API's answer to a code it has no instrument for (the client words it "HTTP 404: ...")."""
+    return "HTTP 404" in str(exc)
 
 
 def _clean(rows: list[dict]) -> pd.DataFrame:
@@ -199,6 +205,16 @@ class OiStore:
             if not batch or offset >= count:
                 return rows
 
+    @classmethod
+    def _fetch_listed(cls, api, codes: list[str], start: date, end: date) -> list[dict]:
+        """`_fetch`, but a code the API does not list gives no rows instead of an error."""
+        try:
+            return cls._fetch(api, codes, start, end)
+        except APIError as exc:
+            if _is_not_found(exc):
+                return []
+            raise
+
     def _save(self, product: str, new: pd.DataFrame, chunk: list[tuple[OiContract, date]], today: date) -> None:
         with self._lock:
             path = self._path(product)
@@ -243,9 +259,19 @@ class OiStore:
                 f"Downloading {product} {chunk[0][0].label}-{chunk[-1][0].label} "
                 f"({self.progress.done + 1} of {self.progress.total})"
             )
-            rows = self._fetch(api, [c.symbol for c, _ in chunk], start, today)
+            codes = [c.symbol for c, _ in chunk]
+            unknown = False
+            try:
+                rows = self._fetch(api, codes, start, today)
+            except APIError as exc:
+                if not (product_spec(product).is_box and _is_not_found(exc)):
+                    raise
+                rows, unknown = [], True  # the API does not list this box code (yet): built from its legs below
             if product_spec(product).is_box:  # a box the API has no settlements for is built from its CL and BZ legs
-                rows += fill_missing_box_rows(lambda codes: self._fetch(api, codes, start, today), [c.symbol for c, _ in chunk], rows)
+                rows += fill_missing_box_rows(lambda legs: self._fetch_listed(api, legs, start, today), codes, rows)
+            if unknown:  # a contract with no rows is not marked fetched, so it is asked for again once the API (or its legs) has it
+                priced = {row["qhcode"] for row in rows}
+                chunk = [item for item in chunk if item[0].symbol in priced]
             report["requests"] += 1
             report["rows"] += len(rows)
             report["contracts"] += len(chunk)

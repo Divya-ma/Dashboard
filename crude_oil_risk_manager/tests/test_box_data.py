@@ -5,6 +5,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from adapters.base import APIError
 from core.atr_data import AtrStore, instrument_universe
 from core.box_candles import derive_box_candles, fill_missing_boxes, leg_symbols
 from core.box_settlements import fill_missing_box_rows
@@ -189,6 +190,37 @@ def test_the_settlement_store_downloads_box_settlements_from_the_legs(tmp_path):
     frame = store.frame("CLBZ")
     assert not frame.empty and (frame["close"] == -2.0).all() and frame["oi"].isna().all()
     assert frame["contract"].str.startswith("WTCLCO").all()
+
+
+class NotFoundApi:
+    """Like the live API for a code it has no instrument for: the whole request is a 404. `unlisted` codes are unknown wherever they appear."""
+
+    def __init__(self, unlisted=()):
+        self.unlisted = tuple(unlisted)
+
+    def daily_market_data(self, qhcode, start, end, fields, limit, offset):
+        rows = []
+        for code in qhcode.split(","):
+            if code.startswith("WTCLCO") or code.startswith(self.unlisted):
+                raise APIError('/common/dailymarketdata/: HTTP 404: {"error":"Instrument not found."}')
+            rows += [{"qhcode": code, "datetime": f"2026-10-{d:02d}T00:00:00", "close": 70.0 if code.startswith("CL") else 72.0, "volume": 7, "oi": 3} for d in (26, 27)]
+        return {"results": rows, "count": len(rows)}
+
+
+def test_a_box_code_the_api_does_not_list_is_built_from_the_legs_instead_of_stopping_the_download(tmp_path):
+    store = OiStore(tmp_path)
+    store.update(NotFoundApi(), history_days=60, today=date(2026, 10, 28))  # must not raise
+    frame = store.frame("CLBZ")
+    assert not frame.empty and (frame["close"] == -2.0).all()
+    assert store.updated_on == "2026-10-28"
+
+
+def test_a_box_with_no_rows_at_all_is_not_marked_fetched_so_it_is_asked_for_again(tmp_path):
+    store = OiStore(tmp_path)
+    store.update(NotFoundApi(unlisted=("BZZ",)), history_days=60, today=date(2026, 10, 28))  # the BZ legs are unlisted too
+    assert store.frame("CLBZ").empty
+    assert not [symbol for symbol in store._meta["contracts"] if symbol.startswith("WTCLCO")]
+    assert store.frame("CL").shape[0] > 0  # the other products were stored
 
 
 # ----------------------------------------------------------------------
