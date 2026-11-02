@@ -58,9 +58,10 @@ class RolloverOptions:
     before_days: int = DEFAULT_BEFORE  # trading days shown before the first expiry (generic mode)
     zero_base: bool = False
     family: str = OUTRIGHT
+    upcoming: bool = False  # also draw the line of an expiry that has not come yet (the trigger study reads it before the expiry)
 
     def key(self) -> tuple:
-        return (self.generic, self.expiries, self.comparisons, self.before_days, self.zero_base, self.family)
+        return (self.generic, self.expiries, self.comparisons, self.before_days, self.zero_base, self.family, self.upcoming)
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ class RolloverLine:
     vlines: list[int] = field(default_factory=list)
     pivot: int = 0
     dates: list[date] = field(default_factory=list)  # the calendar dates of `bounds`
+    base: int = 0  # delivery-month index of the contract whose expiry is x = 0
 
     @property
     def prices(self) -> pd.Series:
@@ -144,10 +146,10 @@ def _zero_point(prices: pd.Series) -> float | None:
     return _near(prices, 0)
 
 
-def _usable(line: RolloverLine, zero_base: bool, today: date) -> bool:
+def _usable(line: RolloverLine, zero_base: bool, today: date, upcoming: bool = False) -> bool:
     """Only a line that has crossed every expiry line but the last (which has passed or is still to come) is drawn; a zero-based one also
-    needs its day 0."""
-    if len(line.dates) > 1 and line.dates[-2] > today:
+    needs its day 0. `upcoming` also lets in the line of an expiry that has not come yet."""
+    if not upcoming and len(line.dates) > 1 and line.dates[-2] > today:
         return False
     return not zero_base or (line.anchor <= today and line.frame.index.max() >= 0 and _zero_point(line.prices) is not None)
 
@@ -234,7 +236,7 @@ def generic_line(close: pd.DataFrame, product: str, base: int, expiries: Expirie
     label = _label(month, year, len(symbols))
     bounds = [int(-v) for v in trading_days_to(pd.DatetimeIndex([pd.Timestamp(d) for d in dates]), anchor, calendar)]
     return RolloverLine(
-        label, anchor, frame, live=end > today, bounds=bounds, dates=dates,
+        label, anchor, frame, live=end > today, bounds=bounds, dates=dates, base=base,
         names=["", *(f"{month_label(base + k)} expires" for k in range(1, len(dates)))],
         kinds=["Front expiry", *(f"Expiry {k + 1}" for k in range(1, len(dates)))],
         vlines=list(range(max(len(dates) - 1, 1))),  # the expiries the line passes; the last date is where it ends
@@ -287,7 +289,7 @@ def box_line(cl: pd.DataFrame, box: pd.DataFrame, base: int, cl_expiries: Expiri
     bounds = [int(-v) for v in trading_days_to(when, anchor, calendar)]
     return RolloverLine(
         anchor.strftime("%b%y"), anchor, frame, live=end > today, bounds=bounds, dates=[e[0] for e in events], names=["", "", *(e[1] for e in events[1:])],
-        kinds=["", *(e[2] for e in events)], vlines=list(range(1, len(bounds))), pivot=1,
+        kinds=["", *(e[2] for e in events)], vlines=list(range(1, len(bounds))), pivot=1, base=base,
     )
 
 
@@ -327,6 +329,14 @@ class RolloverService:
 
     def _source(self, product: str):
         return self._extra if product in EXTRA_PRODUCTS and self._extra is not None else self._store
+
+    def today(self) -> date:
+        return self._clock().date()
+
+    def settlements(self, product: str) -> tuple[str, pd.DataFrame]:
+        """(version, stored rows: contract, date, oi, close, volume) of a product, from the store that holds it."""
+        source = self._source(product)
+        return source.version, source.frame(product)
 
     def _close(self, product: str) -> pd.DataFrame:
         source = self._source(product)
@@ -421,7 +431,7 @@ class RolloverService:
         floor = _index(1, FIRST_CONTRACT_YEAR)
         while len(lines) < options.comparisons and base >= floor:
             line = build(base)
-            if line is not None and _usable(line, options.zero_base, today):
+            if line is not None and _usable(line, options.zero_base, today, options.upcoming):
                 lines.append(line)
             base -= 1
         guides, moved = align(lines)

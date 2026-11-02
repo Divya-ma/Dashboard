@@ -874,6 +874,61 @@ no BZ price series is needed. Curve, Generic and Days before do not apply.
 
 Products: CL, Brent, Gasoil and CL-BZ use the OI store. BZ (API `BZZ`) and WBS (ICE WTI, API `WTCL`) have a settlements-only store of their own (`data/oi_extra`), downloaded in the background the first time one is shown (depth = the OI history setting; the first view says it is downloading). They are not curve products, so no other page lists them; WBS is assumed to expire like CL (finished contracts use their last settlement day).
 
+#### Trigger study (below the chart)
+
+*Why does a line move one way around an expiry in some months and not in others?* The study uses the product, curve and generic chosen
+on the page (it needs no click) and a **window**: from X to Y trading days from the front expiry (default -10 → +10). Every earlier expiry
+gives one **move** (how far its line went between X and Y), and the study reads **triggers** on the entry day (day X) to see which readings
+line up with the moves. The expiries are the observations (default 36, up to 72); screening needs at least 5 and says so otherwise.
+Code: `core/rollover_triggers.py` (the study), `core/trigger_stats.py` (statistics), `core/roll_days.py` (front-month series),
+`ui/layouts/rollover_study.py` and `ui/callbacks/rollover_study_callbacks.py` (the page). The study draws the page's selection with zero base
+off (it restarts the price at every later expiry line) and with the expiry that has not come yet included, so the line being drawn now is
+read on its entry day.
+
+**Switch days.** A line that changes what it prices jumps by the spread between the two, and that jump is a switch, not a market move. The
+**CL-BZ** line is the front box and changes pair on the first trading day after the CL expiry and again after the Brent expiry (for example
+`CL Oct26 − BZ Nov26 → CL Nov26 − BZ Nov26`, a jump of -6.26 on 2026-09-23), which would make CL|BZ look as if it drops after every
+expiry. A line's move is therefore the sum of its daily changes **without** those days; the table shows what the plain difference would have
+added in *Switch not counted*, and the page lists each day left out with its jump. A **generic** line follows one fixed contract through its
+expiry and never switches. The market-movement triggers use front-month series, which switch the same way, and also leave out the first
+trading day after each CL expiry and each Brent expiry (`core/roll_days.py`: the change is blank and the jump recorded).
+
+**Triggers** (grouped; 11 for a generic line of CL / Brent / gasoil, 18 for CL-BZ, whose CL and Brent legs are each read; Brent legs use ICE
+Brent (BRN) settlements because BZ has none stored):
+
+| Group | Readings |
+|---|---|
+| This line | its price vs earlier expiries at this point (z, only *earlier* expiries, needs 3); its change and daily volatility over the prior N days (switch days not counted) |
+| Curve type | each leg's calendar spread at the line's first month (generic lines); each leg's front-month spread M1 − M2 |
+| Outright prices | each leg's outright price (the line's first month; the front contract for CL-BZ) |
+| Open interest | each leg's OI change over the prior N days; OI vs its own last 60 days; OI vs earlier expiries at this point |
+| Market movement | each leg's front-month move and daily volatility over the prior N days; for CL-BZ, CL front minus Brent front |
+
+Lookback N (default 10, 3-60) is set on the page. A line only has the days the page draws it for (the "Days before" control; a CL-BZ line
+starts on the first trading day of the month), so the change and volatility of the line itself need that many days before the entry day.
+Freight, EIA stocks and exports, refinery runs, COT positioning, the event calendar and OVX have no data feed in the app; the page lists them
+as triggers worth testing once a feed exists.
+
+**What it says.** A window is a **TREND** (at least 70% of the expiries moved the usual way and |t| ≥ 2), **WEAK**, or **NO TREND**; the usual
+direction is the median move, so one huge move cannot set it. Then the case: **TREND** (triggers, if any, separate strong expiries from weak
+ones), **MIXED REGIMES** (the expiries disagree but a trigger splits them into groups that move in opposite directions) or **NO MECHANISM
+FOUND** (a trigger that only separates bigger moves from smaller ones is named but not called a mechanism). Each trigger gets its rank
+correlation with the moves, a **permutation p-value** (exact for 8 expiries or fewer), a **q-value** corrected for the number of triggers
+tried (Benjamini-Hochberg), a check that the sign **survives removing any one expiry**, and the mean move of the lowest and highest thirds of
+its readings. *Strong* = p ≤ 0.05, q ≤ 0.25 and stable; *possible* = p ≤ 0.10 and stable. With 11-18 triggers tried, one or two will look good
+by chance, which the page states.
+
+**A rule from the best trigger** (cut at the median reading; each side expects the sign of its own mean move) is scored
+**leave-one-expiry-out**: every expiry is predicted by a rule learned from the other expiries, and compared with simply always taking the usual
+direction. A rule with too few trades is flagged. **Save this rule to forward-test** freezes it (kept in the settings table under
+`rollover_rules`): it keeps the product, curve, generic, window and trigger, and applies to every later expiry. A new expiry comes every month,
+so the forward-test table (one row per line: waiting, open or finished with HIT / MISS) fills quickly. A line whose entry day came before the
+rule was saved is marked "not a real forward test".
+
+**Scan all windows** tries windows of 5-30 days across the lines' axis and lists the ones where the expiries agree, with how many windows
+would look like a trend by luck alone (each line given a random sign); clicking a row sets From and To. **For CL-BZ** each expiry also shows
+how much of the move came from CL and how much from Brent (front months, switch days not counted); the rest is "Unexplained" (BZ vs BRN).
+
 ## 7. Alerts
 
 `AlertManager` persists every alert (in-app) and posts to Microsoft Teams when a webhook is set and enabled. It never raises;

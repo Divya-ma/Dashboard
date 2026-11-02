@@ -16,6 +16,7 @@ from core.rollover import (
     RolloverResult,
 )
 from ui.layouts.curve_tab import _CARD, _LABEL, _MUTED, _dropdown, _layout, empty_figure
+from ui.layouts.rollover_study import study_section
 from ui.layouts.shell import COLORS
 
 ROLLOVER_PRODUCTS = {**PRODUCTS, **EXTRA_PRODUCTS}
@@ -113,6 +114,7 @@ def rollover_layout() -> html.Div:
         dbc.Card(dbc.CardBody(
             dcc.Graph(id="rollover-graph", figure=empty_figure(PLACEHOLDER), config={"displayModeBar": False}, style={"height": "600px"}),
         ), style=_CARD, className="mb-3"),
+        study_section(),
         html.Div(
             "A line follows one contract (or spread, fly or dfly) from the chosen number of trading days before the front expiry, through "
             "the expiry (day 0), when it moves up one generic, to the expiry that many months later; a generic can pass at most generic − 1 "

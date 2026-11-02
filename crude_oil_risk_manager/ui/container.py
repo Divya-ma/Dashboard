@@ -20,6 +20,7 @@ from core.excel_correlation import ExcelCorrelationStore
 from core.journal_service import JournalService
 from core.oi_service import OiService
 from core.rollover import RolloverService
+from core.rollover_triggers import RolloverStudyService
 from core.seasonality import SeasonalityService
 from core.settlement_prices import SettlementPrices
 from db.repository import Repository
@@ -51,6 +52,7 @@ class Container:
     churn_service: ChurnService | None = None  # Churn page (five-minute candles, small-target simulation)
     seasonality: SeasonalityService | None = None  # Seasonality page (a structure against earlier years at the same days to expiry)
     rollover: RolloverService | None = None  # Strategy Rollover page (a generic through the front expiries)
+    rollover_study: RolloverStudyService | None = None  # Strategy Rollover page: why a line moves one way around an expiry (triggers, saved rules)
     settlements: SettlementPrices | None = None  # gap-free daily settlements of CL and BRN outrights (for correlation and beta)
     qh_api: QHApi | None = None  # rate-limited wrappers for every QH API endpoint
     journal: JournalService | None = None  # trade journal: market snapshots at entry and exit, trade ideas, payups

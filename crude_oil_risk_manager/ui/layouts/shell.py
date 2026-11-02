@@ -98,6 +98,11 @@ body {{ background-color: {DARK_BG}; color: {TEXT_PRIMARY}; }}
     border-color: {BORDER_COLOR};
 }}
 .form-control::placeholder {{ color: {TEXT_SECONDARY}; }}
+.study-tables .dash-cell[data-dash-column="entry"], .study-tables .dash-cell[data-dash-column="exit"] {{
+    white-space: nowrap !important; min-width: 118px;
+}}
+.study-tables .dash-cell[data-dash-column="trigger"] {{ min-width: 280px; }}
+.study-tables .dash-cell[data-dash-column="why"] {{ min-width: 340px; }}
 .table {{
     --bs-table-bg: {CARD_BG};
     --bs-table-color: {TEXT_PRIMARY};
