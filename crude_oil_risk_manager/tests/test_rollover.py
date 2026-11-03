@@ -149,7 +149,7 @@ def box_pairs(line):
 
 
 def test_the_clbz_line_goes_from_different_months_to_the_same_month_and_back():
-    result = service(box_store()).view("CLBZ", RolloverOptions(comparisons=3))
+    result = service(box_store()).view("CLBZ", RolloverOptions(generic=1, comparisons=3))
     assert result.box and result.lines
     line = next(l for l in result.lines if not l.live)
     pairs = box_pairs(line)
@@ -163,7 +163,7 @@ def test_the_clbz_line_goes_from_different_months_to_the_same_month_and_back():
 
 
 def test_the_clbz_line_is_the_front_box_priced_from_the_cl_spread_and_the_stored_box():
-    line = next(l for l in service(box_store()).view("CLBZ", RolloverOptions(comparisons=3)).lines if not l.live)
+    line = next(l for l in service(box_store()).view("CLBZ", RolloverOptions(generic=1, comparisons=3)).lines if not l.live)
     row = line.frame.iloc[0]  # CL month c - BZ month c+1 = [CL(c) - CL(c+1)] + box(c+1) = -1 + box(c+1)
     cl_month, bz_month = row["pair"].replace("CL ", "").split(" − BZ ")
     bz_index = _index(datetime.strptime(bz_month, "%b%y").month, datetime.strptime(bz_month, "%b%y").year)
@@ -171,10 +171,70 @@ def test_the_clbz_line_is_the_front_box_priced_from_the_cl_spread_and_the_stored
 
 
 def test_the_clbz_zero_point_is_the_cl_expiry_and_more_expiries_run_further():
-    one = next(l for l in service(box_store()).view("CLBZ", RolloverOptions(comparisons=3, expiries=1, zero_base=True)).lines if not l.live)
-    two = next(l for l in service(box_store()).view("CLBZ", RolloverOptions(comparisons=3, expiries=2, zero_base=True)).lines if not l.live)
+    one = next(l for l in service(box_store()).view("CLBZ", RolloverOptions(generic=1, comparisons=3, expiries=1, zero_base=True)).lines if not l.live)
+    two = next(l for l in service(box_store()).view("CLBZ", RolloverOptions(generic=1, comparisons=3, expiries=2, zero_base=True)).lines if not l.live)
     assert abs(one.frame["price"].get(0)) < 1e-9 and two.frame.index.max() > one.frame.index.max()
     assert len(two.marks) > len(one.marks)
+
+
+def curved_box_store():
+    """CL rises 1 a month; the same-month box is q(k) = 0.05 k^2 (k months from Jan24), so spreads and flies of boxes are not constant."""
+    return FakeStore({
+        "CL": settlements("CL", lambda index, day: 100.0 + index - _index(1, 2024)),
+        "CLBZ": settlements("CLBZ", lambda index, day: 0.05 * (index - _index(1, 2024)) ** 2),
+    })
+
+
+def q(index):
+    return 0.05 * (index - _index(1, 2024)) ** 2
+
+
+def month_index(label):
+    when = datetime.strptime(label, "%b%y")
+    return _index(when.month, when.year)
+
+
+def test_the_front_spreadbox_changes_months_with_each_expiry_like_the_outbox():
+    line = next(l for l in service(curved_box_store()).view("CLBZ", RolloverOptions(generic=1, family="spread", comparisons=3)).lines if not l.live)
+    pairs = box_pairs(line)
+    assert len(pairs) == 3
+    first, middle, last = (p.replace("CL ", "").split(" − BZ ") for p in pairs)
+    assert all("/" in side for part in (first, middle, last) for side in part)  # each side is a two-month spread
+    assert first[0] != first[1] and middle[0] == middle[1] and last[0] != last[1]
+    row = line.frame.iloc[0]  # CL c/c+1 - BZ c+1/c+2 = front box(c, c+1) - front box(c+1, c+2) = q(b) - q(b+1)
+    b = month_index(row["pair"].split(" − BZ ")[1].split("/")[0])
+    assert abs(row["price"] - (q(b) - q(b + 1))) < 1e-9
+    middle_row = line.frame[line.frame["pair"] == pairs[1]].iloc[0]  # same months: q(c) - q(c+1)
+    c = month_index(pairs[1].replace("CL ", "").split("/")[0])
+    assert abs(middle_row["price"] - (q(c) - q(c + 1))) < 1e-9
+
+
+def test_the_front_flybox_is_one_two_one_of_three_front_boxes():
+    line = next(l for l in service(curved_box_store()).view("CLBZ", RolloverOptions(generic=1, family="fly", comparisons=3)).lines if not l.live)
+    assert len(box_pairs(line)) == 3
+    row = line.frame.iloc[0]
+    b = month_index(row["pair"].split(" − BZ ")[1].split("/")[0])
+    assert abs(row["price"] - (q(b) - 2 * q(b + 1) + q(b + 2))) < 1e-9
+
+
+def test_a_later_generic_of_the_clbz_is_one_fixed_box_with_no_change_of_contract():
+    for family, weights in (("outright", (1,)), ("spread", (1, -1)), ("fly", (1, -2, 1))):
+        result = service(curved_box_store()).view("CLBZ", RolloverOptions(generic=2, family=family, comparisons=3))
+        line = next(l for l in result.lines if not l.live)
+        assert len(box_pairs(line)) == 1  # the same contract all the way
+        fixed = line.base + 1  # the box one month after the contract whose CL expiry is day 0
+        expected = sum(w * q(fixed + k) for k, w in enumerate(weights))
+        assert (line.frame["price"] - expected).abs().max() < 1e-9
+        bz_end = contract_expiry("CLBZ", *_month_year(fixed))
+        assert line.frame["date"].max().date() <= bz_end
+        assert [g.text for g in result.guides][-1] == "BRN expiry"  # it ends at the BZ expiry, and the CL expiry is a line too
+        assert "CL expiry" in [g.text for g in result.guides]
+
+
+def test_a_fixed_clbz_generic_cannot_pass_more_than_n_minus_1_cl_expiries():
+    result = service(curved_box_store()).view("CLBZ", RolloverOptions(generic=2, expiries=4, comparisons=3))
+    assert any("at most 1 CL expiries" in n for n in result.notes)
+    assert [g.text for g in result.guides].count("CL expiry") == 1
 
 
 def test_each_expiry_gets_a_vertical_line_and_a_generic_cannot_pass_more_than_n_minus_1():
@@ -216,9 +276,9 @@ def test_the_live_line_is_white_and_the_average_is_not():
 
 
 def test_clbz_has_a_vertical_line_on_every_cl_and_brn_expiry():
-    result = service(box_store()).view("CLBZ", RolloverOptions(comparisons=4, expiries=2))
+    result = service(box_store()).view("CLBZ", RolloverOptions(generic=1, comparisons=4, expiries=2))
     assert [g.text for g in result.guides] == ["CL expiry", "BRN expiry", "CL expiry", "BRN expiry", "CL expiry"] and result.guides[0].x == 0
-    zeroed = service(box_store()).view("CLBZ", RolloverOptions(comparisons=4, expiries=2, zero_base=True))
+    zeroed = service(box_store()).view("CLBZ", RolloverOptions(generic=1, comparisons=4, expiries=2, zero_base=True))
     for line in zeroed.lines:
         assert all(abs(line.frame["price"].at[g.x]) < 1e-9 for g in zeroed.guides[:-1] if g.x in line.frame.index)
 
@@ -254,7 +314,7 @@ def test_the_render_callback_uses_the_service_and_survives_a_bad_entry(monkeypat
     assert len(figure.data) >= 4
     figure, status = callbacks.render(0, "CL", "outright", 99, 1, 4, 20, False)
     assert not figure.data
-    assert callbacks.controls_disabled("CLBZ") and not callbacks.controls_disabled("CL")
+    assert callbacks.controls_disabled("CLBZ") == (False, False, True) and callbacks.controls_disabled("CL") == (False, False, False)  # only Days before is off for CL-BZ
 
 
 def test_the_page_is_routed_and_in_the_menu():

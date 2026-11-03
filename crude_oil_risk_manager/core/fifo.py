@@ -159,6 +159,17 @@ def composite_entry(legs: list[Leg]) -> float | None:
     return total if legs[0].ratio > 0 else -total
 
 
+def open_average_price(legs: list[Leg], trades: list[Trade]) -> float | None:
+    """The lots-weighted average structure price of every entry lot still open; None for a shell (nothing entered).
+
+    It is the open queue's price when the trades add up to the lots the legs show; otherwise (a per-leg exit, a roll, a hand-corrected
+    position) the legs' own entry price, which is what the engine keeps for those structures."""
+    queue = open_queue(trades) if trades else None
+    if queue and abs(queue_lots(queue) - legs[0].lots) <= 1e-6:
+        return queue_price(queue)
+    return composite_entry(legs) if legs and legs[0].lots > _TOLERANCE else None
+
+
 def with_entry_price(legs: list[Leg], target: float) -> list[Leg]:
     """The legs with the first leg's entry price moved so the structure's composite entry price is `target`.
 

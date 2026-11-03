@@ -220,7 +220,8 @@ def _packet_card(packet: dict) -> dbc.Card:
     stale = html.Span("  ⚠ stale price", style={"color": COLORS["ACCENT_YELLOW"], "fontSize": "11px"}) if packet.get("is_stale") else ""
     stats = html.Div([
         _stat("Side", html.Span(packet["side"], style={"color": _side_color(packet["side"]), "fontWeight": "bold"})),
-        _stat("Lots", f"{packet['lots']:,g}"), _stat("Entry", _price(packet["entry"])), _stat("Live", _price(packet["live"])),
+        _stat("Lots", f"{packet['lots']:,g}"), _stat("Entry", _price(packet["entry"])),
+        _stat("Avg open price", _price(packet.get("avg_open"))), _stat("Live", _price(packet["live"])),
         _stat("Target", _price(packet.get("target"))), _stat("Stop", _price(packet.get("stop"))),
         _stat("Risk (1d VaR 95%)", _risk(packet["risk"])), _stat("Unrealized", _pnl_span(packet["unrealized"])),
         _stat("Unrealized net of TC", _pnl_span(packet.get("unrealized_net", packet["unrealized"]))),

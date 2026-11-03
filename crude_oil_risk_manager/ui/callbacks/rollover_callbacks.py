@@ -52,8 +52,8 @@ def render(n_intervals, product, family, generic, expiries, comparisons, before,
 
 
 def controls_disabled(product):
-    """A CL-BZ line is its front box: no curve type or generic to choose."""
-    return product in ROLLOVER_PRODUCTS and product_spec(product).is_box
+    """(curve, generic, days before) disabled flags. A CL-BZ line starts on the first trading day of a month, so Days before does not apply."""
+    return (False, False, product in ROLLOVER_PRODUCTS and product_spec(product).is_box)
 
 
 def register_rollover_callbacks(app) -> None:
@@ -66,4 +66,4 @@ def register_rollover_callbacks(app) -> None:
     app.callback(
         Output("rollover-family", "disabled"), Output("rollover-generic", "disabled"), Output("rollover-before", "disabled"),
         Input("rollover-product", "value"),
-    )(lambda product: (controls_disabled(product),) * 3)
+    )(controls_disabled)

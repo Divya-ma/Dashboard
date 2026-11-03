@@ -31,7 +31,7 @@ def study(env):
 
 @pytest.fixture
 def box_study():
-    return study_service(box_store_with_brent()).study("CLBZ", RolloverOptions(), -10, 10, 10, 8)
+    return study_service(box_store_with_brent()).study("CLBZ", RolloverOptions(generic=1), -10, 10, 10, 8)
 
 
 # ----------------------------------------------------------------------

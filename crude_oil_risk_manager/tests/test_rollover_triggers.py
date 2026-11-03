@@ -67,7 +67,7 @@ def study_of(regime_of, lines=36, options=GENERIC, window=(-10, 10)):
 
 
 def box_line():
-    result = RolloverService(box_store(), clock=CLOCK).view("CLBZ", RolloverOptions(comparisons=3, before_days=20))
+    result = RolloverService(box_store(), clock=CLOCK).view("CLBZ", RolloverOptions(generic=1, comparisons=3, before_days=20))
     return next(line for line in result.lines if not line.live)
 
 
@@ -85,7 +85,7 @@ def test_the_clbz_line_switches_pair_after_the_cl_expiry_and_again_after_the_bre
 
 
 def test_a_clbz_move_is_what_the_line_did_without_the_two_switch_days():
-    study = study_service(box_store_with_brent()).study("CLBZ", RolloverOptions(), -10, 10, 10, 8)
+    study = study_service(box_store_with_brent()).study("CLBZ", RolloverOptions(generic=1), -10, 10, 10, 8)
     done = study.finished[0]
     assert done.status == DONE and done.move == pytest.approx(0.0) and done.raw_move == pytest.approx(0.2)
     assert [round(s.jump, 6) for s in done.skipped] == [1.0, -0.8]
@@ -212,7 +212,7 @@ def test_the_trigger_catalogue_for_a_box_has_both_legs_and_the_headline_spread()
 
 
 def test_a_box_study_reads_both_legs_front_months_without_their_roll_days_and_splits_the_move():
-    study = study_service(box_store_with_brent()).study("CLBZ", RolloverOptions(), -10, 10, 10, 8)
+    study = study_service(box_store_with_brent()).study("CLBZ", RolloverOptions(generic=1), -10, 10, 10, 8)
     done = study.finished[0]
     assert done.triggers["mkt_move_CL"] is not None and done.triggers["mkt_move_BRN"] is not None and done.triggers["mkt_move_box"] is not None
     assert study.rolls and all(e.jump is not None for e in study.rolls)  # roll days of the front-month series that were left out

@@ -520,7 +520,11 @@ def _rule_check(screens: list[TriggerScreen], pairs: dict[str, tuple[list[float]
 
 def study_title(product: str, options: RolloverOptions) -> str:
     spec = product_spec(product)
-    what = "front box" if spec.is_box else f"generic {options.generic} {FAMILY_LABELS[options.family].lower()}"
+    if spec.is_box:
+        box = {"outright": "outbox", "spread": "spreadbox", "fly": "flybox", "dfly": "dflybox"}[options.family]
+        what = f"front {box}" if options.generic == 1 else f"generic {options.generic} {box}"
+    else:
+        what = f"generic {options.generic} {FAMILY_LABELS[options.family].lower()}"
     return f"{spec.name}: {what}"
 
 

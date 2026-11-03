@@ -12,6 +12,7 @@ Per structure:
 
 import logging
 
+from core.fifo import open_average_price
 from core.models.structure import Structure
 from core.pnl import calculate_structure_unrealized_pnl
 from core.positions import dollar_weights, signed_lots
@@ -110,7 +111,7 @@ def build_packets(
             continue
         packets.append({
             "structure_id": s.structure_id, "name": s.name, "side": structure_side(s), "lots": structure_lots(s),
-            "entry": entry_price(s), "live": live_price(s, prices), "risk": risk.var([s]),
+            "entry": entry_price(s), "avg_open": open_average_price(s.legs, (trades_by_structure or {}).get(s.structure_id, [])), "live": live_price(s, prices), "risk": risk.var([s]),
             "target": latest_level((trades_by_structure or {}).get(s.structure_id), "target_price"),
             "stop": latest_level((trades_by_structure or {}).get(s.structure_id), "stop_loss_price"),
             "unrealized": info["unrealized"], "unrealized_net": info["unrealized"] - info.get("open_costs", 0.0), "total": info["total"], "is_stale": info.get("is_stale", False),

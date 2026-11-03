@@ -870,7 +870,14 @@ trading days from E (0 on the expiry day):
 from the first trading day to the CL expiry (day 0) the front is CL month c − BZ month c+1 (different months); from the CL expiry
 to the BZ expiry both legs are the same month; after the BZ expiry the months differ again until the next CL expiry, where the
 line ends (**Expiries** adds more months). It has a vertical line on every CL and BRN (BZ) expiry; zero base restarts at each. The different-month box is built as the CL spread plus the stored same-month box, so
-no BZ price series is needed. Curve, Generic and Days before do not apply.
+no BZ price series is needed. **Curve** picks the box family and **Generic** what is followed (Days before does not apply):
+
+- *Generic 1 = the front box structure*, which changes contract: the **outbox** as above; the **spreadbox** is the front box minus the next front box
+  (1 : −1) and the **flybox** 1 : −2 : 1 of three of them, each with the same switches (before the CL expiry CL c/c+1 − BZ c+1/c+2, then CL and BZ in
+  the same months, then CL c+1/c+2 − BZ c+2/c+3).
+- *Generic 2 or more = one fixed same-month structure* (outbox, spreadbox or flybox of the months generic − 1 after the first expiry's contract),
+  plotted directly with no change of contract. It ends when the box expires (BZ goes first), so it passes at most generic − 1 CL expiries.
+- Every line shows both the CL and the BRN (BZ) expiry as vertical lines.
 
 Products: CL, Brent, Gasoil and CL-BZ use the OI store. BZ (API `BZZ`) and WBS (ICE WTI, API `WTCL`) have a settlements-only store of their own (`data/oi_extra`), downloaded in the background the first time one is shown (depth = the OI history setting; the first view says it is downloading). They are not curve products, so no other page lists them; WBS is assumed to expire like CL (finished contracts use their last settlement day).
 

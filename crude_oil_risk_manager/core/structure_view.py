@@ -13,6 +13,7 @@ exchange-quoted structure symbols are polled, swap it in `_composite`'s callers.
 
 from datetime import datetime
 
+from core.fifo import open_average_price
 from core.models import Leg, Structure, StructureStatus, Trade, TradeEventType
 from core.pnl import calculate_structure_realized_pnl
 
@@ -109,9 +110,12 @@ def build_active_rows(
     live_prices: dict[str, float],
     product_filter: str | None = "all",
     sort_by: str | None = SORT_TOTAL_PNL,
+    trades_by_structure: dict[str, list[Trade]] | None = None,
 ) -> list[dict]:
-    """Grid rows for shell/open structures. PnL comes from `per_structure_pnl` (shells have none)."""
+    """Grid rows for shell/open structures. PnL comes from `per_structure_pnl` (shells have none); `avg_open_price` is the average
+    price of the entry lots still open (core.fifo.open_average_price)."""
     per_structure_pnl = per_structure_pnl or {}
+    trades_by_structure = trades_by_structure or {}
     rows = []
     for structure in structures:
         if product_filter not in (None, "all") and product_filter not in _products(structure):
@@ -125,6 +129,7 @@ def build_active_rows(
                 "products": ", ".join(_products(structure)),
                 "type": _type_label(structure),
                 "structure_price": structure_entry_price(structure),
+                "avg_open_price": None if is_shell else open_average_price(structure.legs, trades_by_structure.get(structure.structure_id, [])),
                 "live_price": structure_live_price(structure, live_prices),
                 "unrealized": pnl["unrealized"] if pnl else None,
                 "realized": pnl["realized"] if pnl else None,

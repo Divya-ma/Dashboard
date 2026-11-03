@@ -264,3 +264,19 @@ def test_the_migration_runs_once_and_skips_single_entry_and_per_leg_histories(re
     first = migrate_to_fifo_once(repo)
     assert first == {"structures": [], "exits": 0, "positions": 0} and repo.get_setting(KEY_FIFO_MIGRATED) is True
     assert migrate_to_fifo_once(repo) is None
+
+
+# ---------- the average price of the lots still open ----------
+
+
+def test_the_average_open_price_is_the_lots_weighted_price_of_the_entries_still_open():
+    from core.fifo import open_average_price
+    from core.structure_view import build_active_rows
+
+    book = two_entries()
+    assert open_average_price(book.structure.legs, book.trades) == pytest.approx(0.54)  # (3 x 0.50 + 2 x 0.60) / 5
+    book.exit(4, 0.80, WED)
+    assert open_average_price(book.structure.legs, book.trades) == pytest.approx(0.60)  # only Tuesday's lot is open
+    row = build_active_rows([book.structure], {}, {}, trades_by_structure={book.structure.structure_id: book.trades})[0]
+    assert row["avg_open_price"] == pytest.approx(0.60)
+    assert open_average_price(shell().legs, []) is None  # a shell has nothing open

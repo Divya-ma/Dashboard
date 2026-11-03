@@ -87,6 +87,7 @@ ACTIVE_COLUMN_DEFS = [
     {"field": "products", "headerName": "Product(s)", "width": 110},
     {"field": "type", "headerName": "Type", "width": 100},
     _number_column("structure_price", "Structure Price", _PRICE_FORMATTER, 130),
+    _number_column("avg_open_price", "Avg Open Price", _PRICE_FORMATTER, 140),
     _number_column("live_price", "Live Price", _PRICE_FORMATTER),
     _pnl_column("unrealized", "Unrealized PnL"),
     _pnl_column("realized", "Realized PnL"),

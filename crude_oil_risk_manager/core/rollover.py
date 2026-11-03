@@ -23,6 +23,10 @@ front box pairs the CL front with the NEXT BZ month (CL Dec - BZ Jan); from the 
 trading day, so it opens on the different-months front, passes the CL expiry (day 0), the same-month front, and the BZ expiry, and runs
 to the CL expiry `expiries` months after the first. It is one spliced series of the front box. The different-month box is built from
 stored prices: CL(c) - BZ(b) = [CL(c) - CL(b)] + [CL(b) - BZ(b)], the CL spread plus the same-month box.
+The Curve picks the box family. Generic 1 is the FRONT box structure: the outbox, the spreadbox (front box - next front box, 1 : -1) or
+the flybox (1 : -2 : 1), each pair of legs changing at the CL and BZ expiries as above. A later generic is ONE fixed same-month structure
+(outbox / spreadbox / flybox of the months `generic - 1` after the first expiry's contract), plotted directly with no change of contract
+and ending when it expires. Every line shows both the CL and the BZ expiry as vertical lines.
 """
 
 from dataclasses import dataclass, field, replace
@@ -253,35 +257,75 @@ def month_label(index: int) -> str:
 # ----------------------------------------------------------------------
 
 
-def box_line(cl: pd.DataFrame, box: pd.DataFrame, base: int, cl_expiries: Expiries, bz_expiries: Expiries, options: RolloverOptions, today: date) -> RolloverLine | None:
-    """The line of the CL contract at index `base`, whose expiry (day 0) is in the month the line starts."""
-    anchor = cl_expiries.of(base)
-    start = date(anchor.year, anchor.month, 1)
-    end = cl_expiries.of(base + options.expiries)
-    days = cl.index.intersection(box.index)
-    days = days[(days >= pd.Timestamp(start)) & (days <= pd.Timestamp(end))]
-    xs = dict(zip(days, -trading_days_to(days, anchor, PRODUCTS[OUTBOX].calendar))) if len(days) else {}
+def _front_box_rows(
+    cl: pd.DataFrame, box: pd.DataFrame, days: pd.DatetimeIndex, xs: dict, base: int, cl_expiries: Expiries, bz_expiries: Expiries, weights: tuple[int, ...],
+) -> list[tuple]:
+    """(x, price, day, pair) of the FRONT box structure on each day: the CL front paired with the BZ front, moving with each leg's expiry.
+    A spreadbox or flybox is the weighted sum of that many consecutive front boxes (box k pairs CL month c+k with BZ month b+k)."""
     rows = []
     for day in days:
         when = day.date()
         cl_front = next(i for i in range(base, base + 40) if cl_expiries.of(i) >= when)
         bz_front = next(i for i in range(cl_front, cl_front + 40) if bz_expiries.of(i) >= when)
-        cl_symbol, bz_symbol = (api_symbol(CL, *_month_year(i)) for i in (cl_front, bz_front))
-        box_symbol = api_symbol(OUTBOX, *_month_year(bz_front))
-        if bz_front == cl_front:
-            value = box.at[day, box_symbol] if box_symbol in box.columns else np.nan
-        elif bz_front == cl_front + 1 and {cl_symbol, bz_symbol} <= set(cl.columns) and box_symbol in box.columns:
-            value = cl.at[day, cl_symbol] - cl.at[day, bz_symbol] + box.at[day, box_symbol]
-        else:
+        if bz_front not in (cl_front, cl_front + 1):
             continue
+        value = 0.0
+        for k, weight in enumerate(weights):
+            cl_symbol, bz_symbol = (api_symbol(CL, *_month_year(i + k)) for i in (cl_front, bz_front))
+            box_symbol = api_symbol(OUTBOX, *_month_year(bz_front + k))
+            if box_symbol not in box.columns:
+                value = np.nan
+            elif bz_front == cl_front:
+                value += weight * box.at[day, box_symbol]
+            elif {cl_symbol, bz_symbol} <= set(cl.columns):  # CL(c) - BZ(b) = [CL(c) - CL(b)] + [CL(b) - BZ(b)]
+                value += weight * (cl.at[day, cl_symbol] - cl.at[day, bz_symbol] + box.at[day, box_symbol])
+            else:
+                value = np.nan
+            if pd.isna(value):
+                break
         if pd.notna(value):
-            rows.append((int(xs[day]), float(value), day,
-                         f"CL {month_label(cl_front)} − BZ {month_label(bz_front)}"))
+            cl_names = "/".join(month_label(cl_front + k) for k in range(len(weights)))
+            bz_names = "/".join(month_label(bz_front + k) for k in range(len(weights)))
+            rows.append((int(xs[day]), float(value), day, f"CL {cl_names} − BZ {bz_names}"))
+    return rows
+
+
+def _fixed_box_rows(box: pd.DataFrame, days: pd.DatetimeIndex, xs: dict, front: int, family: str) -> list[tuple]:
+    """(x, price, day, pair) of ONE fixed box structure (no change of contract): the outbox of month `front`, or the spreadbox / flybox of
+    the same-month outboxes from that month on."""
+    month, year = _month_year(front)
+    symbols = structure_symbols(OUTBOX, family, month, year)
+    built = structure_frame(box, pd.DataFrame(), symbols, FAMILY_WEIGHTS[family])
+    if built is None:
+        return []
+    pair = f"CL {'/'.join(month_label(front + k) for k in range(len(symbols)))} − BZ {'/'.join(month_label(front + k) for k in range(len(symbols)))}"
+    return [(int(xs[day]), float(built["price"].at[day]), day, pair) for day in days.intersection(built.index)]
+
+
+def box_line(cl: pd.DataFrame, box: pd.DataFrame, base: int, cl_expiries: Expiries, bz_expiries: Expiries, options: RolloverOptions, today: date) -> RolloverLine | None:
+    """The line of the CL contract at index `base`, whose expiry (day 0) is in the month the line starts.
+
+    Generic 1 is the FRONT box structure (outbox, spreadbox or flybox), which changes contract at each leg's expiry. A later generic is one
+    fixed same-month box structure plotted directly, from the box `generic - 1` months after `base`, ending when it expires (the BZ leg
+    goes first)."""
+    anchor = cl_expiries.of(base)
+    start = date(anchor.year, anchor.month, 1)
+    end = cl_expiries.of(base + options.expiries)
+    fixed = options.generic > 1
+    if fixed:
+        end = min(end, bz_expiries.of(base + options.generic - 1))
+    days = cl.index.intersection(box.index)
+    days = days[(days >= pd.Timestamp(start)) & (days <= pd.Timestamp(end))]
+    xs = dict(zip(days, -trading_days_to(days, anchor, PRODUCTS[OUTBOX].calendar))) if len(days) else {}
+    if fixed:
+        rows = _fixed_box_rows(box, days, xs, base + options.generic - 1, options.family)
+    else:
+        rows = _front_box_rows(cl, box, days, xs, base, cl_expiries, bz_expiries, FAMILY_WEIGHTS[options.family])
     if not rows:
         return None
     frame = pd.DataFrame(rows, columns=["x", "price", "date", "pair"]).drop_duplicates("x", keep="last").set_index("x").sort_index()
     calendar = PRODUCTS[OUTBOX].calendar
-    events = [(cl_expiries.of(base + k), f"CL {month_label(base + k)} expires", "CL expiry") for k in range(options.expiries + 1)]
+    events = [(w, f"CL {month_label(base + k)} expires", "CL expiry") for k in range(options.expiries + 1) if (w := cl_expiries.of(base + k)) <= end]
     events += [(w, f"BZ {month_label(i)} expires", "BRN expiry") for i in range(base, base + options.expiries + 3)
                if anchor < (w := bz_expiries.of(i)) <= end]
     events.sort(key=lambda event: event[0])
@@ -406,6 +450,9 @@ class RolloverService:
             return RolloverResult(product, options, box, [], pd.Series(dtype=float), [message])
         notes = []
         if box:
+            reach = options.generic - 1
+            if reach and options.expiries > reach:
+                notes.append(f"Generic {options.generic} passes at most {reach} CL expiries before the box itself expires (BZ goes first), so the line ends there.")
             lines, guides, moved = self._box_lines(options, today)
         else:
             reach = max(options.generic - 1, 0)  # generic n meets n-1 expiries before it is the front

@@ -24,6 +24,7 @@ REFRESH_MS = 60_000
 PLACEHOLDER = "Choose a product to see how its generics rolled"
 AVERAGE_COLOR = "#ffd60a"
 LINE_COLORS = ["#f4a261", "#2a9d8f", "#e76f51", "#4da3ff", "#c77dff", "#b388eb", "#90be6d", "#f28482", "#84a59d", "#f6bd60", "#9d8189", "#7ec8e3"]
+BOX_NAMES = {"outright": "outbox", "spread": "spreadbox", "fly": "flybox", "dfly": "dflybox"}  # what each Curve is called on a CL-BZ line
 LIVE_COLOR = "#ffffff"  # the contract still being drawn stands out from the finished ones
 
 
@@ -74,7 +75,7 @@ def build_rollover_figure(result: RolloverResult | None) -> go.Figure:
         figure.add_vline(x=guide.x, line={"color": COLORS["TEXT_SECONDARY"], "width": 1, "dash": "dot" if guide.x else "solid"})
         figure.add_annotation(x=guide.x, y=0, yref="paper", text=guide.text, showarrow=False, yanchor="bottom", font={"size": 11})
     level = "Change since the expiry day" if options.zero_base else "Settlement"
-    what = "front box" if result.box else f"generic {options.generic} {FAMILY_LABELS[options.family].lower()}"
+    what = f"{'front' if options.generic == 1 else f'generic {options.generic}'} {BOX_NAMES[options.family]}" if result.box else f"generic {options.generic} {FAMILY_LABELS[options.family].lower()}"
     figure.update_layout(**_layout(
         title={"text": f"{product_spec(result.product).name}: {what} around expiry", "font": {"size": 14}},
         xaxis={"title": "Trading days from the front expiry", "gridcolor": COLORS["BORDER_COLOR"], "zeroline": False},
@@ -120,9 +121,10 @@ def rollover_layout() -> html.Div:
             "the expiry (day 0), when it moves up one generic, to the expiry that many months later; a generic can pass at most generic − 1 "
             "expiries. Each expiry has a vertical line and diamonds mark it on every line; where the gap between two expiries differs, it is "
             "stretched to the longest. With zero base each line is 0 on every vertical line. The white line is the contract still live, "
-            "the yellow dotted line the average of the finished lines. CL-BZ ignores Curve and Generic: its front box is CL month − BZ month, "
-            "which changes at each leg's expiry, so a line starts on the first trading day of a month, passes the CL expiry (day 0) and "
-            "the BRN expiry, and ends at the CL expiry 'Expiries' months later. Settlement prices only.",
+            "the yellow dotted line the average of the finished lines. CL-BZ: Curve picks outbox, spreadbox or flybox. Generic 1 is the FRONT box, "
+            "CL month − BZ month, which changes contract at each leg's expiry; any other generic is one fixed same-month box plotted "
+            "directly. A CL-BZ line starts on the first trading day of a month (Days before does not apply), shows the CL expiry (day 0) "
+            "and the BRN expiry as vertical lines, and ends at the CL expiry 'Expiries' months later. Settlement prices only.",
             style={**_MUTED, "marginTop": "10px"},
         ),
     ])

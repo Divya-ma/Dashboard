@@ -45,9 +45,11 @@ def update_active_structures(
     portfolio_pnl, status_filter, product_filter, sort_by, live_prices
 ):
     """Rows for the active grid: filtered, sorted, PnL taken from the portfolio PnL store."""
-    structures = container.repository.get_all_structures(status_filter=statuses_for_filter(status_filter))
+    repository = container.repository
+    structures = repository.get_all_structures(status_filter=statuses_for_filter(status_filter))
     per_structure = (portfolio_pnl or {}).get("per_structure", {})
-    return build_active_rows(structures, per_structure, prices_from_store(live_prices), product_filter, sort_by)
+    trades = {s.structure_id: repository.get_trades_for_structure(s.structure_id) for s in structures if s.status != StructureStatus.SHELL}
+    return build_active_rows(structures, per_structure, prices_from_store(live_prices), product_filter, sort_by, trades)
 
 
 def update_closed_structures(pathname, n_intervals, is_open):
