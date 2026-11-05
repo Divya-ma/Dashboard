@@ -26,6 +26,8 @@ from core.curve_settings import (
     validate_params,
 )
 from core.models import StructureStatus
+from core.rebates import COUNT_BOTH, COUNT_CHOICES, DEFAULT_RATES, KEY_REBATE_COUNT, KEY_REBATE_RATES, RebateBook
+from core.rebates import clean_rows as clean_rebate_rows
 from core.pnl import calculate_portfolio_pnl
 from core.oi_settings import (
     KEY_ATR_HISTORY_DAYS, KEY_OI_HISTORY_DAYS, load_atr_history_days, load_history_days, validate_atr_history_days, validate_history_days,
@@ -316,6 +318,41 @@ def _reset_label(label: str):
 # ----------------------------------------------------------------------
 # Teams
 # ----------------------------------------------------------------------
+
+
+def _rebate_table_rows(rows) -> list[dict]:
+    """Saved rate rows as the table shows them (the type as its label, "Spread box")."""
+    from core.models.structure import StructureType
+
+    return [{**r, "type": StructureType(r["type"]).label} for r in rows]
+
+
+def rebate_table(pathname, add_clicks, reset_clicks, rows):
+    """The rebate table: the saved rows when the tab opens, a blank row on Add row, the fee sheet on Reset."""
+    from dash import callback_context
+
+    trigger = callback_context.triggered_id
+    if trigger == "settings-rebate-add":
+        return [*(rows or []), {"product": "", "type": "", "monthly": 0, "yearly": 0}], no_update
+    if trigger == "settings-rebate-reset":
+        return _rebate_table_rows(DEFAULT_RATES), no_update
+    if pathname != "/settings":
+        raise PreventUpdate
+    book = RebateBook.load(container.repository)
+    return _rebate_table_rows(book.rows), book.count
+
+
+def save_rebates(n_clicks, rows, count):
+    """Validate the rebate table and store it with which programmes count."""
+    if not n_clicks:
+        raise PreventUpdate
+    try:
+        cleaned = clean_rebate_rows(rows)
+    except ValueError as exc:
+        return f"❌ Not saved: {exc}"
+    container.repository.set_setting(KEY_REBATE_RATES, cleaned)
+    container.repository.set_setting(KEY_REBATE_COUNT, count if count in COUNT_CHOICES else COUNT_BOTH)
+    return f"✅ Saved {len(cleaned)} rebate row(s). The Archive uses them from its next refresh."
 
 
 def load_teams_mention(pathname):
@@ -614,6 +651,19 @@ def register_settings_callbacks(app) -> None:
     app.callback(
         Output("settings-oi-history-days", "value"), Output("settings-atr-history-days", "value"), Input("url", "pathname"),
     )(load_oi_settings)
+
+    app.callback(
+        Output("settings-rebate-table", "data"), Output("settings-rebate-count", "value"),
+        Input("url", "pathname"), Input("settings-rebate-add", "n_clicks"), Input("settings-rebate-reset", "n_clicks"),
+        State("settings-rebate-table", "data"),
+    )(rebate_table)
+
+    app.callback(
+        Output("settings-rebate-feedback", "children"),
+        Input("settings-save-rebates", "n_clicks"),
+        State("settings-rebate-table", "data"), State("settings-rebate-count", "value"),
+        prevent_initial_call=True,
+    )(save_rebates)
 
     app.callback(
         Output("settings-oi-feedback", "children"),

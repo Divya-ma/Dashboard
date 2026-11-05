@@ -144,7 +144,8 @@ def test_summary_stats_and_flat_excluded_from_win_rate(rows):
 
 def test_summary_of_nothing_is_all_zeros():
     assert summarize([]) == {"total": 0, "winners": 0, "losers": 0, "win_rate": 0.0, "total_pnl": 0.0,
-                             "avg_pnl": 0.0, "best": 0.0, "worst": 0.0}
+                             "avg_pnl": 0.0, "best": 0.0, "worst": 0.0, "win_rate_rebate": 0.0, "winners_rebate": 0,
+                             "decided_rebate": 0, "total_rebate": 0, "total_pnl_rebate": 0}
 
 
 # ---------- layout builders ----------
@@ -199,7 +200,7 @@ def test_layout_controls_and_table_configuration():
     layout = archive_layout()
     for component_id in ("archive-dates", "archive-type", "archive-symbol", "archive-pnl", "archive-apply-btn", "archive-clear-btn",
                          "archive-table", "archive-message", "archive-rows", "archive-selected", "archive-detail", "archive-detail-card", "archive-detail-close",
-                         *[f"archive-stat-{s}" for s in ("total", "winners", "losers", "win-rate", "total-pnl", "avg-pnl", "best", "worst")]):
+                         *[f"archive-stat-{s}" for s in ("total", "winners", "losers", "win-rate", "win-rate-rebate", "total-pnl", "total-pnl-rebate", "avg-pnl", "best", "worst")]):
         assert find(layout, component_id) is not None, component_id
     table = find(layout, "archive-table")
     assert table.page_size == 20 and table.sort_action == "native"
@@ -266,7 +267,7 @@ def refresh(monkeypatch, source="archive-apply-btn", **filters):
     return ac.refresh_archive(**args)
 
 
-N_STATS = 8
+N_STATS = 10
 
 
 def test_tab_open_shows_everything_with_stats(monkeypatch, repo):
@@ -276,15 +277,15 @@ def test_tab_open_shows_everything_with_stats(monkeypatch, repo):
     out = refresh(monkeypatch, "url")
     table, message, stored, *rest = out
     assert [r["name"] for r in table] == ["B", "A"] and message == "" and len(stored) == 2
-    texts, styles = rest[:N_STATS], rest[N_STATS:N_STATS + 2]
-    assert texts[0] == "2" and texts[3] == "50.0%" and texts[4] == "$300.00" and styles[1]["color"] == COLORS["ACCENT_GREEN"]
-    assert out[3 + N_STATS + 2:] == (ac.no_update,) * 5
+    texts, styles = rest[:N_STATS], rest[N_STATS:N_STATS + 4]
+    assert texts[0] == "2" and texts[3] == "50.0%" and texts[5] == "$300.00" and styles[2]["color"] == COLORS["ACCENT_GREEN"]
+    assert out[3 + N_STATS + 4:] == (ac.no_update,) * 5
 
 
 def test_apply_filters_and_empty_states(monkeypatch, repo):
     assert refresh(monkeypatch)[1] == NO_ARCHIVE_TEXT  # nothing closed yet
     empty_stats = refresh(monkeypatch)[3:3 + N_STATS]
-    assert empty_stats[0] == "0" and empty_stats[3] == "0.0%" and empty_stats[4] == "$0.00"
+    assert empty_stats[0] == "0" and empty_stats[3] == "0.0%" and empty_stats[5] == "$0.00"
     seed(repo, closed("A", [("CLZ25", 1, "buy")], pnl=400), closed("B", [("CLF26", 1, "buy")], pnl=-100))
     out = refresh(monkeypatch, symbol="clf", pnl_filter="losers")
     assert [r["name"] for r in out[0]] == ["B"] and out[1] == ""
@@ -298,7 +299,7 @@ def test_apply_filters_and_empty_states(monkeypatch, repo):
 def test_clear_filters_resets_controls_and_reloads_everything(monkeypatch, repo):
     seed(repo, closed("A", [("CLZ25", 1, "buy")], pnl=400), closed("B", [("CLF26", 1, "buy")], pnl=-100))
     out = refresh(monkeypatch, "archive-clear-btn", clear_clicks=1, symbol="clf", pnl_filter="losers", structure_type="fly")
-    assert len(out[0]) == 2 and out[3 + N_STATS + 2:] == (None, None, "all", "", "all")
+    assert len(out[0]) == 2 and out[3 + N_STATS + 4:] == (None, None, "all", "", "all")
 
 
 def test_other_paths_do_not_refresh_and_archive_only_lists_closed(monkeypatch, repo):
@@ -412,3 +413,80 @@ def test_the_delete_dialog_names_the_ticked_rows_and_the_pnl_that_leaves(repo, m
     closed_modal, status, selected, detail, counter = ac.confirm_delete(1, [a], False, 3)
     assert closed_modal is False and "Deleted 1" in status and selected == [] and counter == 4
     assert repo.get_structure(a) is None and repo.get_structure(b) is not None
+
+
+# ---------- rebates ----------
+
+
+def test_rebate_rates_match_by_product_and_type_and_a_trade_has_two_sides():
+    from core.rebates import COUNT_MONTHLY, RebateBook
+
+    book = RebateBook()
+    spread = make_structure_for_rebate("CL", "spread")
+    assert book.per_side(spread) == pytest.approx(0.50 + 0.08)  # monthly + yearly
+    assert book.for_trade(spread, 10) == pytest.approx(0.58 * 10 * 2)
+    assert RebateBook(count=COUNT_MONTHLY).per_side(spread) == pytest.approx(0.50)
+    assert book.per_side(make_structure_for_rebate("CLBZ", "spread")) == pytest.approx(3.36 + 0.08)  # a box product's spread is a spreadbox
+    assert book.for_trade(make_structure_for_rebate("CO", "custom"), 5) is None  # no row, no rebate
+
+
+def make_structure_for_rebate(product, kind):
+    from core.models import Contract, Leg, Structure, StructureStatus, StructureType
+
+    contract = Contract(product=product, contract_month=12, contract_year=2026, symbol=f"{product}Z26", multiplier=1000, tick_size=0.01, tick_value=10)
+    return Structure(name="s", structure_type=StructureType(kind), products=[product], status=StructureStatus.CLOSED, legs=[Leg(contract=contract, ratio=1)])
+
+
+def test_rebate_rows_are_cleaned_and_bad_ones_named():
+    from core.rebates import clean_rows
+
+    rows = clean_rows([{"product": "cl", "type": "Spread box", "monthly": "1.5", "yearly": None}, {"product": "", "type": "", "monthly": None, "yearly": None}])
+    assert rows == [{"product": "CL", "type": "spreadbox", "monthly": 1.5, "yearly": 0.0}]
+    with pytest.raises(ValueError, match="row 1"):
+        clean_rows([{"product": "CL", "type": "nonsense", "monthly": 1, "yearly": 1}])
+    with pytest.raises(ValueError, match="twice"):
+        clean_rows([{"product": "CL", "type": "fly", "monthly": 1, "yearly": 1}] * 2)
+    with pytest.raises(ValueError, match="zero or more"):
+        clean_rows([{"product": "CL", "type": "fly", "monthly": -1, "yearly": 1}])
+
+
+def test_a_rebate_can_turn_a_small_loss_into_a_win_and_gives_its_own_win_rate():
+    from core.archive import summarize
+
+    rows = [
+        {"realized_pnl": -5.0, "rebate": 8.0, "pnl_after_rebate": 3.0},
+        {"realized_pnl": 20.0, "rebate": 8.0, "pnl_after_rebate": 28.0},
+        {"realized_pnl": -50.0, "rebate": 8.0, "pnl_after_rebate": -42.0},
+        {"realized_pnl": -8.0, "rebate": None, "pnl_after_rebate": -8.0},
+    ]
+    stats = summarize(rows)
+    assert stats["win_rate"] == pytest.approx(25.0) and stats["win_rate_rebate"] == pytest.approx(50.0)
+    assert stats["total_rebate"] == pytest.approx(24.0) and stats["total_pnl_rebate"] == pytest.approx(-19.0)
+
+
+def test_a_cl_bz_structure_with_cl_and_bz_legs_earns_the_clbz_box_rebate():
+    from core.models import Contract, Leg, Structure, StructureStatus, StructureType
+    from core.rebates import RebateBook, clean_rows
+
+    def contract(product):
+        return Contract(product=product, contract_month=12, contract_year=2026, symbol=f"{product}Z26", multiplier=1000, tick_size=0.01, tick_value=10)
+
+    box = Structure(name="CL|BZ Dec26 FlyBox", structure_type=StructureType.FLYBOX, products=["BZ", "CL"], status=StructureStatus.CLOSED,
+                    legs=[Leg(contract=contract("CL"), ratio=1), Leg(contract=contract("BZ"), ratio=1)])
+    # (6.72 + 0.08) per lot per side, two sides
+    assert RebateBook().for_trade(box, 1) == pytest.approx(13.6)
+    # a row typed as CL|BZ in Settings is the same box row
+    assert clean_rows([{"product": "CL|BZ", "type": "flybox", "monthly": 1, "yearly": 0}])[0]["product"] == "CLBZ"
+
+
+def test_a_fly_minus_fly_earns_the_rebate_of_its_legs():
+    from core.models import Contract, Leg, Structure, StructureStatus, StructureType
+    from core.rebates import RebateBook
+
+    def fly(symbol, ratio):
+        c = Contract(product="BRN", contract_month=2, contract_year=2028, symbol=symbol, multiplier=1000, tick_size=0.01, tick_value=10)
+        return Leg(contract=c, ratio=ratio)
+
+    diff = Structure(name="d", structure_type=StructureType.FLYDIFF, products=["BRN"], status=StructureStatus.CLOSED,
+                     legs=[fly("BRNG28-H28-J28", 1), fly("BRNH28-J28-K28", -2)])
+    assert RebateBook().per_side(diff) == pytest.approx((1.0 + 0.24) * 3)  # three BRN flies per lot

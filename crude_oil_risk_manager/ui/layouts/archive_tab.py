@@ -45,7 +45,9 @@ STAT_CARDS = [
     ("winners", "Winners", COLORS["ACCENT_GREEN"]),
     ("losers", "Losers", COLORS["ACCENT_RED"]),
     ("win-rate", "Win Rate", COLORS["ACCENT_YELLOW"]),
+    ("win-rate-rebate", "Win Rate (with rebates)", COLORS["ACCENT_YELLOW"]),
     ("total-pnl", "Total PnL ($)", COLORS["ACCENT_GREEN"]),
+    ("total-pnl-rebate", "Total PnL with rebates ($)", COLORS["ACCENT_GREEN"]),
     ("avg-pnl", "Avg PnL ($)", COLORS["ACCENT_BLUE"]),
     ("best", "Best Trade ($)", COLORS["ACCENT_GREEN"]),
     ("worst", "Worst Trade ($)", COLORS["ACCENT_RED"]),
@@ -73,12 +75,17 @@ def build_stats(summary: dict) -> dict[str, tuple[str, dict]]:
     total = summary["total"]
     pnl = summary["total_pnl"]
     win_rate_good = None if summary["winners"] + summary["losers"] == 0 else summary["win_rate"] >= 50
+    rebate_rate = summary.get("win_rate_rebate", summary["win_rate"])  # the same figures as without rebates when none were worked out
+    rebate_good = None if not summary.get("decided_rebate", summary["winners"] + summary["losers"]) else rebate_rate >= 50
+    pnl_rebate = summary.get("total_pnl_rebate", pnl)
     return {
         "total": (str(total), _colored(None)),
         "winners": (str(summary["winners"]), _colored(None)),
         "losers": (str(summary["losers"]), _colored(None)),
         "win-rate": (f"{summary['win_rate']:.1f}%", _colored(None, win_rate_good)),
+        "win-rate-rebate": (f"{rebate_rate:.1f}%", _colored(None, rebate_good)),
         "total-pnl": (money(pnl), _colored(None, None if pnl == 0 else pnl > 0)),
+        "total-pnl-rebate": (money(pnl_rebate), _colored(None, None if pnl_rebate == 0 else pnl_rebate > 0)),
         "avg-pnl": (money(summary["avg_pnl"]), _colored(None)),
         "best": (money(summary["best"]), _colored(None)),
         "worst": (money(summary["worst"]), _colored(None)),
@@ -134,6 +141,9 @@ def build_table_rows(rows: list[dict]) -> list[dict]:
             "transaction_costs": row["transaction_costs"],
             "realized_pnl": row["realized_pnl"],
             "result": row["result"],
+            "rebate": row.get("rebate"),
+            "pnl_after_rebate": row.get("pnl_after_rebate", row["realized_pnl"]),
+            "result_after_rebate": row.get("result_after_rebate", row["result"]),
             **_journal_cells(row),
         }
         for row in rows
@@ -225,6 +235,8 @@ def build_detail(row: dict | None) -> html.Div | None:
             fact("Exit Price", _or_dash(row["exit_price"], lambda v: f"{v:,.2f}")),
             fact("Transaction Cost", money(row["transaction_costs"])),
             fact("Realized PnL (net of TC)", money(pnl), {"color": pnl_color}),
+            fact("Rebate", _or_dash(row.get("rebate"), money)),
+            fact("PnL with rebate", money(row.get("pnl_after_rebate", pnl))),
             fact("Days Held", _or_dash(row["days_held"])),
         ]
     )
@@ -327,6 +339,15 @@ TABLE_COLUMNS = [
         "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, symbol=Symbol.yes, symbol_prefix="$"),
     },
     {"id": "result", "name": "Result"},
+    {
+        "id": "rebate", "name": "Rebate ($)", "type": "numeric",
+        "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, symbol=Symbol.yes, symbol_prefix="$"),
+    },
+    {
+        "id": "pnl_after_rebate", "name": "PnL with rebate ($)", "type": "numeric",
+        "format": Format(precision=2, scheme=Scheme.fixed, group=Group.yes, symbol=Symbol.yes, symbol_prefix="$"),
+    },
+    {"id": "result_after_rebate", "name": "Result with rebate"},
     {"id": "rr", "name": "Risk : Reward"},
     {"id": "ideas", "name": "Trade Ideas"},
     {"id": "payup_entry", "name": "Payups in Entry", "type": "any"},
@@ -365,7 +386,7 @@ def _table() -> dash_table.DataTable:
             "border": f"1px solid {COLORS['BORDER_COLOR']}", "padding": "8px 12px", "textAlign": "right",
         },
         style_cell_conditional=[
-            {"if": {"column_id": c}, "textAlign": "left"} for c in ("name", "type", "legs", "entry_date", "exit_date", "result")
+            {"if": {"column_id": c}, "textAlign": "left"} for c in ("name", "type", "legs", "entry_date", "exit_date", "result", "result_after_rebate")
         ],
         style_data_conditional=[
             {"if": {"state": "active"}, "backgroundColor": COLORS["ACCENT_BLUE"], "border": f"1px solid {COLORS['ACCENT_GREEN']}"},
@@ -373,6 +394,10 @@ def _table() -> dash_table.DataTable:
             {"if": {"column_id": "realized_pnl", "filter_query": "{realized_pnl} < 0"}, "color": COLORS["ACCENT_RED"], "fontWeight": "bold"},
             {"if": {"column_id": "result", "filter_query": f'{{result}} = "{RESULT_WIN}"'}, "color": COLORS["ACCENT_GREEN"]},
             {"if": {"column_id": "result", "filter_query": f'{{result}} = "{RESULT_LOSS}"'}, "color": COLORS["ACCENT_RED"]},
+            {"if": {"column_id": "pnl_after_rebate", "filter_query": "{pnl_after_rebate} > 0"}, "color": COLORS["ACCENT_GREEN"], "fontWeight": "bold"},
+            {"if": {"column_id": "pnl_after_rebate", "filter_query": "{pnl_after_rebate} < 0"}, "color": COLORS["ACCENT_RED"], "fontWeight": "bold"},
+            {"if": {"column_id": "result_after_rebate", "filter_query": f'{{result_after_rebate}} = "{RESULT_WIN}"'}, "color": COLORS["ACCENT_GREEN"]},
+            {"if": {"column_id": "result_after_rebate", "filter_query": f'{{result_after_rebate}} = "{RESULT_LOSS}"'}, "color": COLORS["ACCENT_RED"]},
         ],
     )
 

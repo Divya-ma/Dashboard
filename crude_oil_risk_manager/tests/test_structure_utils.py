@@ -98,9 +98,9 @@ def test_clone_status_and_bookkeeping_fields():
     assert clone.created_at > source.created_at or clone.created_at == clone.last_modified_at
 
 
-def test_clone_name_defaults_to_reuse_suffix_and_accepts_override():
+def test_clone_name_defaults_to_the_source_name_and_accepts_override():
     source = closed_source()
-    assert clone_structure_as_shell(source).name == "Dec-Jan spread (reuse)"
+    assert clone_structure_as_shell(source).name == "Dec-Jan spread"
     assert clone_structure_as_shell(source, "Brand new").name == "Brand new"
-    assert clone_structure_as_shell(source, "   ").name == "Dec-Jan spread (reuse)"
+    assert clone_structure_as_shell(source, "   ").name == "Dec-Jan spread"
     assert len(clone_structure_as_shell(closed_source("x" * 100)).name) <= 100

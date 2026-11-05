@@ -28,6 +28,7 @@ TRADE_COLUMNS = [
     ("name", "Structure Name"), ("type", "Type"), ("legs_summary", "Legs"), ("entry_date", "Entry Date"), ("exit_date", "Exit Date"),
     ("days_held", "Days Held"), ("entry_price", "Entry Price (pts)"), ("exit_price", "Exit Price (pts)"), ("lots", "Lots"), ("open_lots", "Lots Still Open"),
     ("transaction_costs", "Transaction Cost ($)"), ("realized_pnl", "Realized PnL ($, net of TC)"), ("result", "Result"),
+    ("rebate", "Rebate ($)"), ("pnl_after_rebate", "PnL with rebate ($)"), ("result_after_rebate", "Result with rebate"),
     ("rr", "Risk : Reward"), ("ideas_text", "Trade Ideas"), ("payup_entry", "Payups in Entry"), ("payup_exit", "Payups in Exit"),
     ("conviction", "Conviction"), ("exit_reason", "Exit Reason"), ("mistakes_text", "Mistakes"), ("risk_usd", "Risk at Stop ($)"),
     ("r_multiple", "Result in R"), ("mfe_i", "MFE Intraday ($)"), ("mae_i", "MAE Intraday ($)"), ("mfe_d", "MFE Daily ($)"), ("mae_d", "MAE Daily ($)"),
@@ -35,7 +36,7 @@ TRADE_COLUMNS = [
     ("notes", "Notes"),
 ]
 _MONEY = '"$"#,##0.00;[Red]-"$"#,##0.00'
-_NUMBER_FORMATS = {"Transaction Cost ($)": _MONEY, "Realized PnL ($, net of TC)": _MONEY, "Risk : Reward": "0.00", "Entry Date": "yyyy-mm-dd", "Exit Date": "yyyy-mm-dd"}
+_NUMBER_FORMATS = {"Transaction Cost ($)": _MONEY, "Realized PnL ($, net of TC)": _MONEY, "Rebate ($)": _MONEY, "PnL with rebate ($)": _MONEY, "Risk : Reward": "0.00", "Entry Date": "yyyy-mm-dd", "Exit Date": "yyyy-mm-dd"}
 
 
 def _date(value):
@@ -85,7 +86,8 @@ def summary_frame(rows: list[dict], made_at: datetime | None = None) -> pd.DataF
     made_at = made_at or datetime.now()
     items = [
         ("Trades", stats["total"]), ("Winners", stats["winners"]), ("Losers", stats["losers"]), ("Win rate (%)", round(stats["win_rate"], 2)),
-        ("Total PnL ($, net of TC)", stats["total_pnl"]), ("Average PnL ($)", stats["avg_pnl"]), ("Best trade ($)", stats["best"]),
+        ("Win rate with rebates (%)", round(stats["win_rate_rebate"], 2)), ("Rebates ($)", stats["total_rebate"]),
+        ("Total PnL ($, net of TC)", stats["total_pnl"]), ("Total PnL with rebates ($)", stats["total_pnl_rebate"]), ("Average PnL ($)", stats["avg_pnl"]), ("Best trade ($)", stats["best"]),
         ("Worst trade ($)", stats["worst"]), ("Exported", made_at.strftime("%Y-%m-%d %H:%M")),
     ]
     return pd.DataFrame(items, columns=["Item", "Value"])

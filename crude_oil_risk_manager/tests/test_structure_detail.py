@@ -989,7 +989,7 @@ def test_reuse_structure_from_detail_creates_shell_and_closes_modal(repo):
 def test_reuse_structure_default_name_and_refuses_open_structures(repo):
     sid = closed_structure(repo)
     dc.reuse_structure(1, sid, None)
-    assert [s.name for s in repo.get_all_structures(status_filter=[StructureStatus.SHELL])] == ["Outright (reuse)"]
+    assert [s.name for s in repo.get_all_structures(status_filter=[StructureStatus.SHELL])] == ["Outright"]
     open_id = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
     is_open, toast_open, message, icon, header = dc.reuse_structure(1, open_id, None)
     assert is_open is dc.no_update and icon == "danger"

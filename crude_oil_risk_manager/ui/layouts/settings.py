@@ -5,7 +5,7 @@ loads the saved values every time the tab is opened.
 """
 
 import dash_bootstrap_components as dbc
-from dash import dcc, html
+from dash import dash_table, dcc, html
 
 from config.settings import settings
 from core.alerts import MENTION_ALL, MENTION_LEVEL_CHOICES
@@ -13,6 +13,7 @@ from core.curve_settings import DEFAULT_OPEN_TIME, DEFAULT_OPEN_TZ, TIMEZONE_CHO
 from core.oi_settings import (
     DEFAULT_ATR_HISTORY_DAYS, DEFAULT_OI_HISTORY_DAYS, MAX_ATR_HISTORY_DAYS, MAX_OI_HISTORY_DAYS, MIN_ATR_HISTORY_DAYS, MIN_OI_HISTORY_DAYS,
 )
+from core.rebates import COUNT_BOTH, COUNT_CHOICES
 from core.user_settings import KEY_API_TOKEN, KEY_REQUIRE_STOP_TARGET
 from ui.container import container
 from ui.layouts.shell import COLORS
@@ -244,6 +245,51 @@ def _ideas_section() -> dbc.AccordionItem:
     )
 
 
+REBATE_COLUMNS = [
+    {"id": "product", "name": "Product(s)", "type": "text"},
+    {"id": "type", "name": "Structure type", "type": "text"},
+    {"id": "monthly", "name": "Monthly rebate ($/lot/side)", "type": "numeric"},
+    {"id": "yearly", "name": "Yearly rebate ($/lot/side)", "type": "numeric"},
+]
+
+
+def _rebates_section() -> dbc.AccordionItem:
+    return dbc.AccordionItem(
+        [
+            html.Div(
+                "Dollars back per lot per side of the whole structure, matched by the structure's products and type: every month of a "
+                "structure earns the same rate. A trade has two sides (entry and exit), so its rebate is the rate x lots x 2. The Archive "
+                "adds it to a trade's PnL and shows a second win rate with it. Product is CL, BRN, BZ, WBS, G or CLBZ, or two joined "
+                "with + for an arb (CL+WBS, BRN+BZ). Type is outright, spread, fly, dfly, the box types (CLBZ), or the diff types for arbs. "
+                "A structure with no row earns no rebate. Brent is the front-four-months rate.",
+                style={**_HINT_STYLE, "marginBottom": "12px"},
+            ),
+            dash_table.DataTable(
+                id="settings-rebate-table", columns=REBATE_COLUMNS, data=[], editable=True, row_deletable=True, page_size=40,
+                style_header={"backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_SECONDARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "fontWeight": "bold"},
+                style_cell={"backgroundColor": COLORS["CARD_BG"], "color": COLORS["TEXT_PRIMARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "padding": "6px 10px", "textAlign": "right"},
+                style_cell_conditional=[{"if": {"column_id": c}, "textAlign": "left"} for c in ("product", "type")],
+            ),
+            html.Div(
+                [
+                    dbc.Button("Add row", id="settings-rebate-add", color="secondary", outline=True, size="sm", className="me-2"),
+                    dbc.Button("Reset to the fee sheet", id="settings-rebate-reset", color="secondary", outline=True, size="sm"),
+                ],
+                style={"marginTop": "10px"},
+            ),
+            _field(
+                "Rebates that count",
+                dbc.Select(id="settings-rebate-count", options=[{"label": label, "value": key} for key, label in COUNT_CHOICES.items()], value=COUNT_BOTH),
+                "Monthly + yearly adds both columns for a structure; the other two use one column.",
+            ),
+            dbc.Button("Save Rebates", id="settings-save-rebates", color="primary"),
+            html.Div("", id="settings-rebate-feedback", style=_STATUS_STYLE),
+        ],
+        title="💸 Rebates",
+        item_id="rebates",
+    )
+
+
 def _teams_section() -> dbc.AccordionItem:
     return dbc.AccordionItem(
         [
@@ -330,7 +376,7 @@ def settings_layout() -> html.Div:
         [
             html.H4("⚙️ Settings", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "20px"}),
             dbc.Accordion(
-                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _oi_section(), _ideas_section(), _teams_section(), _account_reset_section(), _data_section()],
+                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _oi_section(), _ideas_section(), _rebates_section(), _teams_section(), _account_reset_section(), _data_section()],
                 id="settings-accordion",
                 always_open=True,
                 active_item=["thresholds"] if token_configured else ["api"],

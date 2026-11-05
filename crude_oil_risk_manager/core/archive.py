@@ -207,14 +207,24 @@ def _closed_structure_row(structure: Structure, trades: list[Trade], journals: d
     return _finish_row(row, structure, extra, extra["rr_detail"], entered_lots, pnl)
 
 
+def with_rebate(row: dict, structure: Structure, rebates) -> dict:
+    """Adds the rebate columns: `rebate` (None when the structure has no rate), `pnl_after_rebate` and its Win / Loss / Flat."""
+    rebate = rebates.for_trade(structure, row["lots"]) if rebates is not None else None
+    row["rebate"] = rebate
+    row["pnl_after_rebate"] = row["realized_pnl"] + (rebate or 0.0)
+    row["result_after_rebate"] = result_for(row["pnl_after_rebate"])
+    return row
+
+
 def build_archive_rows(
-    structures: list[Structure], trades_by_structure: dict[str, list[Trade]], journals: dict[str, dict] | None = None,
+    structures: list[Structure], trades_by_structure: dict[str, list[Trade]], journals: dict[str, dict] | None = None, rebates=None,
 ) -> list[dict]:
     """One row per exit of the given structures, most recent exit first (see the module docstring).
 
     A structure that has not exited anything has no row. Missing dates (data anomalies) stay None. A closed structure whose
     exits cannot be matched to entries (or that has none, or no trades at all) still gets its single older row. `journals`
-    (by structure id) adds the trade-journal columns (see journal_columns)."""
+    (by structure id) adds the trade-journal columns (see journal_columns). `rebates` (core.rebates.RebateBook) adds each trade's
+    rebate and its PnL after the rebate; without it the rebate is None and that PnL is the realized PnL."""
     rows = []
     for structure in structures:
         trades = trades_by_structure.get(structure.structure_id, [])
@@ -222,13 +232,13 @@ def build_archive_rows(
         matched = [m for m in matches or [] if m.entries]
         clean = bool(matches) and len(matched) == len(matches) and not any(m.unmatched for m in matches)
         if not clean and structure.status == StructureStatus.CLOSED:
-            rows.append(_closed_structure_row(structure, trades, journals))
+            rows.append(with_rebate(_closed_structure_row(structure, trades, journals), structure, rebates))
             continue
         entries = sorted((t for t in trades if t.event_type in _ENTRY_EVENTS), key=lambda t: t.timestamp)
         exits = sorted((t for t in trades if t.event_type in _EXIT_EVENTS), key=lambda t: t.timestamp)
         journal = (journals or {}).get(structure.structure_id)
         for match in matched:  # an open structure with an inconsistent history still shows the exits that can be matched
-            rows.append(_exit_row(structure, match, len(matches), journal, exits[-1].trade_id, entries[0].trade_id if entries else None))
+            rows.append(with_rebate(_exit_row(structure, match, len(matches), journal, exits[-1].trade_id, entries[0].trade_id if entries else None), structure, rebates))
     rows.sort(key=lambda r: r["exit_date"] or "", reverse=True)  # stable: the exits of one day keep their order
     return rows
 
@@ -267,12 +277,20 @@ def filter_archive_rows(
 
 
 def summarize(rows: list[dict]) -> dict:
-    """Summary stats of a set of rows. Flat trades count in the total but not in the win rate."""
+    """Summary stats of a set of rows. Flat trades count in the total but not in the win rate; the *_rebate figures use each trade's PnL plus its rebate."""
     pnls = [row["realized_pnl"] for row in rows]
     winners = sum(1 for p in pnls if p > 0)
     losers = sum(1 for p in pnls if p < 0)
     decided = winners + losers
+    after = [row.get("pnl_after_rebate", row["realized_pnl"]) for row in rows]  # the PnL with the rebate added
+    winners_after = sum(1 for p in after if p > 0)
+    decided_after = winners_after + sum(1 for p in after if p < 0)
     return {
+        "win_rate_rebate": winners_after / decided_after * 100.0 if decided_after else 0.0,
+        "winners_rebate": winners_after,
+        "decided_rebate": decided_after,
+        "total_rebate": sum(row.get("rebate") or 0.0 for row in rows),
+        "total_pnl_rebate": sum(after),
         "total": len(pnls),
         "winners": winners,
         "losers": losers,

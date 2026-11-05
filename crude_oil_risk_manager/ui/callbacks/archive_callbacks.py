@@ -19,6 +19,7 @@ from ui.layouts.archive_analysis import (
 )
 from core.archive import ATR_DISPLAY_SCALE, build_archive_rows, delete_archived_structures, display_atr, filter_archive_rows, journal_columns, structure_id_of, summarize
 from core.models import StructureStatus
+from core.rebates import RebateBook
 from core.pnl import calculate_net_realized_pnl
 from core.user_settings import KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE
 from ui.container import container
@@ -37,7 +38,7 @@ from ui.layouts.archive_tab import (
 logger = logging.getLogger(__name__)
 
 _PATH = "/archive"
-_STYLED_STATS = ("total-pnl", "win-rate")  # the cards whose colour follows the value
+_STYLED_STATS = ("total-pnl", "total-pnl-rebate", "win-rate", "win-rate-rebate")  # the cards whose colour follows the value
 _DEFAULTS = {"start": None, "end": None, "type": "all", "symbol": "", "pnl": "all"}
 
 
@@ -58,7 +59,7 @@ def _load_rows() -> list[dict]:
         status_filter=[StructureStatus.CLOSED, StructureStatus.OPEN, StructureStatus.PARTIALLY_CLOSED]
     )
     trades = {s.structure_id: repository.get_trades_for_structure(s.structure_id) for s in structures}
-    return build_archive_rows(structures, trades, repository.get_journals())
+    return build_archive_rows(structures, trades, repository.get_journals(), RebateBook.load(repository))
 
 
 def refresh_archive(pathname, apply_clicks, clear_clicks, deleted, start, end, structure_type, symbol, pnl_filter):

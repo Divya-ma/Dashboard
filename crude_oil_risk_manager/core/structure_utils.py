@@ -238,7 +238,7 @@ def clone_structure_as_shell(source: Structure, new_name: str | None = None) -> 
 
     Meant for reusing a closed structure: new structure and leg ids, no lots, no entry
     prices, direction reset to "buy", no close trigger/time. The name defaults to
-    "<source name> (reuse)" (cut to the 100-character limit). The caller saves it.
+    the source's own name (cut to the 100-character limit). The caller saves it.
     """
     now = datetime.now(timezone.utc)
     legs = [
@@ -255,7 +255,7 @@ def clone_structure_as_shell(source: Structure, new_name: str | None = None) -> 
         for leg in source.legs
     ]
     return Structure(
-        name=(new_name or "").strip()[:100] or f"{source.name[:92]} (reuse)",
+        name=(new_name or "").strip()[:100] or source.name[:100],
         structure_type=source.structure_type,
         products=list(source.products),
         legs=legs,
