@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from adapters.base import HistoricalDataAdapter, LiveDataAdapter
 from adapters.qh_api import QHApi
 from core.alerts import AlertManager
+from core.backup import BackupScheduler
 from core.churn_service import ChurnService
 from core.curve_compare import CurveCompare
 from core.curve_service import CurveService
@@ -55,6 +56,7 @@ class Container:
     rollover_study: RolloverStudyService | None = None  # Strategy Rollover page: why a line moves one way around an expiry (triggers, saved rules)
     settlements: SettlementPrices | None = None  # gap-free daily settlements of CL and BRN outrights (for correlation and beta)
     qh_api: QHApi | None = None  # rate-limited wrappers for every QH API endpoint
+    backup: BackupScheduler | None = None  # database backups (scheduled in the background; Settings can make or download one)
     journal: JournalService | None = None  # trade journal: market snapshots at entry and exit, trade ideas, payups
     live_cache: LivePriceCache = field(default_factory=LivePriceCache)
     pnl_stop_alert_active: bool = False

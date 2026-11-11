@@ -124,8 +124,8 @@ class SymbolTranslator:
         if leg_count == 2:
             SymbolTranslator._warn_if_nonstandard_ratios(legs, expected={1, -1}, structure_name="spread")
             if len(products) > 1:
-                # TODO: cross-product spread API symbol format has not been confirmed
-                # by the vendor yet. Implement once the format is provided.
+                # Cross-product spread API symbol format: not confirmed by the vendor. Find it with a valid token using
+                # `python -m tools.probe_api_codes --from-app` (read-only), then implement it here.
                 raise NotImplementedError(
                     "Cross-product spread API symbol format not yet confirmed. "
                     "Will be implemented when format is provided."

@@ -1,20 +1,22 @@
-dash>=2.14.0
-dash-ag-grid>=31.0.0
-dash-auth>=2.3.0
-dash-bootstrap-components>=1.5.0
-plotly>=5.18.0
-pandas>=2.1.0
-numpy>=1.26.0
-scipy>=1.11.0
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
-sqlalchemy>=2.0.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-pyarrow>=14.0.0
-openpyxl>=3.1.0
-statsmodels>=0.14.0
-gunicorn>=21.2.0
-pytest>=7.4.0
-pytest-mock>=3.12.0
-tzdata>=2024.1; sys_platform == "win32"
+# Runtime dependencies. Each has a floor (the version the test suite last passed on) and a ceiling at the next major version, so a rebuild
+# cannot silently jump to a release with breaking changes. requirements.lock has the exact versions of that last passing run
+# (pip install -r requirements.lock for a reproducible install); requirements-dev.txt adds the test and lint tools.
+dash>=4.4.1,<5
+dash-ag-grid>=35.3.0,<36
+dash-auth>=2.3.0,<3
+dash-bootstrap-components>=2.0.4,<3
+plotly>=7.0.0,<8
+pandas>=3.0.5,<4
+numpy>=2.5.2,<3
+scipy>=1.18.1,<2
+pydantic>=2.13.5,<3
+pydantic-settings>=2.15.0,<3
+sqlalchemy>=2.0.52,<3
+python-dotenv>=1.2.3,<2
+requests>=2.34.2,<3
+pyarrow>=25.0.1,<26
+openpyxl>=3.1.5,<4
+statsmodels>=0.15.0,<0.16
+gunicorn>=26.2.0,<27; sys_platform != "win32"
+cryptography>=50.0.2,<51; sys_platform != "win32"   # encrypts the stored secrets where Windows DPAPI is not available (core/secret_box.py)
+tzdata>=2026.3; sys_platform == "win32"

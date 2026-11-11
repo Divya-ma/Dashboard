@@ -1,0 +1,25 @@
+# Tooling configuration only; the app itself is not packaged (it runs from this folder: python -m ui.app).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    # dash_table.DataTable is deprecated in Dash 4 and used on purpose until the grids move to dash-ag-grid
+    "ignore:The dash_table.DataTable will be removed:DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+extend-exclude = ["data", "logs", "service"]
+
+[tool.ruff.lint]
+# What blocks a merge: syntax errors, undefined names, broken comparisons and string formats (real bugs, none in the code today).
+# Style and unused-code rules are reported by CI without failing it; add them here once the existing hits are cleaned up.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = false
+files = ["core", "db", "adapters"]

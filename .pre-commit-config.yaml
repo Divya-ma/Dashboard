@@ -1,0 +1,15 @@
+# Optional local checks before each commit:  pip install pre-commit && pre-commit install
+# The ruff rules come from crude_oil_risk_manager/pyproject.toml.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        files: ^crude_oil_risk_manager/
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=2000"]
+      - id: check-merge-conflict
+      - id: detect-private-key

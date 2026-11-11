@@ -141,7 +141,7 @@ def build_price_alert_container() -> html.Div:
     )
 
 
-def build_sidebar() -> html.Div:
+def build_sidebar(show_signout: bool = False) -> html.Div:
     """Fixed 260px sidebar: title, navigation, and a pinned data-status footer."""
     header = html.Div(
         [
@@ -172,6 +172,7 @@ def build_sidebar() -> html.Div:
             html.Div("Last: --:--:--", id="sidebar-last-updated", style=footer_text),
             html.Div("Next refresh in: 60s", id="sidebar-refresh-countdown", style=footer_text),
             html.Div(APP_VERSION, style={**footer_text, "marginTop": "10px", "marginBottom": "0"}),
+            *([html.A("Sign out", href="/logout", id="sidebar-signout", style={"fontSize": "12px", "color": TEXT_SECONDARY})] if show_signout else []),
         ],
         style={"padding": "16px 20px", "borderTop": f"1px solid {BORDER_COLOR}"},
     )
@@ -216,6 +217,6 @@ def build_content_area(token_configured: bool) -> html.Div:
     )
 
 
-def build_shell(token_configured: bool) -> html.Div:
-    """Sidebar plus content area."""
-    return html.Div([build_sidebar(), build_content_area(token_configured)])
+def build_shell(token_configured: bool, show_signout: bool = False) -> html.Div:
+    """Sidebar plus content area (a Sign out link when a login is set)."""
+    return html.Div([build_sidebar(show_signout), build_content_area(token_configured)])

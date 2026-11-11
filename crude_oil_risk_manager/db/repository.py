@@ -10,11 +10,12 @@ no ORM mapping.
 """
 
 import json
+import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.engine import Connection, Engine
 
@@ -31,7 +32,18 @@ from core.models import (
     TradeEventType,
 )
 
+from core.secret_box import SENSITIVE_SETTING_KEYS, SecretBox, is_encrypted
+
+logger = logging.getLogger(__name__)
+
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+BUSY_TIMEOUT_MS = 15_000
+# Settings the app rewrites on its own all the time (alert bookkeeping, refresh stamps, remembered controls, one-off migrations):
+# changes to these are not audited, everything else a person changes is.
+_UNAUDITED_PREFIXES = ("alert_last_sent_", "alert_stopped_")
+_UNAUDITED_KEYS = frozenset({"oi_alerts_sent", "oi_alerts_checked_on", "curve_history_refreshed_on", "var_mc_params"})
+_UNAUDITED_SUFFIXES = ("_migrated", "_migrated_v2")
+_AUDIT_VALUE_LIMIT = 300
 
 
 def _utcnow_iso() -> str:
@@ -53,11 +65,54 @@ def _parse_date(value: str | None) -> date | None:
 class Repository:
     """The single SQL boundary: all database access goes through this class."""
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, secret_box: SecretBox | None = None):
         self._db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._engine: Engine = create_engine(f"sqlite:///{db_path}")
+        event.listen(self._engine, "connect", self._configure_connection)
+        self._secrets = secret_box or SecretBox(Path(db_path).parent)
+        self._actor_provider = None
         self.initialize_db()
+        self._encrypt_stored_secrets()
+        self._warn_about_orphans()
+
+    @staticmethod
+    def _configure_connection(dbapi_connection, _record) -> None:
+        """Every new SQLite connection: write-ahead log (readers never block the writer and the other way round), wait for a
+        locked database instead of failing at once, and enforce the REFERENCES in schema.sql (SQLite ignores them by default)."""
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")  # a no-op for an in-memory database
+            cursor.execute("PRAGMA synchronous=NORMAL")  # safe with WAL, and much fewer disk syncs
+            cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+    def _warn_about_orphans(self) -> None:
+        """Rows left pointing at something deleted before the foreign keys were enforced are reported, never changed."""
+        try:
+            with self._engine.connect() as conn:
+                broken = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+        except OperationalError:
+            return
+        if broken:
+            logger.warning("%d database row(s) reference a missing parent (PRAGMA foreign_key_check); they are left as they are", len(broken))
+
+    @property
+    def secret_method(self) -> str | None:
+        """How secrets are encrypted here ("dpapi", "fernet"), or None when they are stored as plain text."""
+        return self._secrets.method
+
+    def set_actor_provider(self, provider) -> None:
+        """`provider()` returns who is making the current change (the signed-in user), or None; it is called for every audit line."""
+        self._actor_provider = provider
+
+    def _actor(self) -> str:
+        try:
+            return (self._actor_provider() if self._actor_provider else None) or "app"
+        except Exception:  # noqa: BLE001 - the audit line must never break the change itself
+            return "app"
 
     def initialize_db(self) -> None:
         """Read and execute db/schema.sql. Safe to call repeatedly (IF NOT EXISTS)."""
@@ -106,6 +161,46 @@ class Repository:
             return True
         except OperationalError:
             return False
+
+    # ------------------------------------------------------------------
+    # Audit log
+    # ------------------------------------------------------------------
+
+    def _audit(self, conn: Connection, action: str, entity_type: str, entity_id: str, summary: str, details: dict | None = None) -> None:
+        """One audit line, written in the same transaction as the change it describes (both happen or neither)."""
+        conn.execute(
+            text(
+                """
+                INSERT INTO audit_log (timestamp, actor, action, entity_type, entity_id, summary, details)
+                VALUES (:timestamp, :actor, :action, :entity_type, :entity_id, :summary, :details)
+                """
+            ),
+            {
+                "timestamp": _utcnow_iso(), "actor": self._actor(), "action": action, "entity_type": entity_type,
+                "entity_id": entity_id, "summary": summary[:500], "details": json.dumps(details or {}, default=str),
+            },
+        )
+
+    def record_audit(self, action: str, entity_type: str, entity_id: str, summary: str, details: dict | None = None) -> None:
+        """An audit line for a change made outside this class (its own transaction)."""
+        with self._engine.begin() as conn:
+            self._audit(conn, action, entity_type, entity_id, summary, details)
+
+    def get_audit_log(self, limit: int = 200, entity_type: str | None = None, entity_id: str | None = None) -> list[dict]:
+        """The newest audit lines first, optionally for one kind of thing or one id."""
+        query, params = "SELECT * FROM audit_log WHERE 1 = 1", {"limit": int(limit)}
+        if entity_type:
+            query, params["entity_type"] = query + " AND entity_type = :entity_type", entity_type
+        if entity_id:
+            query, params["entity_id"] = query + " AND entity_id = :entity_id", entity_id
+        with self._engine.connect() as conn:
+            rows = conn.execute(text(query + " ORDER BY id DESC LIMIT :limit"), params).mappings().all()
+        return [{**dict(row), "details": json.loads(row["details"] or "{}")} for row in rows]
+
+    @staticmethod
+    def _structure_label(conn: Connection, structure_id: str) -> str:
+        row = conn.execute(text("SELECT name FROM structures WHERE structure_id = :sid"), {"sid": structure_id}).first()
+        return row[0] if row else structure_id
 
     # ------------------------------------------------------------------
     # Contract methods
@@ -201,9 +296,20 @@ class Repository:
     def save_structure(self, structure: Structure) -> None:
         """Upsert the structure row and all its legs in a single transaction."""
         with self._engine.begin() as conn:
+            before = conn.execute(
+                text("SELECT name, structure_type, status FROM structures WHERE structure_id = :sid"), {"sid": structure.structure_id}
+            ).first()
             self._upsert_structure_row(conn, structure)
             for order, leg in enumerate(structure.legs):
                 self._upsert_leg_row(conn, structure.structure_id, leg, order)
+            now = (structure.name, structure.structure_type.value, structure.status.value)
+            if before is None:
+                self._audit(conn, "structure.create", "structure", structure.structure_id,
+                            f"Created {structure.name} ({now[1]}, {now[2]})", {"name": now[0], "type": now[1], "status": now[2]})
+            elif tuple(before) != now:
+                self._audit(conn, "structure.save", "structure", structure.structure_id,
+                            f"Saved {structure.name}: {before[0]} / {before[1]} / {before[2]} -> {now[0]} / {now[1]} / {now[2]}",
+                            {"before": list(before), "after": list(now)})
 
     @staticmethod
     def _upsert_structure_row(conn: Connection, structure: Structure) -> None:
@@ -355,6 +461,7 @@ class Repository:
         """Rename a structure. Does not touch legs, trades, or the audit-note history."""
         now = _utcnow_iso()
         with self._engine.begin() as conn:
+            old = self._structure_label(conn, structure_id)
             conn.execute(
                 text(
                     """
@@ -365,6 +472,8 @@ class Repository:
                 ),
                 {"name": name, "last_modified_at": now, "structure_id": structure_id},
             )
+            if old != name:
+                self._audit(conn, "structure.rename", "structure", structure_id, f"Renamed {old} to {name}", {"before": old, "after": name})
 
     def update_structure_fields(
         self, structure_id: str, name: str | None = None, structure_type: StructureType | None = None, notes: str | None = None,
@@ -397,6 +506,8 @@ class Repository:
                     "last_modified_at": now, "structure_id": structure_id,
                 },
             )
+            self._audit(conn, "structure.edit", "structure", structure_id, audit_note or f"Edited {self._structure_label(conn, structure_id)}",
+                        {"name": name, "type": structure_type.value if structure_type else None, "products": products})
 
     def update_structure_status(
         self,
@@ -408,6 +519,7 @@ class Repository:
         now = _utcnow_iso()
         closed_at = now if status == StructureStatus.CLOSED else None
         with self._engine.begin() as conn:
+            before = conn.execute(text("SELECT status FROM structures WHERE structure_id = :sid"), {"sid": structure_id}).scalar()
             conn.execute(
                 text(
                     """
@@ -427,6 +539,10 @@ class Repository:
                     "structure_id": structure_id,
                 },
             )
+            if before is not None and before != status.value:
+                self._audit(conn, "structure.status", "structure", structure_id,
+                            f"{self._structure_label(conn, structure_id)}: {before} -> {status.value}",
+                            {"before": before, "after": status.value, "close_trigger": close_trigger})
 
     def set_structure_lifecycle(
         self,
@@ -442,6 +558,11 @@ class Repository:
         """
         now = _utcnow_iso()
         with self._engine.begin() as conn:
+            before = conn.execute(text("SELECT status FROM structures WHERE structure_id = :sid"), {"sid": structure_id}).scalar()
+            if before is not None and before != status.value:
+                self._audit(conn, "structure.status", "structure", structure_id,
+                            f"{self._structure_label(conn, structure_id)}: {before} -> {status.value}",
+                            {"before": before, "after": status.value, "close_trigger": close_trigger})
             conn.execute(
                 text(
                     """
@@ -464,6 +585,14 @@ class Repository:
         """Permanently delete a structure and everything scoped to it (legs, trades, PnL
         history). Contracts are shared across structures and are never deleted."""
         with self._engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT name, structure_type, status FROM structures WHERE structure_id = :sid"), {"sid": structure_id}
+            ).first()
+            trades = conn.execute(text("SELECT COUNT(*) FROM trades WHERE structure_id = :sid"), {"sid": structure_id}).scalar()
+            if row is not None:
+                self._audit(conn, "structure.delete", "structure", structure_id,
+                            f"Deleted {row[0]} ({row[1]}, {row[2]}) with {trades} trade record(s)",
+                            {"name": row[0], "type": row[1], "status": row[2], "trades": trades})
             conn.execute(text("DELETE FROM pnl_records WHERE structure_id = :sid"), {"sid": structure_id})
             conn.execute(text("DELETE FROM trade_journal WHERE structure_id = :sid"), {"sid": structure_id})
             conn.execute(text("DELETE FROM trades WHERE structure_id = :sid"), {"sid": structure_id})
@@ -493,6 +622,7 @@ class Repository:
                     "structure_id": structure_id,
                 },
             )
+            self._audit(conn, "structure.legs", "structure", structure_id, f"{self._structure_label(conn, structure_id)}: {audit_note}")
 
     def _row_to_leg(self, conn: Connection, row) -> Leg:
         contract_row = conn.execute(
@@ -566,18 +696,39 @@ class Repository:
                     "transaction_cost": trade.transaction_cost,
                 },
             )
+            self._audit(conn, "trade.add", "trade", trade.trade_id,
+                        f"{self._structure_label(conn, trade.structure_id)}: {trade.event_type.value} {trade.direction} {trade.lots:g} lots @ {trade.price}",
+                        {"structure_id": trade.structure_id, "event": trade.event_type.value, "lots": trade.lots, "price": trade.price,
+                         "direction": trade.direction, "timestamp": trade.timestamp.isoformat()})
 
     def delete_trade(self, trade_id: str) -> None:
         """Permanently delete a single trade record. Callers must recompute and persist the
         structure's leg state (and any surviving exit's realized PnL) themselves — see
         core.trade_entry.recompute_structure_from_trades — this only removes the row."""
         with self._engine.begin() as conn:
+            row = conn.execute(text("SELECT * FROM trades WHERE trade_id = :trade_id"), {"trade_id": trade_id}).mappings().first()
+            if row is not None:
+                keys = ("structure_id", "event_type", "lots", "price", "direction", "timestamp", "realized_pnl", "transaction_cost")
+                self._audit(conn, "trade.delete", "trade", trade_id,
+                            f"{self._structure_label(conn, row['structure_id'])}: deleted {row['event_type']} {row['direction']} {row['lots']:g} lots @ {row['price']}",
+                            {key: row[key] for key in keys})
             conn.execute(text("DELETE FROM trades WHERE trade_id = :trade_id"), {"trade_id": trade_id})
 
     def update_trade_fields(self, trade: Trade) -> None:
         """Overwrite the editable figures of a stored trade (the Archive editor): time, price, lots, direction, realized P&L,
         stop, target, cost and notes. Its id, structure, leg and event type never change."""
         with self._engine.begin() as conn:
+            old = conn.execute(text("SELECT * FROM trades WHERE trade_id = :trade_id"), {"trade_id": trade.trade_id}).mappings().first()
+            if old is not None:
+                new = {"lots": trade.lots, "price": trade.price, "direction": trade.direction, "timestamp": trade.timestamp.isoformat(),
+                       "realized_pnl": trade.realized_pnl, "stop_loss_price": trade.stop_loss_price, "target_price": trade.target_price,
+                       "transaction_cost": trade.transaction_cost, "notes": trade.notes}
+                changed = {key: [old[key], value] for key, value in new.items() if old[key] != value}
+                if changed:
+                    figures = ", ".join(f"{k} {v[0]} -> {v[1]}" for k, v in changed.items() if k != "notes")
+                    self._audit(conn, "trade.edit", "trade", trade.trade_id,
+                                f"{self._structure_label(conn, old['structure_id'])}: edited {figures}" + (" (notes)" if "notes" in changed else ""),
+                                {"changed": changed})
             conn.execute(
                 text(
                     """
@@ -952,18 +1103,43 @@ class Repository:
             )
 
     def get_setting(self, key: str, default: Any = None) -> Any:
-        """Fetch a JSON-decoded setting value; return default if key not found."""
+        """Fetch a JSON-decoded setting value; return default if key not found (or a secret that cannot be decrypted here)."""
         with self._engine.connect() as conn:
             row = conn.execute(
                 text("SELECT value FROM settings WHERE key = :key"), {"key": key}
             ).mappings().first()
         if row is None:
             return default
-        return json.loads(row["value"])
+        return self._decode_setting(key, row["value"], default)
+
+    def _decode_setting(self, key: str, raw: str, default: Any = None) -> Any:
+        value = json.loads(raw)
+        if key in SENSITIVE_SETTING_KEYS and is_encrypted(value):
+            plain = self._secrets.decrypt(value)
+            return default if plain is None else plain
+        return value
+
+    @staticmethod
+    def _audited(key: str) -> bool:
+        return not (key.startswith(_UNAUDITED_PREFIXES) or key in _UNAUDITED_KEYS or key.endswith(_UNAUDITED_SUFFIXES))
+
+    @staticmethod
+    def _shown(value: Any) -> str:
+        text_value = json.dumps(value, default=str)
+        return text_value if len(text_value) <= _AUDIT_VALUE_LIMIT else text_value[:_AUDIT_VALUE_LIMIT] + "..."
 
     def set_setting(self, key: str, value: Any) -> None:
-        """JSON-encode value and INSERT OR REPLACE into settings."""
+        """JSON-encode value and INSERT OR REPLACE into settings. Secrets (core.secret_box) are stored encrypted, and a change to
+        any setting a person edits is written to the audit log (for secrets only that they changed, never the value)."""
+        secret = key in SENSITIVE_SETTING_KEYS
+        stored = self._secrets.encrypt(value) if secret and isinstance(value, str) else value
         with self._engine.begin() as conn:
+            if self._audited(key):
+                row = conn.execute(text("SELECT value FROM settings WHERE key = :key"), {"key": key}).first()
+                before = None if row is None else self._decode_setting(key, row[0])
+                if row is None or before != value:
+                    summary = f"{key} changed" if secret else f"{key}: {self._shown(before)} -> {self._shown(value)}"
+                    self._audit(conn, "setting.change", "setting", key, summary, {} if secret else {"before": before, "after": value})
             conn.execute(
                 text(
                     """
@@ -971,11 +1147,35 @@ class Repository:
                     VALUES (:key, :value, :updated_at)
                     """
                 ),
-                {"key": key, "value": json.dumps(value), "updated_at": _utcnow_iso()},
+                {"key": key, "value": json.dumps(stored), "updated_at": _utcnow_iso()},
             )
 
     def get_all_settings(self) -> dict[str, Any]:
-        """Return all settings as a plain dict, JSON-decoded."""
+        """Return all settings as a plain dict, JSON-decoded (secrets decrypted)."""
         with self._engine.connect() as conn:
             rows = conn.execute(text("SELECT key, value FROM settings")).mappings().all()
-        return {row["key"]: json.loads(row["value"]) for row in rows}
+        return {row["key"]: self._decode_setting(row["key"], row["value"]) for row in rows}
+
+    def _encrypt_stored_secrets(self) -> None:
+        """Secrets saved as plain text before encryption existed are encrypted in place (encrypted ones are left alone).
+
+        The old plain text is overwritten (secure_delete) and the write-ahead log is folded back into the database file, so it
+        does not linger in free pages or in the log."""
+        migrated = False
+        for key in SENSITIVE_SETTING_KEYS:
+            with self._engine.begin() as conn:
+                row = conn.execute(text("SELECT value FROM settings WHERE key = :key"), {"key": key}).first()
+                if row is None:
+                    continue
+                value = json.loads(row[0])
+                if isinstance(value, str) and value and not is_encrypted(value):
+                    encrypted = self._secrets.encrypt(value)
+                    if encrypted != value:
+                        conn.execute(text("PRAGMA secure_delete=ON"))
+                        conn.execute(text("UPDATE settings SET value = :value WHERE key = :key"), {"value": json.dumps(encrypted), "key": key})
+                        migrated = True
+        if migrated:
+            with self._engine.connect() as conn:
+                conn.execute(text("PRAGMA secure_delete=ON"))
+                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+            logger.info("Stored secrets were encrypted")

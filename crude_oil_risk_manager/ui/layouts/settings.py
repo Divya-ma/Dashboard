@@ -290,6 +290,63 @@ def _rebates_section() -> dbc.AccordionItem:
     )
 
 
+HEALTH_COLUMNS = [
+    {"name": "", "id": "mark"}, {"name": "Area", "id": "area"}, {"name": "Check", "id": "name"}, {"name": "Detail", "id": "detail"},
+]
+
+
+def _health_section() -> dbc.AccordionItem:
+    return dbc.AccordionItem(
+        [
+            html.Div("", id="settings-health-summary", className="mb-2", style={"color": COLORS["TEXT_PRIMARY"], "fontWeight": "bold"}),
+            dash_table.DataTable(
+                id="settings-health-table", columns=HEALTH_COLUMNS, data=[], page_size=40,
+                style_header={"backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_SECONDARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "fontWeight": "bold"},
+                style_cell={"backgroundColor": COLORS["CARD_BG"], "color": COLORS["TEXT_PRIMARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "padding": "6px 10px", "textAlign": "left", "whiteSpace": "normal", "height": "auto"},
+                style_cell_conditional=[{"if": {"column_id": "mark"}, "width": "36px"}, {"if": {"column_id": "area"}, "width": "160px"}, {"if": {"column_id": "name"}, "width": "200px"}],
+            ),
+            dbc.Button("Refresh", id="settings-health-refresh", color="secondary", outline=True, size="sm", style={"marginTop": "10px"}),
+        ],
+        title="🩺 System health",
+        item_id="health",
+    )
+
+
+AUDIT_COLUMNS = [
+    {"name": "Time (UTC)", "id": "time"}, {"name": "Who", "id": "actor"}, {"name": "What", "id": "action"}, {"name": "Details", "id": "summary"},
+]
+
+
+def _backup_section() -> dbc.AccordionItem:
+    return dbc.AccordionItem(
+        [
+            html.Div(
+                "A consistent copy of the database (trades, journals, settings) is made in the background and the newest few are kept. "
+                "Download one to keep it somewhere else. To restore, stop the dashboard and run: python -m core.backup restore <file>.",
+                style={**_HINT_STYLE, "marginBottom": "12px"},
+            ),
+            html.Div("", id="settings-backup-status", className="mb-3", style={"color": COLORS["TEXT_PRIMARY"]}),
+            html.Div(
+                [
+                    dbc.Button("Back up now", id="settings-backup-now", color="secondary", outline=True, size="sm", className="me-2"),
+                    dbc.Button("Download a backup", id="settings-backup-download", color="primary", size="sm"),
+                    dcc.Download(id="settings-backup-file"),
+                ]
+            ),
+            html.Div("", id="settings-backup-feedback", style=_STATUS_STYLE),
+            html.Div("Audit log (newest first): trades, structures and settings changes", style={**_LABEL_STYLE, "marginTop": "16px"}),
+            dash_table.DataTable(
+                id="settings-audit-table", columns=AUDIT_COLUMNS, data=[], page_size=15,
+                style_header={"backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_SECONDARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "fontWeight": "bold"},
+                style_cell={"backgroundColor": COLORS["CARD_BG"], "color": COLORS["TEXT_PRIMARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "padding": "6px 10px", "textAlign": "left", "whiteSpace": "normal", "height": "auto"},
+                style_cell_conditional=[{"if": {"column_id": "time"}, "width": "170px"}, {"if": {"column_id": "actor"}, "width": "90px"}, {"if": {"column_id": "action"}, "width": "150px"}],
+            ),
+        ],
+        title="🛟 Backup & audit log",
+        item_id="backup",
+    )
+
+
 def _teams_section() -> dbc.AccordionItem:
     return dbc.AccordionItem(
         [
@@ -376,7 +433,7 @@ def settings_layout() -> html.Div:
         [
             html.H4("⚙️ Settings", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "20px"}),
             dbc.Accordion(
-                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _oi_section(), _ideas_section(), _rebates_section(), _teams_section(), _account_reset_section(), _data_section()],
+                [_api_section(), _thresholds_section(), _defaults_section(), _curve_section(), _oi_section(), _ideas_section(), _rebates_section(), _health_section(), _backup_section(), _teams_section(), _account_reset_section(), _data_section()],
                 id="settings-accordion",
                 always_open=True,
                 active_item=["thresholds"] if token_configured else ["api"],

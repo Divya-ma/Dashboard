@@ -1,0 +1,21 @@
+# Exact versions of the last passing test run (Python 3.14, Windows). Reproducible install: pip install -r requirements.lock
+# Regenerate after upgrading:  pip freeze for the packages named in requirements.txt, then run the test suite.
+dash==4.4.1
+dash-ag-grid==35.3.0
+dash-auth==2.3.0
+dash-bootstrap-components==2.0.4
+plotly==7.0.0
+pandas==3.0.5
+numpy==2.5.2
+scipy==1.18.1
+pydantic==2.13.5
+pydantic-settings==2.15.0
+sqlalchemy==2.0.52
+python-dotenv==1.2.3
+requests==2.34.2
+pyarrow==25.0.1
+openpyxl==3.1.5
+statsmodels==0.15.0
+gunicorn==26.2.0; sys_platform != "win32"
+cryptography==50.0.2
+tzdata==2026.3; sys_platform == "win32"

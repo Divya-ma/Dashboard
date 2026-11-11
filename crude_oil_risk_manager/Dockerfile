@@ -24,4 +24,11 @@ EXPOSE 8050
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8050", "ui.app:server"]
+# ONE worker, several threads. The dashboard keeps its caches, locks and background downloads (OI, ATR, churn, curves, backups)
+# inside the process, so a second worker would run every job twice, fight over the same files and split the shared API rate
+# budget. Scale with threads, never with --workers. (WEB_CONCURRENCY, which gunicorn also reads, must stay unset or 1.)
+ENV WEB_CONCURRENCY=1
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 CMD ["python", "tools/healthcheck.py"]
+
+CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "120", "--bind", "0.0.0.0:8050", "ui.app:server"]

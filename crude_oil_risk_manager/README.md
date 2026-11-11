@@ -798,6 +798,9 @@ replaces it, including a dissolve). The snapshot is taken on a background thread
 | **Trade Journal lists** | trade ideas, exit reasons and mistake tags (one per line), and the switch "a first entry must have a stop and a target" |
 | **Microsoft Teams Alerts** | webhook URL (masked, https only), enable switch, **@mention me** (your Teams email, an optional name, and which alerts: all / warnings and critical / critical only), *Test*, *Save* |
 | **Account Reset** | *Reset total P&L to zero* (stores baselines for total and realized P&L, confirm first) and *Clear reset* |
+| **Rebates** | the rebate rates per product and structure type (Archive) |
+| **System health** | one table of what works, what needs a look and what is broken: login vs listening address, database size and free disk, secret encryption, newest backup, API token and free requests, last live poll, OI / ATR / Churn downloads, Curve Kinks. Fills when the tab opens; *Refresh* re-reads it |
+| **Backup & audit log** | backup status, *Back up now*, *Download a backup*, and the audit log (see section 8) |
 | **Data Management** | last sync summary (symbols tracked / ok / error), stored data size, *Run sync now* |
 
 Validators reject bad input with a readable message (text in a number field, a positive P&L stop, a non-https webhook) before
@@ -970,8 +973,39 @@ With no email nothing changes. Teams also holds phone pushes back while you are 
 `curve_kink_events` (the Trade Analyzer log), `trade_journal` (one JSON document per structure). New columns are added by safe
 `ALTER`s at start.
 
+Every connection runs in write-ahead-log mode with a 15 s busy timeout and with foreign keys enforced (the `REFERENCES` in
+`schema.sql` are real), so background jobs and page callbacks no longer fail with "database is locked" and a trade can never
+point at a structure that is not there. At start the app reports (never changes) any older row that already points at nothing.
+
 Trade event types: `trade`, `add`, `partial_exit` (one leg), `structure_partial_exit` (some lots at one structure price),
 `full_exit`, `dissolve`, `roll`.
+
+### Safety net: backups, secrets, audit log
+
+**Backups** (`core/backup.py`). A consistent copy of the database (SQLite's online backup, checked with `integrity_check`) is
+written to `db/backups/` when the app starts if the newest copy is older than `BACKUP_INTERVAL_HOURS` (default 24), then every
+interval; the newest `BACKUP_KEEP` (14) are kept. **Settings → Backup & audit log** shows the newest copy, makes one now, or
+downloads a fresh one. Restore with the dashboard stopped:
+
+```bash
+python -m core.backup restore db/backups/crude_oil_risk_20261111_090000.db      # the replaced database is kept as .before-restore
+python -m core.backup backup                                                     # a copy from the command line
+```
+
+Copy `db/backups/` somewhere else now and then (another disk or a network folder): a copy next to the database does not survive
+losing the disk. The `data/` folder (market-data caches) is not backed up; it can be downloaded again.
+
+**Secrets** (`core/secret_box.py`). The API token and the Teams webhook are stored encrypted (`enc:` values in the `settings`
+table), so a database copy, a backup or a download does not carry them. On Windows the key is the Windows user (DPAPI): nothing
+to manage, but a backup restored on another PC or user asks for the token again. Elsewhere (Docker) a Fernet key is used, from
+`SECRETS_KEY` or a key file next to the database (keep that file out of backups). A plain-text value from an older version is
+encrypted the first time the app starts. The `.env` file is not covered: keep its permissions tight.
+
+**Audit log** (`audit_log` table, shown newest first in Settings). One line for every trade added, edited or deleted, every
+structure created, renamed, edited, closed, reopened or deleted, and every change to a setting that a person edits (old and new
+value; for the two secrets only that they changed). The line is written in the same transaction as the change. "Who" is the
+HTTP Basic user when a login is set, else `app`. Settings the app rewrites by itself (alert bookkeeping, refresh stamps,
+remembered controls) are not logged.
 
 ### Files (`data/`)
 
@@ -1001,18 +1035,21 @@ Copy `.env.example` to `.env`. Highlights (all have defaults):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `APP_HOST`, `APP_PORT` | `0.0.0.0`, `8050` | bind address |
+| `APP_HOST`, `APP_PORT` | `127.0.0.1`, `8050` | bind address; `127.0.0.1` = this PC only, `0.0.0.0` = every interface (set a login with it) |
 | `APP_DEBUG` | `False` | Dash debug mode |
 | `AUTH_USERNAME`, `AUTH_PASSWORD` | empty | HTTP Basic login; **empty = no login** (fine only on localhost) |
+| `AUTH_USERS` | empty | more logins, `alice:pw1,bob:pw2`; each person has their own, and the audit log names them |
 | `AUTH_SECRET_KEY` | empty | fixed session secret (otherwise regenerated per start) |
 | `DB_PATH` | `db/crude_oil_risk.db` | SQLite file |
+| `BACKUP_ENABLED`, `BACKUP_DIR`, `BACKUP_KEEP`, `BACKUP_INTERVAL_HOURS` | True, `db/backups`, 14, 24 | scheduled database backups |
+| `SECRETS_KEY` | empty | Fernet key for encrypting secrets on non-Windows hosts (else a key file is created) |
 | `HISTORICAL_DATA_DIR`, `CURVE_DATA_DIR`, `OI_DATA_DIR`, `ATR_DATA_DIR`, `CHURN_DATA_DIR`, `CORRELATION_UPLOADS_DIR` | `data/...` | store locations |
 | `ALERT_PORTFOLIO_PNL_STOP`, `ALERT_STRUCTURE_MAX_LOSS` | −50,000 / −10,000 | defaults for the Settings page |
 | `LIVE_STALENESS_THRESHOLD_SECONDS` | 10 | a live price older than this is stale |
 | `TEAMS_WEBHOOK_URL`, `TEAMS_ALERTS_ENABLED` | empty / False | Teams (also editable in Settings) |
 | `DEFAULT_VAR_CONFIDENCE`, `DEFAULT_CORRELATION_ROLLING_WINDOW`, `DEFAULT_CORRELATION_LOOKBACK`, `DEFAULT_MARGIN_LIMIT` | 0.95, 5, 20, 1,000,000 | analysis defaults |
 
-The API token is entered on the Settings page and stored in the database, not in `.env`.
+The API token is entered on the Settings page and stored (encrypted) in the database, not in `.env`.
 
 ---
 
@@ -1033,14 +1070,23 @@ docker compose up --build
 ```
 
 Builds a multi-stage image (`python:3.11-slim`, served by `gunicorn` on `ui.app:server`), maps port 8050, mounts `./data` and
-`./db` so history and the database persist, loads `.env`, and restarts always.
+`./db` so history and the database persist, loads `.env`, and restarts always. `.dockerignore` keeps `.env`, the database, backups,
+the key file and `data/` out of the image. A health check (`tools/healthcheck.py`) marks the container unhealthy when the page stops
+answering (a login prompt counts as up).
+
+**Run exactly one gunicorn worker** (the Dockerfile does: `--workers 1 --threads 8`). The caches, locks and background downloads
+live inside the process, so a second worker would run every job twice, race on the same files and split the shared API rate
+budget. Scale with threads. The app logs an error at start if `WEB_CONCURRENCY` is above 1.
 
 ### Opening the dashboard from another PC
 
-The app binds to `0.0.0.0:8050`, so it listens on every interface; two things stand between it and another PC:
+By default the app listens on `127.0.0.1:8050`, so only this PC can open it. To share it set `APP_HOST=0.0.0.0` (every interface); two
+things stand between it and another PC, and System health shows a red *Login* line while the first is missing:
 
-1. **A login.** Set `AUTH_USERNAME` and `AUTH_PASSWORD` (HTTP Basic via `dash-auth`). Without them anyone who can reach the
-   address sees all positions and P&L.
+1. **A login.** Set `AUTH_USERNAME` and `AUTH_PASSWORD` (HTTP Basic via `dash-auth`), and `AUTH_USERS` to give each person their own
+   login. Without any, anyone who can reach the address sees all positions and P&L; the app logs an error at start. A malformed
+   login list stops the start instead of leaving the dashboard open. *Sign out* in the sidebar (`/logout`) makes the browser forget
+   the login. Every login has the same access: there are no roles, and no page is read-only.
 2. **Reachability.** Same network: allow inbound TCP 8050 in the firewall and browse to the machine's IP. Different network:
    use [Tailscale](https://tailscale.com/) (private encrypted mesh, no port-forwarding). **Never forward port 8050 to the public
    internet.**
@@ -1052,8 +1098,15 @@ Only **one running copy per API token** should be active: the minute budgets are
 ## 11. Development
 
 ```bash
-pytest                      # ~1,300 tests, ~2–4 minutes
+pip install -r requirements-dev.txt        # runtime + test and lint tools (requirements.lock = exact versions of the last passing run)
+pytest                      # ~1,600 tests, ~6 minutes
+python -m ruff check .      # the blocking lint rules (pyproject.toml)
 ```
+
+GitHub Actions (`.github/workflows/tests.yml`, at the repository root) runs the lint and the tests on every push and pull request,
+on Linux (Python 3.11, like Docker) and Windows. Unused-code lint and mypy are reported there without failing the build.
+`.pre-commit-config.yaml` runs ruff, a large-file check and a private-key check before each commit (`pip install pre-commit &&
+pre-commit install`).
 
 Shared fixtures are in `tests/conftest.py` (temporary database, synthetic Parquet). Tests cover the maths (P&L, positions,
 costs, correlation, VaR, kinks, journal, analysis), the stores and services, and the callbacks as plain functions.
@@ -1100,4 +1153,10 @@ temp-file-and-replace helpers.
   shift, so the total is unchanged); a structure with a P&L typed in the Archive editor is left exactly as it is. The first version
   of this move skipped a structure that had a real-fill add after its exits, so those exits kept average-cost figures (3 ticks
   booked as 27.5 instead of 30); the move was run again (setting `fifo_migrated_v2`) and fixes them. A structure's total P&L never changes, only the realized / unrealized split.
-- Single-user: there is no per-user data; the optional Basic Auth login protects the whole app.
+- Logins: there is no per-user data and no roles. HTTP Basic gives every login the same access; a read-only role would need every
+  write callback protected one by one.
+- Unconfirmed API codes: the CL-BZ box codes (`WTCLCO`, `CLBZZX`, the flybox format) and the cross-product spread symbol format
+  (`SymbolTranslator` raises `NotImplementedError` for it) have never been checked against the live API. Run
+  `python -m tools.probe_api_codes --from-app` with a valid token: it asks for three daily candles of each candidate (about 20
+  read-only requests) and prints which formats the API accepts; then put the accepted format into `core/box.py` /
+  `adapters/base.py`.

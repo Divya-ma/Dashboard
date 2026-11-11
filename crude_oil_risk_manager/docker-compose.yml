@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   crude-oil-risk-manager:
     build: .
@@ -12,3 +10,4 @@ services:
       - ./data:/app/data
       - ./db:/app/db
     restart: always
+    stop_grace_period: 30s  # lets a running backup or file write finish

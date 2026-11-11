@@ -6,6 +6,7 @@ the data adapters; callbacks reach them through ui.container.
 """
 
 import logging
+import os
 import secrets
 import sys
 import threading
@@ -51,11 +52,14 @@ from core.quote_store import FairValueStore, QuoteStore  # noqa: E402
 from core.settlement_prices import SettlementFirstLoader, SettlementPrices  # noqa: E402
 from core.structure_builder import active_composite_symbols  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_REQUIRE_STOP_TARGET, KEY_STALENESS  # noqa: E402
+from core.access import AccessConfigError, is_loopback, parse_users  # noqa: E402
+from core.backup import BackupScheduler  # noqa: E402
 from db.repository import Repository  # noqa: E402
 from ui.callbacks.correlation_callbacks import register_correlation_callbacks  # noqa: E402
 from ui.callbacks.corr_matrix_callbacks import register_corr_matrix_callbacks  # noqa: E402
 from ui.callbacks.exposure_callbacks import register_exposure_callbacks  # noqa: E402
 from ui.callbacks.home_callbacks import register_home_callbacks  # noqa: E402
+from ui.access_routes import add_logout_route  # noqa: E402
 from ui.callbacks.settings_callbacks import register_settings_callbacks  # noqa: E402
 from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
 from ui.callbacks.structure_detail_callbacks import register_structure_detail_callbacks  # noqa: E402
@@ -128,6 +132,21 @@ alert_manager = AlertManager(
 )
 
 container.repository = repository
+
+
+def _signed_in_user() -> str | None:
+    """Who the audit log names for a change: the HTTP Basic Auth user of the current request, if there is one."""
+    from flask import has_request_context, request
+
+    return request.authorization.username if has_request_context() and request.authorization else None
+
+
+repository.set_actor_provider(_signed_in_user)
+container.backup = BackupScheduler(
+    _resolve_path(settings.DB_PATH), _resolve_path(settings.BACKUP_DIR), settings.BACKUP_INTERVAL_HOURS, settings.BACKUP_KEEP
+)
+if settings.BACKUP_ENABLED and "pytest" not in sys.modules:  # not while the test suite imports this module
+    container.backup.start()
 container.live_adapter = live_adapter
 container.historical_adapter = historical_adapter
 container.alert_manager = alert_manager
@@ -248,13 +267,29 @@ app = dash.Dash(
 server = app.server  # for gunicorn: ui.app:server
 server.secret_key = settings.AUTH_SECRET_KEY or secrets.token_hex(32)
 
-if settings.AUTH_USERNAME and settings.AUTH_PASSWORD:
-    dash_auth.BasicAuth(app, {settings.AUTH_USERNAME: settings.AUTH_PASSWORD})
-    logger.info("HTTP Basic Auth enabled for user %s", settings.AUTH_USERNAME)
+try:
+    AUTH_USERS = parse_users(settings.AUTH_USERS, settings.AUTH_USERNAME, settings.AUTH_PASSWORD)
+except AccessConfigError as exc:  # a typo in the login settings must stop the start, never leave the dashboard open
+    raise SystemExit(f"Login settings are not valid: {exc}") from None
+
+if AUTH_USERS:
+    dash_auth.BasicAuth(app, AUTH_USERS)
+    logger.info("HTTP Basic Auth enabled for %d user(s): %s", len(AUTH_USERS), ", ".join(sorted(AUTH_USERS)))
+
+    add_logout_route(server)
+elif not is_loopback(settings.APP_HOST):
+    logger.error(
+        "NO LOGIN while listening on %s: anyone who can reach this PC sees all positions and P&L. "
+        "Set AUTH_USERNAME and AUTH_PASSWORD (or AUTH_USERS) in .env, or set APP_HOST=127.0.0.1.",
+        settings.APP_HOST,
+    )
 else:
-    logger.warning(
-        "AUTH_USERNAME/AUTH_PASSWORD not set — the dashboard has NO login. "
-        "Set them in .env before this is reachable from anywhere but localhost."
+    logger.info("No login set; the dashboard listens on %s, so only this PC can open it.", settings.APP_HOST)
+
+if os.environ.get("WEB_CONCURRENCY", "1").strip() not in ("", "1"):
+    logger.error(
+        "WEB_CONCURRENCY=%s: run ONE worker. Caches, locks and background downloads live inside the process, so a second worker "
+        "repeats every job and splits the shared API rate budget.", os.environ["WEB_CONCURRENCY"],
     )
 
 app.index_string = """<!DOCTYPE html>
@@ -298,7 +333,7 @@ def serve_layout() -> html.Div:
             dcc.Interval(id="interval-countdown", interval=COUNTDOWN_INTERVAL_MS, n_intervals=0),
             build_alert_container(),
             build_price_alert_container(),
-            build_shell(token_configured),
+            build_shell(token_configured, bool(AUTH_USERS)),
             new_structure_modal(),
             builder_save_toast(),
         ]

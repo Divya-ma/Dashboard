@@ -667,9 +667,3 @@ def watchlist_pair_summary(series_by_label: dict[str, pd.Series], rolling: int, 
                 }
             )
     return rows
-
-
-# TODO: Structure-vs-structure correlation.
-# NOTE: Structure-vs-structure correlation aggregation method not yet confirmed
-# by user. Will be implemented when method is defined. See conversation notes
-# from Phase 1 design.

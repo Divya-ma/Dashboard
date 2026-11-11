@@ -1,0 +1,19 @@
+# Keep secrets, data and local state out of the image (they come in through the volumes and .env at run time)
+.env
+.git
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.venv
+logs
+test.db
+db/*.db
+db/*.db-wal
+db/*.db-shm
+db/backups
+db/secret.key
+data
+tests
+service

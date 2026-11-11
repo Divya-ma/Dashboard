@@ -8,7 +8,9 @@ shown to the user never contain them.
 import logging
 import threading
 
-from dash import Input, Output, State, no_update
+from datetime import datetime
+
+from dash import Input, Output, State, dcc, no_update
 from dash.exceptions import PreventUpdate
 
 from adapters.base import APIError
@@ -26,6 +28,8 @@ from core.curve_settings import (
     validate_params,
 )
 from core.models import StructureStatus
+from core.backup import BackupError, create_backup, list_backups
+from core.health import collect_health, overall
 from core.rebates import COUNT_BOTH, COUNT_CHOICES, DEFAULT_RATES, KEY_REBATE_COUNT, KEY_REBATE_RATES, RebateBook
 from core.rebates import clean_rows as clean_rebate_rows
 from core.pnl import calculate_portfolio_pnl
@@ -355,6 +359,72 @@ def save_rebates(n_clicks, rows, count):
     return f"✅ Saved {len(cleaned)} rebate row(s). The Archive uses them from its next refresh."
 
 
+_HEALTH_MARK = {"ok": "✅", "warn": "⚠️", "fail": "❌", "info": "ℹ️"}
+_HEALTH_HEADLINE = {"ok": "✅ Everything checked is working", "warn": "⚠️ Working, but something needs a look", "fail": "❌ Something is broken"}
+
+
+def health_panel(pathname, refresh_clicks):
+    """The System health table: filled when Settings opens and on Refresh."""
+    from dash import callback_context
+    from types import SimpleNamespace
+
+    if callback_context.triggered_id != "settings-health-refresh" and pathname != "/settings":
+        raise PreventUpdate
+    parts = SimpleNamespace(**{name: getattr(container, name, None) for name in (
+        "repository", "backup", "live_cache", "qh_api", "oi_service", "churn_service", "curve_service")}, app_settings=settings)
+    checks = collect_health(parts)
+    rows = [{"mark": _HEALTH_MARK[c.status], "area": c.area, "name": c.name, "detail": c.detail} for c in checks]
+    return _HEALTH_HEADLINE[overall(checks)], rows
+
+
+def _backup_status() -> str:
+    backup = container.backup
+    if backup is None:
+        return "Backups are not set up."
+    found = list_backups(backup.folder)
+    if not found:
+        return f"No backup yet. They are written to {backup.folder}."
+    stamp = datetime.fromtimestamp(found[0].stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    problem = f" ⚠ The last scheduled backup failed: {backup.last_error}" if backup.last_error else ""
+    return f"Newest backup: {found[0].name} ({stamp}). {len(found)} kept in {backup.folder}.{problem}"
+
+
+def _audit_rows(limit: int = 200) -> list[dict]:
+    return [
+        {"time": str(row["timestamp"])[:19].replace("T", " "), "actor": row["actor"], "action": row["action"], "summary": row["summary"]}
+        for row in container.repository.get_audit_log(limit)
+    ]
+
+
+def backup_panel(pathname, now_clicks):
+    """The backup status line and the audit table: filled when the tab opens, and refreshed by Back up now (which makes one)."""
+    from dash import callback_context
+
+    trigger = callback_context.triggered_id
+    feedback = no_update
+    if trigger == "settings-backup-now":
+        if not now_clicks or container.backup is None:
+            raise PreventUpdate
+        path = container.backup.run_once()
+        feedback = f"✅ Backup written: {path.name}" if path else f"❌ Backup failed: {container.backup.last_error}"
+    elif pathname != "/settings":
+        raise PreventUpdate
+    return _backup_status(), feedback, _audit_rows()
+
+
+def download_backup(n_clicks):
+    """A fresh backup, sent to the browser as a file."""
+    if not n_clicks or container.backup is None:
+        raise PreventUpdate
+    try:
+        path = create_backup(container.backup.db_path, container.backup.folder, container.backup.keep)
+    except BackupError as exc:
+        logger.error("Backup download failed: %s", exc)
+        raise PreventUpdate from None
+    container.repository.record_audit("backup.download", "backup", path.name, f"Backup downloaded: {path.name}")
+    return dcc.send_file(str(path))
+
+
 def load_teams_mention(pathname):
     """The saved @mention email, name and alert levels (only when the Settings tab is open)."""
     if pathname != "/settings":
@@ -651,6 +721,20 @@ def register_settings_callbacks(app) -> None:
     app.callback(
         Output("settings-oi-history-days", "value"), Output("settings-atr-history-days", "value"), Input("url", "pathname"),
     )(load_oi_settings)
+
+    app.callback(
+        Output("settings-backup-status", "children"), Output("settings-backup-feedback", "children"), Output("settings-audit-table", "data"),
+        Input("url", "pathname"), Input("settings-backup-now", "n_clicks"),
+    )(backup_panel)
+
+    app.callback(
+        Output("settings-health-summary", "children"), Output("settings-health-table", "data"),
+        Input("url", "pathname"), Input("settings-health-refresh", "n_clicks"),
+    )(health_panel)
+
+    app.callback(
+        Output("settings-backup-file", "data"), Input("settings-backup-download", "n_clicks"), prevent_initial_call=True,
+    )(download_backup)
 
     app.callback(
         Output("settings-rebate-table", "data"), Output("settings-rebate-count", "value"),

@@ -118,6 +118,21 @@ CREATE TABLE IF NOT EXISTS trade_journal (
 
 -- Indexes: foreign keys and common query patterns
 
+-- Who changed what and when: trades, structures and settings (secrets are never written here, only that they changed).
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,                   -- e.g. trade.add, structure.delete, setting.change
+    entity_type TEXT NOT NULL,              -- trade | structure | setting
+    entity_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '{}'      -- JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id);
+
 CREATE INDEX IF NOT EXISTS idx_legs_structure_id ON legs(structure_id);
 
 CREATE INDEX IF NOT EXISTS idx_trades_structure_id ON trades(structure_id);

@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     )
 
     # App
-    APP_HOST: str = "0.0.0.0"
+    # Loopback by default: only this PC can open the dashboard. Set 0.0.0.0 (all interfaces) together with a login to share it.
+    APP_HOST: str = "127.0.0.1"
     APP_PORT: int = 8050
     APP_DEBUG: bool = False
     APP_TITLE: str = "Crude Oil Risk Manager"
@@ -23,6 +24,8 @@ class Settings(BaseSettings):
     # localhost-only use, but set both before this is reachable from another PC.
     AUTH_USERNAME: str = ""
     AUTH_PASSWORD: str = ""
+    # More logins, one per person: "alice:pw1,bob:pw2" (see core/access.py). Added to AUTH_USERNAME/AUTH_PASSWORD.
+    AUTH_USERS: str = ""
     # Optional: a fixed Flask session secret (any long random string). If left
     # empty, a new one is generated on every restart, which simply logs everyone
     # out on restart — harmless, but set one if you want sessions to survive it.
@@ -30,6 +33,13 @@ class Settings(BaseSettings):
 
     # Database
     DB_PATH: str = "db/crude_oil_risk.db"
+
+    # Database backups (core.backup): a consistent copy at start-up when the newest is older than the interval, then one every
+    # interval; the newest BACKUP_KEEP are kept. BACKUP_ENABLED=False turns the schedule off (Settings can still make one by hand).
+    BACKUP_ENABLED: bool = True
+    BACKUP_DIR: str = "db/backups"
+    BACKUP_KEEP: int = 14
+    BACKUP_INTERVAL_HOURS: float = 24.0
 
     # Historical data storage
     HISTORICAL_DATA_DIR: str = "data/historical"

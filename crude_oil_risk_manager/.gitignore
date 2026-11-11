@@ -41,9 +41,21 @@ htmlcov/
 
 # ---------- Database ----------
 *.db
+*.db-wal
+*.db-shm
+*.before-restore
+db/backups/
+secret.key
 
-# ---------- Historical data cache ----------
+# ---------- Market-data caches (downloaded again by the app on first start; they change on every sync) ----------
 data/historical/*.parquet
+data/historical/*/
+data/atr/
+data/churn/
+data/curves/
+data/oi/
+data/oi_extra/
+# data/correlation_uploads/ is NOT ignored: those workbooks are typed in by hand and cannot be downloaded again
 
 # ---------- Logs ----------
 logs/
