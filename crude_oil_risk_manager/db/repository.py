@@ -68,6 +68,7 @@ class Repository:
     def __init__(self, db_path: str, secret_box: SecretBox | None = None):
         self._db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._existed = Path(db_path).is_file()  # an existing database gets a safety copy before it is migrated
         self._engine: Engine = create_engine(f"sqlite:///{db_path}")
         event.listen(self._engine, "connect", self._configure_connection)
         self._secrets = secret_box or SecretBox(Path(db_path).parent)
@@ -121,7 +122,46 @@ class Repository:
         with self._engine.begin() as conn:
             for statement in statements:
                 conn.execute(text(statement))
-        self._migrate_columns()
+        self._apply_migrations()
+
+    # ------------------------------------------------------------------
+    # Schema migrations
+    # ------------------------------------------------------------------
+    # schema.sql creates what is missing (CREATE TABLE / INDEX IF NOT EXISTS); a change to a table that already exists is a numbered
+    # migration below. Each runs once, in order, and the database remembers the last one done (PRAGMA user_version), so an upgrade
+    # is the same on every machine and a database is never migrated twice. To change a table: append a method and an entry to
+    # `_migrations`; never edit or reorder an entry that has shipped.
+
+    def _migrations(self):
+        return ((1, "trade stop/target/cost columns, leg direction and cost per lot, pnl transaction costs", self._migrate_columns),)
+
+    def schema_version(self) -> int:
+        with self._engine.connect() as conn:
+            return int(conn.execute(text("PRAGMA user_version")).scalar() or 0)
+
+    def _apply_migrations(self) -> None:
+        current = self.schema_version()
+        pending = [m for m in self._migrations() if m[0] > current]
+        if not pending:
+            return
+        if self._existed:
+            self._safety_copy()
+        for version, name, run in pending:
+            run()
+            with self._engine.begin() as conn:
+                conn.execute(text(f"PRAGMA user_version = {int(version)}"))
+            logger.info("Database migrated to schema version %d: %s", version, name)
+        self._existed = False  # the copy is made once per start
+
+    def _safety_copy(self) -> None:
+        """A copy of the database as it was, in <db folder>/backups/pre-migration (the newest three kept), before it is changed."""
+        from core.backup import BackupError, create_backup
+
+        try:
+            copy = create_backup(self._db_path, Path(self._db_path).parent / "backups" / "pre-migration", keep=3)
+            logger.info("Safety copy before the schema migration: %s", copy)
+        except BackupError as exc:  # never blocks the start: the migrations only add columns
+            logger.warning("No safety copy could be made before the schema migration: %s", exc)
 
     def _migrate_columns(self) -> None:
         """Add columns introduced after the first release to databases created without them.

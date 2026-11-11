@@ -650,8 +650,8 @@ def watchlist_pair_summary(series_by_label: dict[str, pd.Series], rolling: int, 
                     series_by_label[target], series_by_label[base], beta_window(rolling, lookback)
                 )
                 beta, r_squared = beta_result["beta"], beta_result["r_squared"]
-            except InsufficientDataError:
-                pass
+            except InsufficientDataError as exc:
+                logger.debug("No beta for %s on %s: %s", target, base, exc)  # the pair is still listed, without a beta
             rows.append(
                 {
                     "base": base,

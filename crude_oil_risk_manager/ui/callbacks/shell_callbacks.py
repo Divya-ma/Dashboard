@@ -38,6 +38,7 @@ from ui.layouts.placeholder import (
     under_construction,
     var_scenario_layout,
 )
+from core.clock import london_now
 from ui.layouts.shell import COLORS, stale_indicator
 
 logger = logging.getLogger(__name__)
@@ -259,7 +260,7 @@ def fetch_live_prices(n_intervals):
             prices[symbol] = {**cache.prices[symbol], "is_stale": True}
 
     is_stale = bool(missing) or any(d["is_stale"] for d in prices.values())
-    label = f"Last: {datetime.now().strftime('%H:%M:%S')}"
+    label = f"Last: {london_now().strftime('%H:%M:%S')}"
     cache.prices = prices
     cache.fetched_at = time.monotonic()
     cache.updated_label = label

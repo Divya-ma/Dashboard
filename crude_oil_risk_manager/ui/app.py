@@ -21,7 +21,7 @@ import dash  # noqa: E402
 import dash_ag_grid  # noqa: E402,F401  - Dash refuses a component library first imported inside a callback (the Structures page is loaded lazily)
 import dash_auth  # noqa: E402
 import dash_bootstrap_components as dbc  # noqa: E402
-from dash import dcc, html  # noqa: E402
+from dash import html  # noqa: E402
 
 from adapters.historical.vendor import VendorHistoricalAdapter  # noqa: E402
 from adapters.base import SymbolTranslator  # noqa: E402
@@ -54,42 +54,17 @@ from core.structure_builder import active_composite_symbols  # noqa: E402
 from core.user_settings import KEY_API_TOKEN, KEY_REQUIRE_STOP_TARGET, KEY_STALENESS  # noqa: E402
 from core.access import AccessConfigError, is_loopback, parse_users  # noqa: E402
 from core.backup import BackupScheduler  # noqa: E402
+from core.logging_setup import configure_logging  # noqa: E402
 from db.repository import Repository  # noqa: E402
-from ui.callbacks.correlation_callbacks import register_correlation_callbacks  # noqa: E402
-from ui.callbacks.corr_matrix_callbacks import register_corr_matrix_callbacks  # noqa: E402
-from ui.callbacks.exposure_callbacks import register_exposure_callbacks  # noqa: E402
-from ui.callbacks.home_callbacks import register_home_callbacks  # noqa: E402
 from ui.access_routes import add_logout_route  # noqa: E402
-from ui.callbacks.settings_callbacks import register_settings_callbacks  # noqa: E402
-from ui.callbacks.shell_callbacks import register_callbacks  # noqa: E402
-from ui.callbacks.structure_detail_callbacks import register_structure_detail_callbacks  # noqa: E402
-from ui.callbacks.var_callbacks import register_var_callbacks  # noqa: E402
-from ui.callbacks.curve_callbacks import register_curve_callbacks  # noqa: E402
-from ui.callbacks.curve_compare_callbacks import register_curve_compare_callbacks  # noqa: E402
-from ui.callbacks.oi_callbacks import register_oi_callbacks  # noqa: E402
-from ui.callbacks.churn_callbacks import register_churn_callbacks  # noqa: E402
-from ui.callbacks.rollover_callbacks import register_rollover_callbacks  # noqa: E402
-from ui.callbacks.rollover_study_callbacks import register_rollover_study_callbacks  # noqa: E402
-from ui.callbacks.seasonality_callbacks import register_seasonality_callbacks  # noqa: E402
-from ui.callbacks.archive_callbacks import register_archive_callbacks  # noqa: E402
-from ui.callbacks.structure_builder_callbacks import register_structure_builder_callbacks  # noqa: E402
-from ui.callbacks.structures_callbacks import register_structures_callbacks  # noqa: E402
-from ui.callbacks.dissolve_callbacks import register_dissolve_callbacks  # noqa: E402
+from ui.callbacks.registry import register_all  # noqa: E402
 from ui.container import container  # noqa: E402
-from ui.layouts.shell import (  # noqa: E402
-    build_alert_container,
-    build_global_css,
-    build_price_alert_container,
-    build_shell,
-)
-from ui.layouts.structure_builder import builder_save_toast, new_structure_modal  # noqa: E402
+from ui.layouts.root import build_root_layout  # noqa: E402
+from ui.layouts.shell import build_global_css  # noqa: E402
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+configure_logging(None if "pytest" in sys.modules else _PROJECT_ROOT / settings.LOG_DIR)  # no log file while the test suite imports this
 logger = logging.getLogger(__name__)
 
-LIVE_POLL_INTERVAL_MS = 10 * 1000  # /fairvalue/ has its own independent 7 req/min budget
-PNL_REFRESH_INTERVAL_MS = 5 * 1000
-COUNTDOWN_INTERVAL_MS = 1 * 1000
 
 
 def _resolve_path(path_str: str) -> str:
@@ -315,51 +290,11 @@ app.index_string = """<!DOCTYPE html>
 
 def serve_layout() -> html.Div:
     """Built on every page load so the setup banner reflects the current token state."""
-    token_configured = _is_token_configured()
-    return html.Div(
-        [
-            dcc.Location(id="url"),
-            dcc.Store(id="store-token-configured", data=token_configured),
-            dcc.Store(id="store-live-prices", data={}),
-            dcc.Store(id="store-portfolio-pnl", data={}),
-            dcc.Store(id="store-selected-structure-id", data=None),
-            dcc.Store(id="store-pending-delete", data=None),
-            dcc.Store(id="store-builder-template", data=None),
-            dcc.Store(id="store-builder-legs", data=[]),
-            dcc.Store(id="store-builder-step", data=1),
-            dcc.Store(id="store-builder-correlation", data=[]),
-            dcc.Interval(id="interval-live-poll", interval=LIVE_POLL_INTERVAL_MS, n_intervals=0),
-            dcc.Interval(id="interval-pnl-refresh", interval=PNL_REFRESH_INTERVAL_MS, n_intervals=0),
-            dcc.Interval(id="interval-countdown", interval=COUNTDOWN_INTERVAL_MS, n_intervals=0),
-            build_alert_container(),
-            build_price_alert_container(),
-            build_shell(token_configured, bool(AUTH_USERS)),
-            new_structure_modal(),
-            builder_save_toast(),
-        ]
-    )
+    return build_root_layout(_is_token_configured(), bool(AUTH_USERS))
 
 
 app.layout = serve_layout
-register_callbacks(app)
-register_home_callbacks(app)
-register_settings_callbacks(app)
-register_structures_callbacks(app)
-register_structure_builder_callbacks(app)
-register_structure_detail_callbacks(app)
-register_dissolve_callbacks(app)
-register_correlation_callbacks(app)
-register_corr_matrix_callbacks(app)
-register_exposure_callbacks(app)
-register_var_callbacks(app)
-register_curve_callbacks(app)
-register_curve_compare_callbacks(app)
-register_oi_callbacks(app)
-register_churn_callbacks(app)
-register_seasonality_callbacks(app)
-register_rollover_callbacks(app)
-register_rollover_study_callbacks(app)
-register_archive_callbacks(app)
+register_all(app)
 
 
 if __name__ == "__main__":

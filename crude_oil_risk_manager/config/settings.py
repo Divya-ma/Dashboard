@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     BACKUP_KEEP: int = 14
     BACKUP_INTERVAL_HOURS: float = 24.0
 
+    # Log file folder (logs/app.log, rotating 10 MB x 5)
+    LOG_DIR: str = "logs"
+
     # Historical data storage
     HISTORICAL_DATA_DIR: str = "data/historical"
 

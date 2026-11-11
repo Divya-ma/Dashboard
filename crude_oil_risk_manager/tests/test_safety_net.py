@@ -294,3 +294,50 @@ def test_download_makes_a_fresh_backup_and_audits_it(panel, repo):
     sent = sc.download_backup(1)
     assert sent["filename"].startswith("crude_oil_risk_") and len(list_backups(container.backup.folder)) == 1
     assert repo.get_audit_log()[0]["action"] == "backup.download"
+
+
+# ---------------- schema migrations ----------------
+
+
+def legacy_database(path):
+    """A database as the first release made it: no stop / target / cost / direction columns, no schema version."""
+    connection = sqlite3.connect(str(path))
+    connection.executescript(
+        """
+        CREATE TABLE contracts (contract_id TEXT PRIMARY KEY, product TEXT, contract_month INTEGER, contract_year INTEGER, symbol TEXT UNIQUE,
+            multiplier REAL, tick_size REAL, tick_value REAL, currency TEXT, expiry_date TEXT, first_notice_date TEXT, created_at TEXT);
+        CREATE TABLE structures (structure_id TEXT PRIMARY KEY, name TEXT, structure_type TEXT, products TEXT, status TEXT, created_at TEXT,
+            last_modified_at TEXT, notes TEXT, close_trigger TEXT, closed_at TEXT, has_duplicate_tenors INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE legs (leg_id TEXT PRIMARY KEY, structure_id TEXT, contract_id TEXT, ratio INTEGER, lots REAL, entry_price REAL,
+            average_entry_price REAL, is_naked INTEGER, leg_order INTEGER);
+        CREATE TABLE trades (trade_id TEXT PRIMARY KEY, structure_id TEXT, leg_id TEXT, event_type TEXT, lots REAL, price REAL,
+            direction TEXT, timestamp TEXT, realized_pnl REAL, notes TEXT);
+        CREATE TABLE pnl_records (record_id TEXT PRIMARY KEY, structure_id TEXT, timestamp TEXT);
+        INSERT INTO structures VALUES ('s1', 'old', 'outright', '["CL"]', 'open', 't', 't', '', NULL, NULL, 0);
+        INSERT INTO contracts VALUES ('c1', 'CL', 12, 2025, 'CLZ25', 1000, 0.01, 10, 'USD', NULL, NULL, 't');
+        INSERT INTO legs VALUES ('l1', 's1', 'c1', 1, 1, 70, 70, 0, 0);
+        INSERT INTO trades VALUES ('t1', 's1', 'l1', 'trade', 1, 70, 'sell', '2025-01-01T00:00:00', NULL, '');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_an_old_database_is_migrated_once_with_a_safety_copy_and_keeps_its_data(tmp_db_path):
+    legacy_database(tmp_db_path)
+    repo = Repository(str(tmp_db_path))
+    assert repo.schema_version() == 1
+    with repo._engine.connect() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(legs)"))}
+        direction = conn.execute(text("SELECT direction FROM legs")).scalar()
+    assert {"direction", "transaction_cost_per_lot"} <= columns and direction == "sell"  # back-filled from the first entry trade
+    copies = list_backups(tmp_db_path.parent / "backups" / "pre-migration")
+    assert len(copies) == 1
+    assert "direction" not in {row[1] for row in sqlite3.connect(str(copies[0])).execute("PRAGMA table_info(legs)")}  # the copy is the old shape
+    Repository(str(tmp_db_path))  # opened again: nothing pending, no second copy
+    assert len(list_backups(tmp_db_path.parent / "backups" / "pre-migration")) == 1
+
+
+def test_a_new_database_starts_at_the_latest_version_without_a_safety_copy(tmp_db_path):
+    assert Repository(str(tmp_db_path)).schema_version() == 1
+    assert list_backups(tmp_db_path.parent / "backups" / "pre-migration") == []

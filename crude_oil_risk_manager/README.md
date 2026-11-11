@@ -62,6 +62,8 @@ python ui/app.py                # http://localhost:8050
 
 Python 3.11+ is used in Docker; 3.14 is used on the development machine.
 
+Logs go to the console and to `logs/app.log` (rotating, 10 MB x 5; `LOG_DIR` in `.env`).
+
 ---
 
 ## 2. Architecture
@@ -80,8 +82,9 @@ crude_oil_risk_manager/
 ├── config/settings.py   Environment configuration (pydantic-settings)
 ├── data/                Parquet / JSON stores (created at runtime)
 ├── service/             NSSM scripts for the Windows service
-├── docs/                Worked notes (neighbour interpolation)
-└── tests/               ~1,300 tests (pytest)
+├── docs/                Worked notes (see docs/README.md)
+├── tools/               Command-line helpers: API code probe, Docker health check
+└── tests/               ~1,600 tests (pytest)
 ```
 
 Design rules that hold everywhere:
@@ -766,6 +769,22 @@ the price, is refused and nothing is changed. Realized P&L feeds Home's totals, 
 Every market column is recorded **at entry** (the first entry; adds do not replace it) **and at exit** (each later exit
 replaces it, including a dissolve). The snapshot is taken on a background thread after the trade is saved and costs three
 `/ohlc/` requests; nothing blocks the trade.
+
+**Rebates in the Archive.** The exchange pays rebates, so each row also shows `Rebate ($)`, `PnL with rebate` and its Win / Loss / Flat,
+and the stat cards add *Win Rate (with rebates)*, *Total PnL with rebates* and the rebates paid. The existing realized PnL
+(net of transaction costs) is never changed; the rebate is added next to it. The rates are in **Settings → Rebates**, seeded from
+the fee sheet and editable. How a trade's rebate is worked out (`core/rebates.py`):
+
+- A rate row is (product, structure type, monthly, yearly) in **dollars per lot per side of the whole structure**. A trade has two sides,
+  entry and exit, so its rebate is `(monthly + yearly) x lots x 2`: a 1-lot CL spread (0.50 + 0.08) earns $1.16, a 1-lot CLBZ flybox
+  (6.72 + 0.08) earns $13.60. *Rebates that count* switches to monthly only or yearly only.
+- The structure is matched by its **products and its type**; every month of a structure earns the same rate. The products are read
+  from the legs: CL and BZ legs make the **CLBZ box** whatever you named it (`CL|BZ Aug27 FlyBox`), and on a box the plain types mean the
+  box types. Two products make an arb (`CL+WBS`, `BRN+BZ`) with the spreaddiff / flydiff types.
+- A structure with no row of its own (for example a BRN fly minus a BRN fly) earns the rebates of its **individual legs**: each leg counts as
+  the outright / spread / fly / dfly its symbol is, times its ratio. If any leg has no rate, there is no rebate.
+- Brent uses the front-four-months rate; the rest-month rates are not separated. SP-SP-Fly and Jumbo arbs are not in the sheet yet.
+- Money is rounded to the cent before a trade is called Win, Loss or Flat, so float dust (1e-12) is never a win.
 
 **Archive → Analysis.** Built on the trades the filters leave; every figure is per trade, **net of costs**.
 

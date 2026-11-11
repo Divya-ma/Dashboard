@@ -175,8 +175,8 @@ def structure_atr_with_basis(structure: Structure, frame_of, period: int, as_of:
                 value = _atr_of(part, period, skip_idle, as_of)
                 if value is not None:
                     return value, "quoted"
-    except (ValueError, NotImplementedError):
-        pass
+    except (ValueError, NotImplementedError) as exc:
+        logger.debug("No quoted composite for this ATR (%s); using the legs' closes", exc)
     closes = []
     for leg, symbol in zip(legs, symbols):
         part = frame_for(symbol)

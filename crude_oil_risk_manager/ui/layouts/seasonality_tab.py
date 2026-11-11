@@ -6,7 +6,6 @@ see every earlier year plotted against trading days before expiry, with the band
 from COLORS.
 """
 
-from datetime import date
 
 import dash_bootstrap_components as dbc
 import numpy as np
@@ -20,6 +19,7 @@ from core.seasonality import (
     BAND_METHODS, CHEAP, DEFAULT_DAYS, DEFAULT_MONTHS, DEFAULT_RUN_DAYS, DEFAULT_YEARS, DEFAULT_Z, FLAGGED, MAX_DAYS, MAX_YEARS, MEAN_SD,
     NO_DATA, RICH, WATCH, SeasonRow, SeasonTable, StructureSeason,
 )
+from core.clock import london_today
 from ui.layouts.curve_tab import _CARD, _LABEL, _MUTED, _dropdown, _layout, _table, empty_figure
 from ui.layouts.shell import COLORS
 
@@ -203,7 +203,7 @@ STATUS_STYLES = [
 
 def seasonality_layout() -> html.Div:
     product_options = [{"label": p.name, "value": c} for c, p in PRODUCTS.items()]
-    years = list(range(FIRST_CONTRACT_YEAR, date.today().year + 1))
+    years = list(range(FIRST_CONTRACT_YEAR, london_today().year + 1))
     method_options = [{"label": label, "value": key} for key, label in DFLY_METHODS.items()]
 
     def number(component_id, value, low, high, step=1):

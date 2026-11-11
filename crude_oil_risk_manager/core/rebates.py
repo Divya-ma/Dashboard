@@ -14,6 +14,7 @@ replaces the stored realized PnL.
 """
 
 from core.models import Structure, StructureType
+from core.money import cents
 from core.models.structure import parse_structure_type
 
 KEY_REBATE_RATES = "rebate_rates"
@@ -149,4 +150,4 @@ class RebateBook:
     def for_trade(self, structure: Structure, lots: float | None) -> float | None:
         """The rebate of a trade of `lots` (entry and exit): None when the structure has no rate."""
         rate = self.per_side(structure)
-        return None if rate is None else rate * (lots or 0.0) * SIDES_PER_TRADE
+        return None if rate is None else cents(rate * (lots or 0.0) * SIDES_PER_TRADE)

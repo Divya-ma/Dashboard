@@ -16,6 +16,7 @@ from datetime import date, datetime
 import pandas as pd
 
 from core.archive import SNAPSHOT_FIELDS, display_atr, summarize
+from core.clock import london_now
 
 _SNAPSHOT_LABELS = {
     "px_co": "CO price", "px_cl": "CL price", "px_go": "GO price", "move_day": "Day move", "move_min": "1-min move",
@@ -83,7 +84,7 @@ def legs_frame(rows: list[dict]) -> pd.DataFrame:
 
 def summary_frame(rows: list[dict], made_at: datetime | None = None) -> pd.DataFrame:
     stats = summarize(rows)
-    made_at = made_at or datetime.now()
+    made_at = made_at or london_now()
     items = [
         ("Trades", stats["total"]), ("Winners", stats["winners"]), ("Losers", stats["losers"]), ("Win rate (%)", round(stats["win_rate"], 2)),
         ("Win rate with rebates (%)", round(stats["win_rate_rebate"], 2)), ("Rebates ($)", stats["total_rebate"]),

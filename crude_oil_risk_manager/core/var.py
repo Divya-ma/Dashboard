@@ -22,6 +22,7 @@ Low to High (fixed). Both methods work on the symbols as quoted (core.positions.
 price history.
 """
 
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -31,6 +32,8 @@ from core.data_loader import DataLoader
 from core.exceptions import CrudeOilRiskError, InsufficientDataError
 from core.models import Structure
 from core.positions import dollar_weights
+
+logger = logging.getLogger(__name__)
 
 _MIN_SCENARIOS = 20
 
@@ -236,7 +239,7 @@ def save_mc_settings(repository, distribution: str, mean, std, low, high, n_simu
         if repository.get_setting(KEY_VAR_MC, None) != values:
             repository.set_setting(KEY_VAR_MC, values)
     except Exception:  # noqa: BLE001 - remembering the controls is a convenience
-        pass
+        logger.debug("The VaR controls could not be remembered", exc_info=True)
 
 
 def _nearest_correlation_psd(matrix: np.ndarray) -> np.ndarray:

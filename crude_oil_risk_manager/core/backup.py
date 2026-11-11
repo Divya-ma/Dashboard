@@ -25,6 +25,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from core.clock import utc_now
+
 logger = logging.getLogger(__name__)
 
 PREFIX, SUFFIX = "crude_oil_risk_", ".db"
@@ -66,7 +68,7 @@ def _create_backup(db_path: str | Path, folder: str | Path, keep: int = DEFAULT_
     folder.mkdir(parents=True, exist_ok=True)
     for stale in (*folder.glob(f"{PREFIX}*.tmp"), *folder.glob(f"{PREFIX}*.tmp-journal")):  # left by a copy that was cut short
         stale.unlink(missing_ok=True)
-    target = folder / f"{PREFIX}{(now or datetime.now()).strftime('%Y%m%d_%H%M%S')}{SUFFIX}"
+    target = folder / f"{PREFIX}{(now or utc_now()).strftime('%Y%m%d_%H%M%S')}{SUFFIX}"
     temporary = target.with_suffix(".tmp")
     try:
         source = sqlite3.connect(str(db_path), timeout=30)

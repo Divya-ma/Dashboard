@@ -15,6 +15,7 @@ from datetime import date, datetime
 from core.fifo import match_exits
 from core.journal import PRODUCT_LABELS, format_risk_reward, risk_reward, with_defaults
 from core.models import Structure, StructureStatus, Trade, TradeEventType
+from core.money import cents
 from core.pnl import calculate_net_realized_pnl, calculate_structure_transaction_costs
 from core.structure_view import structure_entry_price, structure_exit_price
 
@@ -51,6 +52,7 @@ def _date_or_none(value: datetime | None) -> date | None:
 
 
 def result_for(pnl: float) -> str:
+    pnl = cents(pnl)  # float dust (1e-12) is not a win
     return RESULT_WIN if pnl > 0 else RESULT_LOSS if pnl < 0 else RESULT_FLAT
 
 
@@ -156,7 +158,7 @@ def _exit_row(structure: Structure, match, exits_in_total: int, journal: dict | 
         "entry_price": match.entry_price,
         "exit_price": exit_trade.price,
         "lots": match.lots,
-        "realized_pnl": pnl,
+        "realized_pnl": cents(pnl),
         "transaction_costs": transaction_costs,
         "result": result_for(pnl),
         "notes": structure.notes or "",
@@ -196,7 +198,7 @@ def _closed_structure_row(structure: Structure, trades: list[Trade], journals: d
         "entry_price": structure_entry_price(structure) if structure.legs else None,
         "exit_price": structure_exit_price(structure, trades),
         "lots": entered_lots,
-        "realized_pnl": pnl,
+        "realized_pnl": cents(pnl),
         "transaction_costs": calculate_structure_transaction_costs(trades),
         "result": result_for(pnl),
         "notes": structure.notes or "",
@@ -211,7 +213,7 @@ def with_rebate(row: dict, structure: Structure, rebates) -> dict:
     """Adds the rebate columns: `rebate` (None when the structure has no rate), `pnl_after_rebate` and its Win / Loss / Flat."""
     rebate = rebates.for_trade(structure, row["lots"]) if rebates is not None else None
     row["rebate"] = rebate
-    row["pnl_after_rebate"] = row["realized_pnl"] + (rebate or 0.0)
+    row["pnl_after_rebate"] = cents(row["realized_pnl"] + (rebate or 0.0))
     row["result_after_rebate"] = result_for(row["pnl_after_rebate"])
     return row
 
@@ -268,9 +270,9 @@ def filter_archive_rows(
             continue
         if needle and not any(needle in symbol.lower() for symbol in row["symbols"]):
             continue
-        if pnl_filter == PNL_WINNERS and row["realized_pnl"] < 0:
+        if pnl_filter == PNL_WINNERS and cents(row["realized_pnl"]) < 0:
             continue
-        if pnl_filter == PNL_LOSERS and row["realized_pnl"] > 0:
+        if pnl_filter == PNL_LOSERS and cents(row["realized_pnl"]) > 0:
             continue
         kept.append(row)
     return kept
@@ -278,25 +280,25 @@ def filter_archive_rows(
 
 def summarize(rows: list[dict]) -> dict:
     """Summary stats of a set of rows. Flat trades count in the total but not in the win rate; the *_rebate figures use each trade's PnL plus its rebate."""
-    pnls = [row["realized_pnl"] for row in rows]
+    pnls = [cents(row["realized_pnl"]) for row in rows]
     winners = sum(1 for p in pnls if p > 0)
     losers = sum(1 for p in pnls if p < 0)
     decided = winners + losers
-    after = [row.get("pnl_after_rebate", row["realized_pnl"]) for row in rows]  # the PnL with the rebate added
+    after = [cents(row.get("pnl_after_rebate", row["realized_pnl"])) for row in rows]  # the PnL with the rebate added
     winners_after = sum(1 for p in after if p > 0)
     decided_after = winners_after + sum(1 for p in after if p < 0)
     return {
         "win_rate_rebate": winners_after / decided_after * 100.0 if decided_after else 0.0,
         "winners_rebate": winners_after,
         "decided_rebate": decided_after,
-        "total_rebate": sum(row.get("rebate") or 0.0 for row in rows),
-        "total_pnl_rebate": sum(after),
+        "total_rebate": cents(sum(row.get("rebate") or 0.0 for row in rows)),
+        "total_pnl_rebate": cents(sum(after)),
         "total": len(pnls),
         "winners": winners,
         "losers": losers,
         "win_rate": winners / decided * 100.0 if decided else 0.0,
-        "total_pnl": sum(pnls),
-        "avg_pnl": sum(pnls) / len(pnls) if pnls else 0.0,
+        "total_pnl": cents(sum(pnls)),
+        "avg_pnl": cents(sum(pnls) / len(pnls)) if pnls else 0.0,
         "best": max(pnls) if pnls else 0.0,
         "worst": min(pnls) if pnls else 0.0,
     }

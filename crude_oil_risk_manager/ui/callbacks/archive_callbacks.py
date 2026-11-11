@@ -23,6 +23,7 @@ from core.rebates import RebateBook
 from core.pnl import calculate_net_realized_pnl
 from core.user_settings import KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE
 from ui.container import container
+from core.clock import london_today
 from ui.layouts.archive_editor import MARKET_FIELDS
 from ui.layouts.archive_tab import (
     CARD_STYLE,
@@ -132,7 +133,7 @@ def export_to_excel(n_clicks, rows):
         raise PreventUpdate
     if not rows:
         raise PreventUpdate
-    return dcc.send_bytes(archive_to_excel(rows), f"archive_{date.today().isoformat()}.xlsx")
+    return dcc.send_bytes(archive_to_excel(rows), f"archive_{london_today().isoformat()}.xlsx")
 
 
 BACKFILL_PER_CLICK = 3  # structures per click: each takes six /ohlc/ requests (three for the entry, three for the exit); 30 a minute are allowed

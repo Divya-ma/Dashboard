@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
+from core.clock import london_today
+
 OK, WARN, FAIL, INFO = "ok", "warn", "fail", "info"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 LOW_DISK_BYTES = 1_000_000_000
@@ -141,7 +143,7 @@ def _access(parts) -> list[Check]:
 def collect_health(parts, today: date | None = None) -> list[Check]:
     """Every check, in page order. `parts` carries: repository, backup, live_cache, qh_api, oi_service, churn_service, curve_service,
     app_settings (config.settings)."""
-    today = today or date.today()
+    today = today or london_today()
     checks: list[Check] = []
     for area, function in (
         ("Access", _access), ("Database", _database), ("Backup", _backup), ("API", _api), ("Live prices", _live),

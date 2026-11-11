@@ -42,6 +42,8 @@ Every value carries its age so a stale back-month price is visible, not hidden.
 No cut-off month has to be given for where flies stop being quoted.
 """
 
+import logging
+import logging
 import math
 import threading
 import time
@@ -54,6 +56,8 @@ from core.curve_calendar import (
     DFLY, FAMILY_WEIGHTS, FLY, OUTRIGHT, PRODUCTS, SPREAD, CurveContract, generic_contracts, product_of_symbol, structure_symbol,
 )
 from core.box import outbox_components, price_with_components
+
+logger = logging.getLogger(__name__)
 
 MAX_MONTHS = 36
 FRESH_SECONDS = 86_400.0  # a direct price this young is used as it stands
@@ -490,8 +494,8 @@ class CurveCompare:
                 for symbol, value in self._fallback().items():
                     if symbol in wanted and (symbol not in fair or value[1] >= fair[symbol][1]):
                         fair[symbol] = value
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 - the fallback only fills gaps; without it the fair-value prices still stand
+                logger.debug("The live fallback prices could not be read", exc_info=True)
         book = build_price_book(quotes, fair)
         # Consistent single bases, tried when the mix of everything cannot be combined (see the docstring)
         fair_batch = self._fair_store.prices(needed) if self._fair_store is not None else fair
