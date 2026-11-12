@@ -668,8 +668,10 @@ back, or after a stop-out, move on and take the new fill as the new level. Net p
 positive days and the blow-up rate come from this, day by day. Days with no trading are excluded; an instrument that printed
 nothing on a day counts as a flat day.
 
-**Out of sample.** The target is picked on the first 60% of days; every ranking figure comes from the last 40% (no split with
-fewer than 15 days).
+**Out of sample, in rolling blocks.** The first 40% of the days only pick a target. The last 60% are cut into three blocks,
+oldest first, and each block is scored with the target that was best on all the days before it; every ranking figure is those
+blocks together, so no day helps pick its own target. The target shown for trading now is the best over every day. With fewer
+than 15 trading days stored there is no split: the page then warns that the scores are in sample and flatter every row.
 
 **Costs (`core/churn_costs.py`).** Per lot per side: transaction cost (TC) minus rebate (rebates are **off** by default). A
 structure is charged on its **net position per contract month** (a spread is two lots, a fly four, a d-fly eight; a month two
@@ -677,34 +679,57 @@ structures hold in opposite directions nets down). Default table: CL TC 0.89 (re
 WBS 1.02 (0.70), gasoil 1.05 (0.25); tick values $10 (gasoil $25). Quoted CL/BZ combos use rebates 0.87 / 0.81. The table is
 editable on the page. A target must earn at least the round-trip cost plus a margin ($3 per lot) to be allowed.
 
-**Churn score (0–100)** = 100 × the geometric mean of five 0–1 parts (none taken below 0.05): **edge** (net $ per day per lot,
-ranked among eligible rows; rows that lose money score 0), **hit** (share of ladder trades that reached target), **worse fill**
-(how much of the net per day survives an entry 1 and 2 ticks worse), **stability** (share of positive days), **tail** (1 − blow-up
-rate; blow-up = a day losing more than three stop-outs' worth). A row below `min_volume` (100 lots/day) is shown but not scored.
+**Churn score (−100 to +100, never 0).** A row that **makes money** after costs scores +1 to +100: 100 × the geometric mean of
+five 0–1 parts (none taken below 0.05): **edge** (how sure the profit is: tanh(t / 2), t = net $ per day over its standard error),
+**hit** (share of ladder trades that reached target), **worse fill** (how much of the net per day survives an entry 1 and 2 ticks
+worse), **stability** (share of positive days), **tail** (1 − blow-up rate; blow-up = a day losing more than three stop-outs'
+worth). Every part is on a fixed scale, so a row's score does not change with which other rows are shown. A row that **loses
+money** scores below zero and the size says what to do: if the other side of the same contract makes money the score is *minus
+that side's score*, so **near −100 means FLIP** (churn it the other way); if the other side loses too it is **−1 to −30** by how
+surely this side loses (**AVOID**: neither side works). A loss alone does not mean the other side wins (both pay the costs and the
+spread), which is why the negative score is tied to the other side. A row below `min_volume` is scored like the others, dimmed and
+marked *thin*.
 
-**Tradability (0–100)** does not depend on profit, so every row with enough volume gets one and the least bad is visible: the
-geometric mean of the target's reach (hit rate), trips per day and volume (both ranked among the rows with enough volume) and the
-share of a win left after costs. **Proof** says whether a profit is backed by the earlier days: *Proven* (profitable out of sample
-and on the days the target was picked on), *Recent only* (only on the last days, perhaps a market phase), *Unchecked* (too few days
-to split), *No edge* (loses money). Three more options, tested on the stored candles: **Entry stretch (z)** (default 1: a new price is taken only when it is at least one
-standard deviation on the good side of its last-day average, so the ladder buys dips and sells strength and waits otherwise; 0 = any
-price), **Targets up to ATR share** (default 0.5: also tries bigger targets, up to that share of the daily ATR, so a wide outright
-gets targets that fit its range) and **Best hours only** (default 0 = off: trade only the N London hours whose entries earned most
-on the days the target is picked on, never on the days that score it; it raised the proven count but cut the profitable one, so it is
-left to you). On the stored data: profitable rows 42 -> 60 and rows also profitable on the earlier days 22 -> 38. Defaults were widened after testing on the stored candles: window 120 days (more test days), targets
-up to 15 ticks (the old cap of 6 cut most spreads off), stop 2×. Saved settings that still hold the old defaults take the new ones.
+**In the Score's tooltip:** the verdict and its numbers, then *Proof* (*Proven* = profitable on the scored days and on the first
+days that only picked a target, *Recent only*, *Unchecked* = too few days to split, *No edge*) and *Tradability* (0–100, does not
+depend on profit: reach of the target, trips per day, volume, share of a win left after costs). Three more options: **Entry
+stretch (z)** (default 1: a new price is taken only when it is at least one standard deviation on the good side of its last-day
+average; 0 = any price), **Targets up to ATR share** (default 0.5: also tries bigger targets, up to that share of the daily ATR)
+and **Best hours only** (default 0 = off). Saved settings that still hold the old defaults take the new ones.
 
-**Table columns:** Contract, Live Price, Volume/day, ATR, Cost, Per-lot net profit, Number of oscillations, Score, Tradability,
-Proof, Side, Worse price score. *Oscillations* = from the live price, how many times in the last 5 trading days the market came back to that level
-and then moved the target in the trade's favour, in one day. The Score's colour and tooltip carry the **live verdict** — GO if
+**Table columns:** Contract, Live Price, Volume/day, ATR, Cost, Per-lot net profit, Number of oscillations, Score, Other Side
+Score, Side, Worse price score, Week Range, Month Range. *Oscillations* = from the live price, how many times in the last N trading
+days the market came back to that level and then moved the target in the trade's favour, in one day. *Other Side Score* is the
+score of the opposite side of the same contract. *Week / Month Range* are the low and high of the last 7 and 30 calendar days of
+stored five-minute candles (all hours); the cell's tooltip says where the live price sits in the range and, when fewer days are
+stored than the range asks for, that it covers only those. The Score's colour and tooltip carry the **verdict**: GO (green) if
 the price is not on the bad side of its last-day average (z), volatility is within 0.5–2× usual, the current London hour is not
-clearly weak and the price is fresh; WAIT with reasons otherwise; CLOSED outside your window; none without a price younger than
-2 minutes. Below: worse-fill survival, best hour of the day, and the cost table.
+clearly weak and the price is fresh; WAIT (amber) with reasons otherwise; FLIP (red) and AVOID (grey) for a negative score;
+CLOSED outside your window; none without a price younger than 2 minutes. Six settings are always visible (start-from contract,
+oscillation days, trading hours, margin over cost, minimum volume); the rest sit under *Advanced settings*. Below the table:
+worse-fill survival, best hour of the day and **Your real trades against the simulation** (`core/churn_archive.py`): every round
+trip booked in the app (one exit event = one round trip, with the transaction cost of both sides) on a contract the page
+simulates, on the side you traded it: round trips, lots, days, your win rate, ticks captured and net $ per lot, beside the
+simulation's target, hit rate, net $ per lot and score. One leg is that instrument; two legs of one product (+1 −1) are the
+d-fly of the two flies; a CL leg minus the same BZ leg is the CL-BZ box. Structures on contracts with no candles (BZ or WBS
+alone, expired months) are named, not dropped. A line above the table says whether the simulation is harsher or kinder than
+your results.
+
+**Settings that fit your trades** (under that table, `fit_settings`): the day ladder is run on each contract and side you traded
+*at your own target* (the average ticks of your winning round trips there, with your hours, wait and entry stretch) for spreads
+of 0–3 ticks and stops of 1–5 targets. Per curve, the fit is the spread whose simulated ticks per lot (before costs, so the cost
+table plays no part) come closest to what you captured; the stop is fitted across the curves together. A curve needs 10 round
+trips to be fitted, and a setting is changed only when that brings the simulation more than 0.1 ticks closer (fewer trades than
+that is noise). The share of round trips **held overnight** is shown per curve: the simulation closes every trade at the end of
+your hours, so no spread or stop makes it match trades held for days. **Use the fitted settings** puts the suggestion into the
+settings; nothing is changed until you press it.
 
 **D-flies** have no quote; their candles are derived (`fly(k) − fly(k+1)`, close to close, so extremes inside a candle are not
-seen — a target is slightly harder to hit than on a real instrument) and they are priced with no bid-ask.
-Settings: contracts per family (12), window 60 calendar days, largest target 6 ticks, spreads per family (1 tick; d-fly 0),
-start-from contract (4), oscillation days (5). Candles refresh every 10 minutes while the page is open.
+seen: a target is slightly harder to hit than on a real instrument). Building them from `/taq/` quotes was tested (2026-11-12)
+and dropped: `/taq/` has one row per trade, so the d-fly made from quotes moves over the same range as the one made from
+candles. What decides whether d-flies score is the **D-fly spread** setting (0 = built from the legs with nothing to cross).
+Defaults: contracts per family 12, window 120 calendar days, largest target 15 ticks, spreads per family 1 tick (d-fly 0),
+start-from contract 4, oscillation days 5. Candles refresh every 10 minutes while the page is open.
 
 ### 6.11 Archive and the trade journal
 

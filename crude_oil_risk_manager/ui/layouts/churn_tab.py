@@ -3,8 +3,9 @@
 For every live outright, spread, fly and d-fly of CL, BRN and gasoil and both sides the page simulates the trade you describe
 (cross the spread to enter, a target that covers the transaction cost with a few dollars over, flat by the end of the
 trading day) and ranks them by the churn score of core.churn_service. ONE table holds the ranking and the live part: the
-live price, the number of oscillations of that price level in the chosen range, and the score; the GO / WAIT verdict of the
-live price is the colour and the tooltip of the Score. Below it: what survives a worse entry fill, the best hour of the day
+live price, the number of oscillations of that price level in the chosen range, the signed score (-100 to +100, never 0: a
+strongly negative one means the other side is the churn), the other side's score and the low-high range of the last week
+and month; the verdict (GO / WAIT / FLIP / AVOID) is the colour and the tooltip of the Score. Below it: what survives a worse entry fill, the best hour of the day
 and the cost table (TC, rebates and break-even targets). Colours from COLORS.
 """
 
@@ -47,6 +48,7 @@ PARAM_INPUTS = [
     ("churn-p-atrshare", "Targets up to ATR share", "atr_share", 0.1, "0 = ticks only. Otherwise also try bigger targets up to this share of the daily ATR, so a wide outright gets targets that fit its range"),
     ("churn-p-minvol", "Min volume / day (lots)", "min_volume", 10, "Rows trading less than this are shown but not scored"),
 ]
+MAIN_FIELDS = ("start_from", "osc_days", "window_start", "window_end", "margin", "min_volume")  # the rest sit under Advanced settings
 COST_FIELDS = [("tick_size", "Tick size", 0.01), ("tick_value", "Tick value ($)", 1), ("tc", "TC per side per lot ($)", 0.01), ("rebate", "Rebate per side per lot ($)", 0.01)]
 
 _TWO = Format(precision=2, scheme=Scheme.fixed)
@@ -88,7 +90,13 @@ def churn_controls(params: ChurnParams) -> html.Div:
         _field("Curve", dcc.Dropdown(id="churn-family", options=[{"label": "All", "value": "all"}, *({"label": FAMILY_NAMES[f], "value": f} for f in FAMILIES)], value="all", clearable=False), 2),
         _field("Direction", dcc.Dropdown(id="churn-direction", options=[{"label": "Both", "value": "all"}, {"label": "Long", "value": "long"}, {"label": "Short", "value": "short"}], value="all", clearable=False), 2),
     ], className="g-2")
-    return html.Div([filters, dbc.Row(inputs, className="g-2")], style={**_CARD, "padding": "12px 14px", "borderRadius": "6px", "marginBottom": "10px"})
+    main = [i for i, (_, _, field, _, _) in zip(inputs, PARAM_INPUTS) if field in MAIN_FIELDS]
+    rest = [i for i, (_, _, field, _, _) in zip(inputs, PARAM_INPUTS) if field not in MAIN_FIELDS]
+    advanced = html.Details([
+        html.Summary("Advanced settings: what is downloaded and how the trade is simulated", style={"color": COLORS["TEXT_SECONDARY"], "cursor": "pointer", "fontSize": "13px", "margin": "4px 0 8px"}),
+        dbc.Row(rest, className="g-2"),
+    ], id="churn-advanced")
+    return html.Div([filters, dbc.Row(main, className="g-2"), advanced], style={**_CARD, "padding": "12px 14px", "borderRadius": "6px", "marginBottom": "10px"})
 
 
 def cost_panel(costs, combo, use_rebates: bool = False) -> html.Details:
@@ -135,53 +143,81 @@ def breakeven_table(costs, combo_rebates=None) -> html.Div:
 # ----------------------------------------------------------------------
 
 COLUMN_TIPS = {
-    "contract": "Hover over a contract for its target, the entry fill now, the target price and the net per day.",
+    "contract": "Hover over a contract for its target, the entry fill now, the target price and the net per day. 'thin' = it trades less than your minimum volume.",
     "price": "The live price from the curve poll (a d-fly is its first fly minus the next one). Blank if the poll has no price for it.",
-    "volume_day": "Average volume per day (lots) in the window. Rows below the minimum are not scored.",
+    "volume_day": "Average volume per day (lots) in the window. Rows below the minimum are scored but dimmed and marked thin.",
     "atr": "Daily ATR in points, for information.",
     "cost": "Round-trip transaction cost per lot of the structure: TC on its net lots, both sides (rebates only if switched on).",
     "net_hit": "What one lot earns when the target is reached: the target in dollars minus the round-trip cost.",
     "osc": "How many times, in the chosen range of days, the market came back to the entry level of this trade (the live price, plus half the spread for a long) and then moved the target in the trade's favour within one trading day.",
-    "score": "0-100: geometric mean of edge (net $/day rank among the rows shown), hit probability, worse-price survival, positive days and 1 - blow-up rate, all measured on the last 40% of the days (the target is picked on the first 60%). 0 = not scored: loses money or too thin, hover for the numbers. Green = GO now, amber = WAIT, grey = closed: hover for why.",
-    "tradable": "0-100, does not depend on profit: reach of the target (hit rate), trips per day, volume and the share of a win left after costs, ranked among the rows with enough volume. Shows which contracts are workable even when none has an edge; the Score shows which are proven.",
-    "proof": "Proven = profitable on the last days AND on the earlier days the target was picked on. Recent only = profitable only on the last days (possibly a market phase). Unchecked = too few days to split. No edge = loses money after costs.",
+    "score": "-100 to +100, never 0. ABOVE zero: this side makes money after costs; the higher, the surer (how sure the profit is, hit probability, worse-price survival, positive days, no blow-up days), measured only on days that did not pick the target. BELOW zero: this side loses. Near -100 = FLIP: the other side of the same contract is a strong churn. A small negative (-1 to -30) = AVOID: neither side makes money. Green = GO now, amber = WAIT, red = FLIP, grey = AVOID or closed: hover for the numbers, the proof and the tradability.",
+    "other": "The score of the opposite side of the same contract (the short's on a long row). A negative Score next to a positive one here means: churn it the other way.",
     "side": "long = buy and sell the target above; short = sell and buy back the target below.",
     "worse": "Share of the net $/day that survives an entry fill 1 and 2 ticks worse than planned (average), 0-100%.",
+    "week": "Lowest and highest price of the last 7 calendar days, from the five-minute candles (all hours). Hover over a cell for where the live price sits in it.",
+    "month": "Lowest and highest price of the last 30 calendar days, from the five-minute candles (all hours). If fewer days are stored, the range covers what is stored: hover over a cell.",
 }
 
 COLUMNS = [
     _col("Contract", "contract"), _col("Live Price", "price", _THREE), _col("Volume/day", "volume_day", _INT), _col("ATR", "atr", _TWO), _col("Cost", "cost_rt", _TWO),
-    _col("Per lot Net Profit", "net_hit", _TWO), _col("Number of oscillation", "osc", _INT), _col("Score", "score", _ONE), _col("Tradability", "tradable", _ONE), _col("Proof", "proof"), _col("Side", "direction"),
-    _col("Worse Price Score", "worse_score", _PCT), {"name": "Verdict", "id": "verdict"},
+    _col("Per lot Net Profit", "net_hit", _TWO), _col("Number of oscillation", "osc", _INT), _col("Score", "score", _ONE), _col("Other Side Score", "other_score", _ONE), _col("Side", "direction"),
+    _col("Worse Price Score", "worse_score", _PCT), _col("Week Range (low to high)", "week_range"), _col("Month Range (low to high)", "month_range"),
+    {"name": "Verdict", "id": "verdict"}, {"name": "Thin", "id": "thin"},
 ]
-TIP_KEYS = {"contract": "contract", "price": "price", "volume_day": "volume_day", "atr": "atr", "cost_rt": "cost", "net_hit": "net_hit", "osc": "osc", "score": "score", "tradable": "tradable", "proof": "proof", "direction": "side", "worse_score": "worse"}
+HIDDEN_COLUMNS = ["verdict", "thin"]
+TIP_KEYS = {"contract": "contract", "price": "price", "volume_day": "volume_day", "atr": "atr", "cost_rt": "cost", "net_hit": "net_hit", "osc": "osc", "score": "score", "other_score": "other", "direction": "side",
+            "worse_score": "worse", "week_range": "week", "month_range": "month"}
+
+
+def _range_text(low, high) -> str | None:
+    if not (np.isfinite(low) and np.isfinite(high)):
+        return None
+    return f"{low:.2f} to {high:.2f}"
+
+
+def _range_tip(name: str, days: int, low, high, price, stored_days) -> str:
+    if not (np.isfinite(low) and np.isfinite(high)):
+        return "No candles stored for this range."
+    parts = [f"Last {days} days: low {low:.3f}, high {high:.3f}, a range of {high - low:.3f}."]
+    if np.isfinite(price) and high > low:
+        place = (price - low) / (high - low)
+        where = "below the low" if place < 0 else "above the high" if place > 1 else f"{place:.0%} of the way from the low to the high"
+        parts.append(f"The live price {price:.3f} is {where}.")
+    if np.isfinite(stored_days) and stored_days < days - 1:
+        parts.append(f"Only {stored_days:.0f} days of candles are stored, so this is the range of those. Widen the window (Advanced settings) for the full {name}.")
+    return " ".join(parts)
 
 
 def table_data(table) -> tuple[list[dict], list[dict]]:
     """(rows, tooltips) of the merged table from core.churn_service.ChurnService.live_table."""
     rows, tips = [], []
     for r in table.itertuples():
+        thin = bool(getattr(r, "thin", False))
         rows.append({
-            "contract": f"{r.product} {FAMILY_NAMES[r.family]} {r.label}", "price": _num(r.price, 3), "volume_day": _num(r.volume_day, 0), "atr": _num(r.atr, 2), "cost_rt": _num(r.cost_rt),
-            "net_hit": _num(r.net_hit), "osc": None if not np.isfinite(r.osc) else int(r.osc), "score": _num(r.score, 1), "tradable": _num(r.tradable, 1), "proof": r.proof, "direction": r.direction, "worse_score": _num(r.worse_score, 4),
-            "verdict": r.verdict,
+            "contract": f"{r.product} {FAMILY_NAMES[r.family]} {r.label}" + (" · thin" if thin else ""), "price": _num(r.price, 3), "volume_day": _num(r.volume_day, 0), "atr": _num(r.atr, 2), "cost_rt": _num(r.cost_rt),
+            "net_hit": _num(r.net_hit), "osc": None if not np.isfinite(r.osc) else int(r.osc), "score": _num(r.score, 1), "other_score": _num(r.other_score, 1), "direction": r.direction, "worse_score": _num(r.worse_score, 4),
+            "week_range": _range_text(r.week_low, r.week_high), "month_range": _range_text(r.month_low, r.month_high), "verdict": r.verdict, "thin": "yes" if thin else "no",
         })
         levels = (f"Target {int(r.target)} ticks: enter about {r.entry:.3f}, exit {r.target_price:.3f}. " if np.isfinite(r.entry) else f"Target {int(r.target)} ticks. ")
+        extra = f" Proof: {r.proof}. Tradability {r.tradable:.0f}/100 (reach of the target, trips per day, volume, share of a win left after costs)."
         tips.append({
-            "contract": {"value": levels + f"Net per day in the window: ${r.net_day:.2f} per lot." + (f" Trades only at {r.hours} London." if getattr(r, "hours", "") else ""), "type": "text"},
-            "score": {"value": f"{r.verdict}: {r.reason}", "type": "text"},
+            "contract": {"value": levels + f"Net per day on the scored days: ${r.net_day:.2f} per lot." + (f" Trades only at {r.hours} London." if getattr(r, "hours", "") else ""), "type": "text"},
+            "score": {"value": f"{r.verdict}: {r.reason}" + extra, "type": "text"},
+            "week_range": {"value": _range_tip("week", 7, r.week_low, r.week_high, r.price, r.range_days), "type": "text"},
+            "month_range": {"value": _range_tip("month", 30, r.month_low, r.month_high, r.price, r.range_days), "type": "text"},
         })
     return rows, tips
 
 
 def table_styles() -> list[dict]:
-    styles = [{"if": {"column_id": "score", "filter_query": f'{{verdict}} = "{name}"'}, "color": color, "fontWeight": "bold"} for name, color in (("GO", "#3cb371"), ("WAIT", "#f5a623"))]
+    verdicts = (("GO", "#3cb371"), ("WAIT", "#f5a623"), ("FLIP", COLORS["ACCENT_RED"]), ("AVOID", COLORS["TEXT_SECONDARY"]), ("CLOSED", COLORS["TEXT_SECONDARY"]))
+    styles = [{"if": {"column_id": "score", "filter_query": f'{{verdict}} = "{name}"'}, "color": color, "fontWeight": "bold"} for name, color in verdicts]
     return [
+        {"if": {"filter_query": '{thin} = "yes"'}, "opacity": 0.55},
+        *({"if": {"column_id": column}, "whiteSpace": "nowrap"} for column in ("week_range", "month_range")),
         *styles,
-        {"if": {"column_id": "score", "filter_query": "{score} = 0"}, "color": COLORS["TEXT_SECONDARY"]},
-        {"if": {"column_id": "proof", "filter_query": '{proof} = "Proven"'}, "color": "#3cb371", "fontWeight": "bold"},
-        {"if": {"column_id": "proof", "filter_query": '{proof} = "Recent only"'}, "color": "#f5a623"},
-        {"if": {"column_id": "proof", "filter_query": '{proof} = "No edge"'}, "color": COLORS["TEXT_SECONDARY"]},
+        {"if": {"column_id": "other_score", "filter_query": "{other_score} > 0"}, "color": "#3cb371"},
+        {"if": {"column_id": "other_score", "filter_query": "{other_score} < 0"}, "color": COLORS["TEXT_SECONDARY"]},
         {"if": {"column_id": "osc", "filter_query": "{osc} = 0"}, "color": COLORS["TEXT_SECONDARY"]},
         {"if": {"column_id": "net_hit", "filter_query": "{net_hit} < 0"}, "color": COLORS["ACCENT_RED"]},
     ]
@@ -190,7 +226,7 @@ def table_styles() -> list[dict]:
 def churn_table():
     """The one table of the page. It stays in the layout and only its data is replaced, so the sorting you chose survives a refresh."""
     table = _table("churn-table", COLUMNS, [], table_styles(), page_size=40)
-    table.hidden_columns = ["verdict"]
+    table.hidden_columns = list(HIDDEN_COLUMNS)
     table.tooltip_header = {column: {"value": COLUMN_TIPS[tip], "type": "text"} for column, tip in TIP_KEYS.items()}
     table.tooltip_delay = 0
     table.tooltip_duration = None
@@ -240,6 +276,99 @@ def build_session_figure(sessions) -> go.Figure:
     return figure
 
 
+ARCHIVE_COLUMNS = [
+    _col("Contract", "contract"), _col("Side", "direction"), _col("Round trips", "trips", _INT), _col("Lots", "lots", _INT), _col("Days", "days", _INT),
+    _col("Your win rate", "win_rate", _PCT), _col("Your ticks / lot", "ticks", _TWO), _col("Your net $ / lot", "net_lot", _TWO),
+    _col("Sim target (ticks)", "sim_target", _INT), _col("Sim hit rate", "sim_hit", _PCT), _col("Sim net $ / lot", "sim_net_trade", _TWO), _col("Sim score", "sim_score", _ONE),
+]
+ARCHIVE_TIPS = {
+    "trips": "Exits booked in the app for this contract and side (a partial or a full exit at one price is one round trip).",
+    "days": "Trading days (London) with at least one exit.",
+    "win_rate": "Share of your round trips that made money after the transaction cost of both sides.",
+    "ticks": "Average move you captured per lot, in ticks, before costs.",
+    "net_lot": "Your booked P&L minus the transaction cost of both sides (as recorded on the trades, so the full TC without rebates), per lot per round trip.",
+    "sim_target": "The target the simulation would trade now on this contract and side.",
+    "sim_hit": "Share of the simulated trades that reached their target (scored days only).",
+    "sim_net_trade": "What the simulation expects per lot per trade after costs, on the scored days. Compare with 'Your net $ / lot'.",
+    "sim_score": "The Churn score of this contract and side.",
+}
+
+
+def _usd(value: float, digits: int = 0) -> str:
+    return f"{'-' if value < 0 else ''}${abs(value):,.{digits}f}"
+
+
+def archive_section(comparison, unmatched: list[str]) -> html.Div:
+    """The 'your real trades against the simulation' table with a one-line reading above it."""
+    if comparison is None or comparison.empty:
+        note = "No closed round trip in the app is on a contract the simulation holds yet."
+        if unmatched:
+            note += f" Traded but not simulated (no candles): {', '.join(unmatched[:8])}{' ...' if len(unmatched) > 8 else ''}."
+        return html.Div(note, style=_MUTED)
+    rows = [{
+        "contract": f"{r.product} {r.label}" if r.label else f"{r.name} (not simulated)", "direction": r.direction, "trips": int(r.trips), "lots": _num(r.lots, 0), "days": int(r.days),
+        "win_rate": _num(r.win_rate, 4), "ticks": _num(r.ticks), "net_lot": _num(r.net_lot), "sim_target": _num(r.sim_target, 0), "sim_hit": _num(r.sim_hit, 4),
+        "sim_net_trade": _num(r.sim_net_trade), "sim_score": _num(r.sim_score, 1),
+    } for r in comparison.itertuples()]
+    matched = comparison[comparison["sim_net_trade"].notna()]
+    lines = [f"{int(comparison['trips'].sum())} round trips on {len(comparison)} contract sides: you netted {_usd(comparison['gross'].sum() - comparison['cost'].sum())} "
+             f"({_usd(comparison['gross'].sum())} booked, {_usd(comparison['cost'].sum())} transaction cost at the full TC)."]
+    if len(matched):
+        yours = (matched["gross"].sum() - matched["cost"].sum()) / matched["lots"].sum()
+        sim = float((matched["sim_net_trade"] * matched["lots"]).sum() / matched["lots"].sum())
+        gap = "The simulation is harsher than your results: its assumptions (spread paid, stop, target) cost more than you actually pay." if yours > sim + 1 else \
+              "The simulation is kinder than your results: treat its scores as optimistic." if yours < sim - 1 else "The simulation is in line with your results."
+        lines.append(f"On the {len(matched)} it also simulates you made {_usd(yours, 2)} per lot per round trip; the simulation expects {_usd(sim, 2)}. {gap}")
+    if unmatched:
+        lines.append(f"Traded but not simulated (no candles for them): {', '.join(unmatched[:8])}{' ...' if len(unmatched) > 8 else ''}.")
+    table = _table("churn-archive-table", ARCHIVE_COLUMNS, rows, [
+        {"if": {"column_id": "net_lot", "filter_query": "{net_lot} < 0"}, "color": COLORS["ACCENT_RED"]},
+        {"if": {"column_id": "net_lot", "filter_query": "{net_lot} > 0"}, "color": "#3cb371"},
+        {"if": {"column_id": "sim_net_trade", "filter_query": "{sim_net_trade} < 0"}, "color": COLORS["ACCENT_RED"]},
+        {"if": {"column_id": "sim_net_trade", "filter_query": "{sim_net_trade} > 0"}, "color": "#3cb371"},
+    ], page_size=15)
+    table.tooltip_header = {column: {"value": text, "type": "text"} for column, text in ARCHIVE_TIPS.items()}
+    table.tooltip_delay = 0
+    table.tooltip_duration = None
+    return html.Div([html.Div(" ".join(lines), style={**_MUTED, "marginBottom": "8px"}), table])
+
+
+FIT_INPUTS = {"spread_outright": "churn-p-sp-out", "spread_spread": "churn-p-sp-spr", "spread_fly": "churn-p-sp-fly", "spread_dfly": "churn-p-sp-dfly", "stop_mult": "churn-p-stop"}  # setting: its input
+FIT_LABELS = {"spread_outright": "Outright spread", "spread_spread": "Spread spread", "spread_fly": "Fly spread", "spread_dfly": "D-fly spread", "stop_mult": "Stop"}
+
+
+def fit_section(fit: dict | None) -> html.Div:
+    """The calibration in words: per traded curve what you captured against the simulation at your own target, and the
+    settings that bring the two closest (core.churn_archive.fit_settings)."""
+    if not fit:
+        return html.Div()
+    lines = []
+    for f in fit["families"]:
+        name, now = FAMILY_NAMES[f["family"]], f["spread_now"]
+        head = f"{name}: {f['trips']} round trip{'s' if f['trips'] != 1 else ''}, {f['overnight']:.0%} held overnight. You captured {f['ticks']:+.2f} ticks per lot per round trip (average target {f['target']:.1f} ticks); "
+        if not f["fitted"]:
+            text = head + f"the simulation at that target gives {f['sim_now']:+.2f} with your {now:g}-tick spread. Too few round trips to fit a spread (10 are needed)."
+        elif f["spread_fit"] != now:
+            text = head + f"the simulation at that target gives {f['sim_now']:+.2f} with your {now:g}-tick spread and {f['sim_fit']:+.2f} with a {f['spread_fit']:g}-tick spread: use {f['spread_fit']:g}."
+        else:
+            text = head + f"the simulation at that target gives {f['sim_fit']:+.2f} with your {now:g}-tick spread, which no other spread beats by a clear margin: keep it."
+        if f["overnight"] >= 0.5:
+            text += " You hold most of these past the day; the simulation closes every trade at the end of your hours, so no spread or stop makes it match them."
+        lines.append(html.Li(text))
+    if any(f["fitted"] for f in fit["families"]):
+        lines.append(html.Li(f"Stop: {fit['stop_fit']:g} target{'s' if fit['stop_fit'] != 1 else ''} fits your results better than your {fit['stop_now']:g}." if fit["stop_fit"] != fit["stop_now"]
+                             else f"Stop: your {fit['stop_now']:g} target{'s' if fit['stop_now'] != 1 else ''} fit{'s' if fit['stop_now'] == 1 else ''} as well as any other; keep it."))
+    changes = ", ".join(f"{FIT_LABELS[name]} {value:g}" for name, value in fit["changes"].items())
+    close = (f"Suggested: {changes}. The button below puts these into the settings; the table is then rebuilt with them." if changes else "Nothing to change: your settings are already the closest fit.") + \
+        " This is fitted on few round trips and only the stored candles, so look again as trades build up."
+    return html.Div([
+        html.Div("Settings that fit your trades", style={"color": COLORS["TEXT_PRIMARY"], "fontWeight": 600, "fontSize": "13px", "margin": "12px 0 4px"}),
+        html.Div("The simulation run on each contract and side you traded, at your own target, for a range of spreads and stops; the fit is the setting whose ticks per lot (before costs) come closest to what you captured.", style=_MUTED),
+        html.Ul(lines, style={**_MUTED, "margin": "6px 0", "paddingLeft": "18px"}),
+        html.Div(close, style=_MUTED),
+    ], id="churn-fit-text")
+
+
 def churn_layout() -> html.Div:
     service = container.churn_service
     params = service.params() if service is not None else ChurnParams()
@@ -270,4 +399,11 @@ def churn_layout() -> html.Div:
         ]),
         html.H6("Best session", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "22px"}),
         dcc.Graph(id="churn-session-chart", figure=empty_figure("Loading"), config={"displayModeBar": False}, style={"height": "380px"}),
+        html.H6("Your real trades against the simulation", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "22px"}),
+        html.Div("Every round trip booked in the app (open positions and the Archive) on a contract this page simulates, on the side you traded it, beside what the simulation expects there. "
+                 "If the two disagree, the simulation's assumptions are off for you, not your trading.", style={**_MUTED, "marginBottom": "8px"}),
+        html.Div(id="churn-archive"),
+        dcc.Store(id="churn-fit"),
+        html.Div(dbc.Button("Use the fitted settings", id="churn-fit-apply", size="sm", color="secondary", outline=True), id="churn-fit-box", style={"display": "none"}),
+        html.Div(id="churn-fit-msg", style={**_MUTED, "marginTop": "6px"}),
     ], style={"paddingTop": "4px"})

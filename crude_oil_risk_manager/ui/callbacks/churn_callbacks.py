@@ -15,10 +15,11 @@ from dash import Input, Output, State, callback_context, html, no_update
 from dash.exceptions import MissingCallbackContextException
 
 from core.churn_costs import DEFAULT_COMBO_REBATES, DEFAULT_COSTS, validate_combo, validate_costs
+from core.churn_engine import FOLDS
 from core.churn_service import validate_params
 from ui.container import container
 from ui.layouts.churn_tab import (
-    COST_FIELDS, PARAM_INPUTS, breakeven_table, build_session_figure, build_worse_fill_figures, table_data,
+    COST_FIELDS, FIT_INPUTS, FIT_LABELS, PARAM_INPUTS, archive_section, breakeven_table, build_session_figure, build_worse_fill_figures, fit_section, table_data,
 )
 from ui.layouts.curve_tab import empty_figure
 from ui.layouts.shell import COLORS
@@ -71,6 +72,15 @@ def update_status(n_intervals, n_clicks, current_version=None):
     return status_text(status), version
 
 
+def _split_note(rows) -> str:
+    """Whether the scores are out of sample, in words, from the rows' own figures."""
+    if "split" in rows and bool(rows["split"].any()):
+        return (f"Scores come from the last {int(rows['days'].max())} trading days in {FOLDS} rolling blocks, each scored with the target that was best on the days before it; "
+                "the first 40% of the days only pick a target.")
+    return ("⚠️ Fewer than 15 trading days of candles are stored, so the target is picked on the same days it is scored on and the scores flatter every row: "
+            "widen 'Window (calendar days)' under Advanced settings.")
+
+
 def render_churn(version, product, family, direction, _costs_version, *param_values):
     """(note, contract options, contract value, params, session chart). Builds the simulation if it is not built yet."""
     service = container.churn_service
@@ -94,11 +104,12 @@ def render_churn(version, product, family, direction, _costs_version, *param_val
     for column, value in (("product", product), ("family", family), ("direction", direction)):
         if value and value != "all":
             shown = shown[shown[column] == value]
-    options = [{"label": f"#{n}  {r.product} {r.label} {r.direction} (score {r.score:.0f})", "value": f"{r.symbol}|{r.direction}"} for n, r in enumerate(shown.itertuples(), 1)]
+    options = [{"label": f"#{n}  {r.product} {r.label} {r.direction} (score {r.score:+.0f})", "value": f"{r.symbol}|{r.direction}"} for n, r in enumerate(shown.itertuples(), 1)]
     note = html.Div(
         f"Five-minute candles to {results.as_of}, a {params.window_days}-day window; contracts from #{params.start_from} onwards. Trades enter by crossing the spread, aim for a target above the fill, stop out at {params.stop_mult:g} targets and are closed at {params.window_end:g}:00 London "
-        f"(trading hours {params.window_start:g}:00 to {params.window_end:g}:00). Scores use the last 40% of the days; the target was picked on the first 60%. Figures are per lot after transaction cost. "
-        "Spread width is an assumption you set above until it is measured from quotes; d-flies are priced from their legs with no spread. "
+        f"(trading hours {params.window_start:g}:00 to {params.window_end:g}:00). {_split_note(rows)} Figures are per lot after transaction cost. "
+        "The Score runs from -100 to +100: above zero this side makes money, near -100 the OTHER side is the churn (flip it), a small negative means neither side works. "
+        "The bid-ask spread of each curve is an assumption you set under Advanced settings (the d-fly one decides whether d-flies score at all). "
         "The oscillation count and the live price refresh every 10 seconds. Hover over a heading for what it means.")
     return note, options, (options[0]["value"] if options else None), asdict(params), build_session_figure(service.sessions(rows, results.details))
 
@@ -138,6 +149,38 @@ def render_table(_n, params_dict, _version, product, family, direction):
     if table.empty:
         return [], []
     return table_data(table)
+
+
+_HIDDEN = {"display": "none"}
+_FIT_BOX = {"display": "block", "margin": "8px 0 4px"}
+
+
+def render_archive(params_dict, _version, _costs_version):
+    """(your real round trips beside the simulation and the settings that fit them, the suggested changes, the button's style).
+    Reads the book and the built simulation; never builds it."""
+    service = container.churn_service
+    if service is None or not params_dict:
+        return no_update, no_update, no_update
+    try:
+        params = validate_params(params_dict)
+        section = archive_section(*service.archive_comparison(params))
+    except Exception:  # noqa: BLE001
+        logger.exception("Churn archive comparison failed")
+        return html.Div("Could not compare with your trades; see the log.", style=_ERROR), None, _HIDDEN
+    try:
+        fit = service.calibration(params)
+    except Exception:  # noqa: BLE001 - the comparison is still shown
+        logger.exception("Churn calibration failed")
+        fit = None
+    changes = (fit or {}).get("changes") or None
+    return html.Div([section, fit_section(fit)]), changes, (_FIT_BOX if changes else _HIDDEN)
+
+
+def apply_fit(n_clicks, changes):
+    """Put the fitted settings into their inputs (the ranking then rebuilds itself, as after any edit)."""
+    if not n_clicks or not changes:
+        return (*[no_update] * len(FIT_INPUTS), no_update)
+    return (*[changes.get(name, no_update) for name in FIT_INPUTS], "Applied: " + ", ".join(f"{FIT_LABELS[name]} {value:g}" for name, value in changes.items()) + ". The table is being rebuilt with them.")
 
 
 def save_costs_callback(n_clicks, *values):
@@ -207,6 +250,23 @@ def register_churn_callbacks(app) -> None:
         Input("churn-params", "data"),
         Input("churn-version", "data"),
     )(render_detail)
+
+    app.callback(
+        Output("churn-archive", "children"),
+        Output("churn-fit", "data"),
+        Output("churn-fit-box", "style"),
+        Input("churn-params", "data"),
+        Input("churn-version", "data"),
+        Input("churn-costs-version", "data"),
+    )(render_archive)
+
+    app.callback(
+        *(Output(component_id, "value") for component_id in FIT_INPUTS.values()),
+        Output("churn-fit-msg", "children"),
+        Input("churn-fit-apply", "n_clicks"),
+        State("churn-fit", "data"),
+        prevent_initial_call=True,
+    )(apply_fit)
 
     app.callback(
         Output("churn-costs-msg", "children"),

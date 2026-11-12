@@ -20,9 +20,12 @@ hit probability, positive days and the blow-up rate come from this, day by day.
 EVERY ENTRY, for the live verdict: each candle close in the window as a possible entry, independent of the others. The
 hit probability and net per trade after entries made at a given hour or in a given price state.
 
-OUT OF SAMPLE. Choosing the best target on the same days it is scored on flatters it. The first 60% of the days pick the
-target; the figures that rank the contract (net per day, positive days, hit probability, worse-fill survival) come from
-the last 40% only. With fewer than 15 days there is no split.
+OUT OF SAMPLE, IN ROLLING BLOCKS. Choosing the best target on the same days it is scored on flatters it. The first 40% of
+the days only pick a target. The last 60% are cut into three blocks, oldest first; each block is scored with the target
+that was best on ALL the days before it. The figures that rank the contract (net per day, positive days, hit probability,
+worse-fill survival) are those blocks together, so they rest on more days than one split would give and never on a day
+that helped pick its own target. The target shown for trading now is the one that is best over every day. With fewer than
+15 days there is no split (the figures are then in sample, and the page says so).
 
   worse fill      the same with every entry fill 1, 2, 3 ticks above the level (below it for a short)
   blow-up rate    share of days that lost more than three stop-outs' worth
@@ -51,7 +54,8 @@ WORSE_FILLS = (0, 1, 2, 3)
 MIN_TRIALS = 50
 MIN_DAYS = 5
 SPLIT_MIN_DAYS = 15
-TRAIN_SHARE = 0.6
+TRAIN_SHARE = 0.4  # the first days, which only pick a target
+FOLDS = 3  # blocks the remaining days are scored in
 STATES = ("favourable", "neutral", "against")
 STATE_Z = 1.0  # |z| at which a state starts
 BIG = 1 << 60
@@ -351,16 +355,51 @@ class Result:
     pos_days: float
     worst_day: float
     blowup: float  # share of days that lost more than BLOWUP_STOPS stop-outs' worth
+    tstat: float = 0.0  # net per day over its standard error: how sure the sign of the net is (capped at +-T_CAP)
 
 
-def result_of(arrays: DayArrays, days: slice, target: int, worse: int, stop_loss_usd: float) -> Result | None:
+T_CAP = 20.0
+
+
+def t_stat(total: np.ndarray) -> float:
+    """Mean of the daily nets over its standard error, capped. Days that are all alike give the cap with the mean's sign."""
+    mean = float(total.mean())
+    spread = float(total.std(ddof=1)) if len(total) > 1 else 0.0
+    if spread <= 1e-12:
+        return float(np.sign(mean) * T_CAP)
+    return float(np.clip(mean / (spread / np.sqrt(len(total))), -T_CAP, T_CAP))
+
+
+def result_of(arrays: DayArrays, days: slice, target: int, worse: int, stop_loss_usd) -> Result | None:
+    """`stop_loss_usd` is one number, or one per day of `arrays` (the rolling blocks use different targets)."""
     total, trades, wins, stops = (a[days] for a in (arrays.total, arrays.trades, arrays.wins, arrays.stops))
     if len(total) == 0 or trades.sum() == 0:
         return None
+    limit = stop_loss_usd[days] if isinstance(stop_loss_usd, np.ndarray) else stop_loss_usd
     return Result(
         target, worse, int(len(total)), int(trades.sum()), float(wins.sum() / trades.sum()), float(trades.mean()), float(wins.mean()), float(stops.mean()),
-        float(total.sum() / trades.sum()), float(total.mean()), float((total > 0).mean()), float(total.min()), float((total < -BLOWUP_STOPS * stop_loss_usd).mean()),
+        float(total.sum() / trades.sum()), float(total.mean()), float((total > 0).mean()), float(total.min()), float((total < -BLOWUP_STOPS * limit).mean()),
+        t_stat(total),
     )
+
+
+def folds_of(n_days: int) -> list[tuple[int, int]]:
+    """(first day, day after the last) of each scored block; empty when there are too few days to split."""
+    if n_days < SPLIT_MIN_DAYS:
+        return []
+    first = int(round(n_days * TRAIN_SHARE))
+    edges = np.unique(np.round(np.linspace(first, n_days, FOLDS + 1)).astype(int))
+    return [(int(a), int(b)) for a, b in zip(edges[:-1], edges[1:])]
+
+
+def stitch(runs: dict[int, DayArrays], picks: list[tuple[int, int, int]]) -> DayArrays:
+    """One DayArrays over all days: each (first, end, target) block taken from that target's run; days in no block stay zero."""
+    n = len(next(iter(runs.values())).total)
+    out = DayArrays(np.zeros(n), np.zeros(n, dtype=int), np.zeros(n, dtype=int), np.zeros(n, dtype=int))
+    for first, end, target in picks:
+        for name in ("total", "trades", "wins", "stops"):
+            getattr(out, name)[first:end] = getattr(runs[target], name)[first:end]
+    return out
 
 
 @dataclass
@@ -467,7 +506,8 @@ def analyse(bars: pd.DataFrame, spec: InstrumentSpec, direction: str, targets: l
         return None
 
     n_days = len(calendar)
-    split = int(round(n_days * TRAIN_SHARE)) if n_days >= SPLIT_MIN_DAYS else 0
+    folds = folds_of(n_days)
+    split = folds[0][0] if folds else 0
     train, test = slice(0, split) if split else slice(0, n_days), slice(split, n_days)
     hours = {t: hours_for(ctx, t, settings.stop_mult * t, spec.half_spread, spec.tick_value, spec.cost_rt, train.stop, settings.best_hours) for t in allowed}
 
@@ -482,19 +522,29 @@ def analyse(bars: pd.DataFrame, spec: InstrumentSpec, direction: str, targets: l
     grid = {t: r for t, r in grid.items() if r is not None}
     if not grid:
         return None
-    best = max(grid, key=lambda t: float(runs[t].total[train].mean()))
-    worse = {0: result_of(runs[best], test, best, 0, stop_loss(best))}
+
+    def pick(days: slice) -> int:
+        return max(grid, key=lambda t: float(runs[t].total[days].mean()))
+
+    best = pick(slice(0, n_days))  # the target to trade now: best over every day
+    picks = [(a, b, pick(slice(0, a))) for a, b in folds] or [(0, n_days, best)]  # each block: the best target on the days before it
+    limits = np.zeros(n_days)
+    for a, b, t in picks:
+        limits[a:b] = stop_loss(t)
+    worse = {0: result_of(stitch(runs, picks), test, best, 0, limits)}
     for k in WORSE_FILLS[1:]:
-        worse[k] = result_of(ladder(best, k), test, best, k, stop_loss(best))
+        shifted = {t: ladder(t, k) for t in {t for _, _, t in picks}}
+        worse[k] = result_of(stitch(shifted, picks), test, best, k, limits)
     if worse[0] is None:
         return None
     worse = {k: r for k, r in worse.items() if r is not None}
+    first_pick = picks[0][2]
     trials = simulate(ctx, best, settings.stop_mult * best, spec.half_spread, 0)
     mask = _window_mask(bars, settings, calendar)
     volume = bars["volume"].fillna(0).to_numpy(float)[mask]
     path = Path(bars["high"].to_numpy(float)[mask], bars["low"].to_numpy(float)[mask], ctx.start, ctx.end)
     return {
-        "spec": spec, "direction": direction, "best": best, "grid": grid, "worse": worse, "insample": result_of(runs[best], train, best, 0, stop_loss(best)),
+        "spec": spec, "direction": direction, "best": best, "grid": grid, "worse": worse, "insample": result_of(runs[first_pick], train, first_pick, 0, stop_loss(first_pick)), "picks": picks,
         "entry": entry_stats(ctx, trials, spec.tick_value, spec.cost_rt), "bars_per_day": ctx.bars_per_day, "path": path, "volume_day": float(volume.sum()) / len(calendar),
         "active": float((volume > 0).mean()), "last_ts": ctx.ts[-1], "stop_loss_usd": stop_loss(best), "test_days": int(test.stop - test.start), "split": bool(split),
         "hours": None if hours[best] is None else sorted({int(h) for h in np.floor(ctx.hour[hours[best]])}),

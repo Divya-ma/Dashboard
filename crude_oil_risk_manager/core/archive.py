@@ -290,6 +290,7 @@ def summarize(rows: list[dict]) -> dict:
     return {
         "win_rate_rebate": winners_after / decided_after * 100.0 if decided_after else 0.0,
         "winners_rebate": winners_after,
+        "losers_rebate": decided_after - winners_after,
         "decided_rebate": decided_after,
         "total_rebate": cents(sum(row.get("rebate") or 0.0 for row in rows)),
         "total_pnl_rebate": cents(sum(after)),

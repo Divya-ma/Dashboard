@@ -154,14 +154,17 @@ def _live_row(r, inside=True, price=(70.00, None), params=None):
     return ChurnService._row_live(r, make_spec(), detail, price, STATS, NOW.timestamp(), 12, inside, params or ChurnParams())
 
 
-def test_a_row_with_no_score_says_why_in_plain_words():
-    losing = _live_row(_row(score=0.0, net_day=-18.7, hit_prob=0.2))
-    assert losing["verdict"] == "NOT SCORED" and "loses $19 per lot a day over the last 8 days" in losing["reason"]
+def test_a_negative_score_says_flip_or_avoid_and_why_in_plain_words():
+    losing = _live_row(_row(score=-12.0, net_day=-18.7, hit_prob=0.2, other_net_day=-4.0, flip=False))
+    assert losing["verdict"] == "AVOID" and "Neither side makes money" in losing["reason"] and "loses $19 per lot a day over the 8 scored days" in losing["reason"]
     assert "3.0 wins a day at +$18.20 against 1.0 stop-outs a day at -$62.00" in losing["reason"] and "needs 77% of trades to win, it got 20%" in losing["reason"]
-    thin = _live_row(_row(score=0.0, volume_day=12.0))
-    assert "only 12 lots a day" in thin["reason"] and "minimum 100" in thin["reason"]
-    parts = _live_row(_row(score=0.0, net_day=5.0, pos_days=0.4))
-    assert "makes money but a part of the score is zero" in parts["reason"]
+    assert "The short side loses $4 a day too" in losing["reason"]
+    flip = _live_row(_row(score=-83.0, net_day=-18.7, hit_prob=0.2, other_net_day=41.0, flip=True))
+    assert flip["verdict"] == "FLIP" and "Churn the short side instead: it scores +83 and makes $41 per lot a day" in flip["reason"]
+    assert _live_row(_row("short", score=-83.0, net_day=-18.7, other_net_day=41.0, flip=True))["reason"].startswith("Churn the long side instead")
+    thin = _live_row(_row(volume_day=12.0, thin=True))
+    assert thin["verdict"] in ("GO", "WAIT") and thin["thin"] and "Thin: only 12 lots a day" in thin["reason"] and "minimum 100" in thin["reason"]
+    assert not _live_row(_row())["thin"]
 
 
 def test_a_scored_row_outside_your_hours_is_closed_and_a_recent_only_profit_is_flagged():
@@ -170,7 +173,9 @@ def test_a_scored_row_outside_your_hours_is_closed_and_a_recent_only_profit_is_f
     assert closed["osc"] == 1  # still worked out: the market was at the entry level (70.005), then 2 ticks higher, on one day
     lucky = _live_row(_row(insample_net_day=-6.0))
     assert lucky["verdict"] in ("GO", "WAIT") and "Caution: it lost $6 per lot a day on the earlier days" in lucky["reason"]
-    assert "Caution" not in _live_row(_row(insample_net_day=4.0))["reason"] and "Caution" not in _live_row(_row(insample_net_day=-6.0, split=False))["reason"]
+    assert "Caution" not in _live_row(_row(insample_net_day=4.0))["reason"]
+    unsplit = _live_row(_row(insample_net_day=-6.0, split=False))["reason"]
+    assert "earlier days" not in unsplit and "only 8 trading days of candles, too few to split" in unsplit
     assert np.isnan(_live_row(_row(), price=None)["osc"])
 
 
@@ -232,9 +237,9 @@ def test_every_contract_is_simulated_but_only_those_from_the_start_are_shown(ser
     assert set(results.rows["position"]) == {1, 2, 3, 4}  # the front contracts are simulated too
     shown = service.scored(ChurnParams(contracts=4, start_from=3, min_volume=1, min_z=0.0, atr_share=0.0))  # same simulation: the start is a view setting
     assert set(shown["position"]) == {3, 4} and not shown.empty
-    everything = service.scored(PARAMS).set_index(["symbol", "direction"])["score"]  # the edge part ranks among the rows shown
+    everything = service.scored(PARAMS).set_index(["symbol", "direction"])["score"]  # every part is on a fixed scale:
     later = shown.set_index(["symbol", "direction"])["score"]
-    assert not np.allclose(everything.loc[later.index], later)
+    assert np.allclose(everything.loc[later.index], later)  # a row's score does not depend on which other rows are shown
 
 
 def test_positions_count_from_the_front_within_each_curve(service):
@@ -258,24 +263,45 @@ def test_dflies_are_ranked_with_the_dfly_cost_and_no_spread(service):
 
 def test_the_figures_that_rank_a_row_are_out_of_sample(service):
     row = service.results(PARAMS).rows.iloc[0]
-    assert row["split"] and row["days"] == 6 and np.isfinite(row["insample_net_day"])  # 15 weekdays: the last 40% are scored
+    assert row["split"] and row["days"] == 9 and np.isfinite(row["insample_net_day"]) and np.isfinite(row["tstat"])  # 15 weekdays: the last 60% are scored
 
 
-def test_thin_contracts_are_shown_but_not_scored(service):
+def test_thin_contracts_are_scored_and_marked_and_no_score_is_zero(service):
     params = ChurnParams(contracts=4, start_from=1, min_volume=10, min_z=0.0, atr_share=0.0)
     rows = service.scored(params)
-    thin = rows[~rows["eligible"]]
-    assert len(thin) == 2 * 2 * 2 and (thin["score"] == 0).all()  # the silent fly and the d-fly built on it, both sides, both products
-    assert rows["score"].is_monotonic_decreasing and rows["score"].between(0, 100).all()
+    thin = rows[rows["thin"]]
+    assert len(thin) == 2 * 2 * 2  # the silent fly and the d-fly built on it, both sides, both products
+    assert rows["score"].is_monotonic_decreasing and rows["score"].between(-100, 100).all() and (rows["score"].abs() >= 1).all()  # thin rows too
+    assert ((rows["score"] > 0) == (rows["net_day"] > 0)).all()  # the sign is the sign of the profit
+    both = rows.set_index(["symbol", "direction"])
+    for (symbol, direction), r in both.iterrows():
+        other = both.loc[(symbol, "short" if direction == "long" else "long")]
+        assert r["other_score"] == pytest.approx(other["score"])
+        if r["net_day"] <= 0 and other["net_day"] > 0:
+            assert r["flip"] and r["score"] == pytest.approx(-other["score"])  # the other side is the churn: minus its score
+        elif r["net_day"] <= 0:
+            assert not r["flip"] and -30 <= r["score"] <= -1  # neither side works: a small negative
 
 
-def test_a_contract_that_makes_money_never_scores_zero():
+def test_the_score_is_signed_never_zero_and_a_big_negative_means_flip():
     from core.churn_service import _score
 
-    rows = pd.DataFrame({"volume_day": [500.0] * 3, "net_day": [30.0, 10.0, -5.0], "hit_prob": [0.8, 0.5, 0.9], "worse_score": [0.0, 0.0, 0.5], "pos_days": [0.0, 0.6, 0.9], "blowup": [0.3, 0.0, 0.0]})
-    scored = _score(rows, 100.0)
-    assert scored["score"][0] > 0 and scored["score"][1] > 0 and scored["score"][2] == 0  # weak parts are floored, a loser is still 0
-    assert scored["score"][1] > scored["score"][0]  # the better-rounded one wins even though its net per day is lower
+    rows = pd.DataFrame({
+        "symbol": ["A", "A", "B", "B", "C", "C", "D"], "direction": ["long", "short", "long", "short", "long", "short", "long"], "volume_day": [500.0] * 6 + [5.0],
+        "net_day": [40.0, -35.0, -3.0, -20.0, 0.0, 6.0, 12.0], "tstat": [6.0, -5.0, -0.2, -4.0, 0.0, 0.3, 2.0],
+        "hit_prob": [0.9, 0.3, 0.6, 0.4, 0.5, 0.6, 0.7], "worse_score": [0.9, 0.0, 0.0, 0.0, 0.0, 0.1, 0.5], "pos_days": [0.9, 0.2, 0.5, 0.3, 0.5, 0.5, 0.6], "blowup": [0.0] * 7,
+    })
+    scored = _score(rows, 100.0).set_index(["symbol", "direction"])
+    score = scored["score"]
+    assert score[("A", "long")] > 85 and score[("A", "short")] == pytest.approx(-score[("A", "long")])  # the short loses, the long is strong: FLIP
+    assert scored.loc[("A", "short"), "flip"] and not scored.loc[("A", "long"), "flip"]
+    assert -30 <= score[("B", "short")] < score[("B", "long")] <= -1 and not scored.loc[("B", "long"), "flip"]  # both lose: mild, the surer loser lower
+    assert score[("C", "long")] == pytest.approx(-score[("C", "short")]) and 1 <= score[("C", "short")] < 50  # a net of exactly 0 is not a 0 score
+    assert (score.abs() >= 1).all() and score.between(-100, 100).all()
+    assert scored.loc[("D", "long"), "thin"] and score[("D", "long")] > 0 and np.isnan(scored.loc[("D", "long"), "other_score"])  # thin: scored and flagged
+    assert scored.loc[("A", "long"), "other_score"] == pytest.approx(score[("A", "short")])
+    alone = _score(rows.iloc[[0, 1]].assign(net_day=[40.0, -35.0]), 100.0)  # the score is not a rank: fewer rows, same scores
+    assert np.allclose(alone["score"], [score[("A", "long")], score[("A", "short")]])
 
 
 def test_the_table_is_none_until_the_simulation_exists_then_fills_in(service):
@@ -283,16 +309,16 @@ def test_the_table_is_none_until_the_simulation_exists_then_fills_in(service):
     table = service.live_table(PARAMS)
     scored = service.scored(PARAMS)
     assert len(table) == len(scored) and list(table["symbol"]) == list(scored["symbol"])  # same rows, same order
-    assert set(table["verdict"]) <= {"NO PRICE", "NOT SCORED"}  # no live prices yet
+    assert set(table["verdict"]) <= {"NO PRICE", "FLIP", "AVOID"}  # no live prices yet
     _fill_live(service)
     table = service.live_table(PARAMS)
     live = table[table["verdict"].isin(["GO", "WAIT"])]
     assert len(live) > 3 and live["price"].notna().all() and (live["entry"] != live["price"])[live["family"] != "dfly"].all() and np.allclose(live["age"], 5.0)
     assert set(service.live_table(PARAMS, family="dfly")["family"]) == {"dfly"} and set(service.live_table(PARAMS, direction="short")["direction"]) == {"short"}
     LIVE.clear()
-    assert set(service.live_table(PARAMS)["verdict"]) <= {"NO PRICE", "NOT SCORED"} and service.live_table(PARAMS)["osc"].isna().all()
+    assert set(service.live_table(PARAMS)["verdict"]) <= {"NO PRICE", "FLIP", "AVOID"} and service.live_table(PARAMS)["osc"].isna().all()
     _fill_live(service, age=900)
-    assert set(service.live_table(PARAMS)["verdict"]) <= {"STALE", "NOT SCORED"}
+    assert set(service.live_table(PARAMS)["verdict"]) <= {"STALE", "FLIP", "AVOID"}
 
 
 def test_outside_your_trading_hours_the_rows_say_closed(service, monkeypatch):
@@ -359,14 +385,56 @@ def test_params_persist(tmp_path):
 # Page
 # ----------------------------------------------------------------------
 
-USER_COLUMNS = ["Contract", "Live Price", "Volume/day", "ATR", "Cost", "Per lot Net Profit", "Number of oscillation", "Score", "Tradability", "Proof", "Side", "Worse Price Score"]
+USER_COLUMNS = ["Contract", "Live Price", "Volume/day", "ATR", "Cost", "Per lot Net Profit", "Number of oscillation", "Score", "Other Side Score", "Side", "Worse Price Score",
+                "Week Range (low to high)", "Month Range (low to high)"]
 
 
 def test_the_table_has_the_columns_asked_for_and_nothing_else_visible():
-    shown = [c for c in churn_tab.COLUMNS if c["id"] not in ("verdict",)]
+    shown = [c for c in churn_tab.COLUMNS if c["id"] not in ("verdict", "thin")]
     assert [c["name"] for c in shown] == USER_COLUMNS
     table = churn_tab.churn_table()
-    assert table.hidden_columns == ["verdict"] and table.id == "churn-table"
+    assert table.hidden_columns == ["verdict", "thin"] and table.id == "churn-table"
+    assert set(table.tooltip_header) == {c["id"] for c in shown}  # every visible heading explains itself
+
+
+def test_the_range_columns_are_the_low_and_high_of_the_last_week_and_month(service, monkeypatch):
+    now_utc = datetime(2026, 8, 21, 12, 30, tzinfo=timezone.utc)  # the stored candles run from 3 to 23 August
+    monkeypatch.setattr(service, "_recent", {})
+    _fill_live(service)
+    details = service.results(PARAMS).details
+    with monkeypatch.context() as patch:  # the ranges are worked out as of that day and kept for this version of the store
+        patch.setattr(service, "_clock", lambda: now_utc)
+        for detail in details.values():
+            spec = detail["spec"]
+            service._ranges(spec, tuple(spec.symbol.split("/")) if spec.family == "dfly" else None)
+    table = service.live_table(PARAMS, product="CL", family="outright", direction="long")
+    row = table.iloc[0]
+    bars = service.store.frame("CL")
+    bars = bars[bars["symbol"] == row["symbol"]]
+    now = pd.Timestamp(now_utc).tz_localize(None)
+    assert row["range_days"] == pytest.approx(18.52, abs=0.01)
+    for name, days in (("week", 7), ("month", 30)):
+        part = bars[bars["ts"] >= now - pd.Timedelta(days=days)]
+        assert row[f"{name}_low"] == pytest.approx(part["low"].min()) and row[f"{name}_high"] == pytest.approx(part["high"].max())
+    assert row["month_low"] <= row["week_low"] <= row["week_high"] <= row["month_high"]
+    data, tips = churn_tab.table_data(table)
+    assert data[0]["week_range"] == f"{row['week_low']:.2f} to {row['week_high']:.2f}" and " to " in data[0]["month_range"]
+    assert "The live price" in tips[0]["week_range"]["value"] and "Last 30 days" in tips[0]["month_range"]["value"]
+    dfly = service.live_table(PARAMS, product="CL", family="dfly").iloc[0]
+    assert np.isfinite(dfly["week_low"]) and dfly["week_low"] <= dfly["week_high"]  # a d-fly's range comes from its two flies
+    short = churn_tab._range_tip("month", 30, 1.0, 2.0, 1.5, 12.0)
+    assert "Only 12 days of candles are stored" in short and "50% of the way" in short
+    assert churn_tab._range_text(np.nan, np.nan) is None and "No candles" in churn_tab._range_tip("week", 7, np.nan, np.nan, np.nan, np.nan)
+
+
+def test_the_rarely_changed_settings_sit_under_advanced(service, monkeypatch):
+    controls = churn_tab.churn_controls(ChurnParams())
+    text = str(controls)
+    advanced = str(controls.children[-1])
+    assert controls.children[-1].id == "churn-advanced" and "Advanced settings" in advanced
+    for component_id, _, field, _, _ in churn_tab.PARAM_INPUTS:
+        assert component_id in text and (component_id in advanced) == (field not in churn_tab.MAIN_FIELDS)
+    assert len(churn_tab.MAIN_FIELDS) == 6
 
 
 def test_page_callbacks_end_to_end(service, monkeypatch):
@@ -380,7 +448,9 @@ def test_page_callbacks_end_to_end(service, monkeypatch):
     data, tips = cb.render_table(0, params, "v1", "CL", "all", "long")
     assert len(data) == len(tips) == len(options) and {"contract", "price", "osc", "score", "verdict", "direction", "worse_score"} <= set(data[0])
     assert data[0]["contract"].startswith("CL ") and "Target" in tips[0]["contract"]["value"]
-    assert tips[0]["score"]["value"].split(":")[0] in ("GO", "WAIT", "NOT SCORED", "CLOSED", "STALE", "NO PRICE")
+    assert tips[0]["score"]["value"].split(":")[0] in ("GO", "WAIT", "FLIP", "AVOID", "CLOSED", "STALE", "NO PRICE")
+    assert "Proof:" in tips[0]["score"]["value"] and "Tradability" in tips[0]["score"]["value"] and {"other_score", "week_range", "month_range", "thin"} <= set(data[0])
+    assert "rolling blocks" in str(note) and "-100 to +100" in str(note)
     net, hit = cb.render_detail(value, params, "v1")
     assert len(net.data) == 4 and len(hit.data) == 4
     bad = cb.render_churn("v1", "all", "all", "all", 0, *(["x"] + [None] * (len(values) - 1)))
@@ -459,8 +529,8 @@ def test_tradability_does_not_depend_on_profit_and_proof_says_whether_a_profit_i
     })
     scored = _score(rows, 100.0)
     assert list(scored["proof"]) == ["Proven", "Recent only", "No edge", "No edge"]
-    assert scored["score"][2] == 0 and scored["tradable"][2] > 0  # a loser has no score but is still workable
-    assert scored["tradable"][3] == 0  # too thin to judge
+    assert scored["score"][2] < 0 and scored["tradable"][2] > 0  # a loser scores below zero but is still workable
+    assert scored["tradable"][3] > 0 and scored["thin"][3]  # a thin row is judged too, and flagged
     assert scored["tradable"].between(0, 100).all()
 
 
@@ -474,3 +544,28 @@ def test_saved_settings_that_still_hold_the_old_defaults_take_the_new_ones_but_c
     repo.set_setting(KEY_CHURN_PARAMS, {"window_days": 60, "max_target": 8, "stop_mult": 3.0})
     kept = load_params(repo)
     assert (kept.window_days, kept.max_target, kept.stop_mult) == (60, 8, 3.0)
+
+
+def test_the_calibration_runs_the_ladder_on_what_you_traded_at_your_own_target(service, monkeypatch):
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from core.models.trade import TradeEventType as E
+
+    fly = next(i for i in tracked_instruments("CL", TODAY, 4) if i.family == "fly")
+    structure = SimpleNamespace(structure_id="s", name="CL fly", legs=[SimpleNamespace(contract=SimpleNamespace(symbol=fly.symbol), ratio=1)])
+    opened = NOW - timedelta(days=2)
+    trades = [SimpleNamespace(event_type=E.TRADE, lots=12, direction="buy", realized_pnl=None, transaction_cost=3.56, timestamp=opened)]
+    trades += [SimpleNamespace(event_type=E.PARTIAL_EXIT, lots=1, direction="sell", realized_pnl=20.0, transaction_cost=3.56, timestamp=opened + timedelta(minutes=5 * n)) for n in range(1, 13)]
+    monkeypatch.setattr(service._repository, "get_all_structures", lambda: [structure], raising=False)
+    monkeypatch.setattr(service._repository, "get_trades_for_structure", lambda _id: trades, raising=False)
+    monkeypatch.setattr(service, "_fit", None)
+    assert service.calibration(ChurnParams(contracts=5)) is None  # that simulation is not built: nothing is run
+    fit = service.calibration(PARAMS)
+    (family,) = fit["families"]
+    assert (family["family"], family["trips"], family["fitted"], family["spread_now"], family["target"]) == ("fly", 12, True, 1.0, 2.0)  # 2 ticks a round trip: your target
+    assert family["ticks"] == pytest.approx(2.0) and family["overnight"] == 0.0 and np.isfinite(family["sim_now"]) and np.isfinite(family["sim_fit"])
+    assert abs(family["sim_fit"] - 2.0) <= abs(family["sim_now"] - 2.0) and set(fit["changes"]) <= {"spread_fly", "stop_mult"}
+    assert service.calibration(PARAMS) is fit  # kept until the candles, the settings or the trades change
+    trades.append(SimpleNamespace(event_type=E.FULL_EXIT, lots=1, direction="sell", realized_pnl=20.0, transaction_cost=3.56, timestamp=NOW))
+    assert service.calibration(PARAMS)["families"][0]["trips"] == 13

@@ -144,7 +144,7 @@ def test_summary_stats_and_flat_excluded_from_win_rate(rows):
 
 def test_summary_of_nothing_is_all_zeros():
     assert summarize([]) == {"total": 0, "winners": 0, "losers": 0, "win_rate": 0.0, "total_pnl": 0.0,
-                             "avg_pnl": 0.0, "best": 0.0, "worst": 0.0, "win_rate_rebate": 0.0, "winners_rebate": 0,
+                             "avg_pnl": 0.0, "best": 0.0, "worst": 0.0, "win_rate_rebate": 0.0, "winners_rebate": 0, "losers_rebate": 0,
                              "decided_rebate": 0, "total_rebate": 0, "total_pnl_rebate": 0}
 
 
@@ -200,7 +200,7 @@ def test_layout_controls_and_table_configuration():
     layout = archive_layout()
     for component_id in ("archive-dates", "archive-type", "archive-symbol", "archive-pnl", "archive-apply-btn", "archive-clear-btn",
                          "archive-table", "archive-message", "archive-rows", "archive-selected", "archive-detail", "archive-detail-card", "archive-detail-close",
-                         *[f"archive-stat-{s}" for s in ("total", "winners", "losers", "win-rate", "win-rate-rebate", "total-pnl", "total-pnl-rebate", "avg-pnl", "best", "worst")]):
+                         *[f"archive-stat-{s}" for s in ("total", "winners", "losers", "winners-rebate", "losers-rebate", "win-rate", "win-rate-rebate", "total-pnl", "total-pnl-rebate", "avg-pnl", "best", "worst")]):
         assert find(layout, component_id) is not None, component_id
     table = find(layout, "archive-table")
     assert table.page_size == 20 and table.sort_action == "native"
@@ -267,7 +267,7 @@ def refresh(monkeypatch, source="archive-apply-btn", **filters):
     return ac.refresh_archive(**args)
 
 
-N_STATS = 10
+N_STATS = 12
 
 
 def test_tab_open_shows_everything_with_stats(monkeypatch, repo):
@@ -278,14 +278,14 @@ def test_tab_open_shows_everything_with_stats(monkeypatch, repo):
     table, message, stored, *rest = out
     assert [r["name"] for r in table] == ["B", "A"] and message == "" and len(stored) == 2
     texts, styles = rest[:N_STATS], rest[N_STATS:N_STATS + 4]
-    assert texts[0] == "2" and texts[3] == "50.0%" and texts[5] == "$300.00" and styles[2]["color"] == COLORS["ACCENT_GREEN"]
+    assert texts[0] == "2" and texts[5] == "50.0%" and texts[7] == "$300.00" and styles[2]["color"] == COLORS["ACCENT_GREEN"]
     assert out[3 + N_STATS + 4:] == (ac.no_update,) * 5
 
 
 def test_apply_filters_and_empty_states(monkeypatch, repo):
     assert refresh(monkeypatch)[1] == NO_ARCHIVE_TEXT  # nothing closed yet
     empty_stats = refresh(monkeypatch)[3:3 + N_STATS]
-    assert empty_stats[0] == "0" and empty_stats[3] == "0.0%" and empty_stats[5] == "$0.00"
+    assert empty_stats[0] == "0" and empty_stats[5] == "0.0%" and empty_stats[7] == "$0.00"
     seed(repo, closed("A", [("CLZ25", 1, "buy")], pnl=400), closed("B", [("CLF26", 1, "buy")], pnl=-100))
     out = refresh(monkeypatch, symbol="clf", pnl_filter="losers")
     assert [r["name"] for r in out[0]] == ["B"] and out[1] == ""
@@ -461,6 +461,8 @@ def test_a_rebate_can_turn_a_small_loss_into_a_win_and_gives_its_own_win_rate():
     ]
     stats = summarize(rows)
     assert stats["win_rate"] == pytest.approx(25.0) and stats["win_rate_rebate"] == pytest.approx(50.0)
+    assert (stats["winners"], stats["losers"], stats["winners_rebate"], stats["losers_rebate"]) == (1, 3, 2, 2)  # rebates turn one loser into a winner
+    assert build_stats(stats)["winners-rebate"][0] == "2" and build_stats(stats)["losers-rebate"][0] == "2"
     assert stats["total_rebate"] == pytest.approx(24.0) and stats["total_pnl_rebate"] == pytest.approx(-19.0)
 
 

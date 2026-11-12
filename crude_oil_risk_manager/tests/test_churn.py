@@ -9,7 +9,7 @@ import pytest
 
 from core import churn_costs as cc
 from core.churn_data import ChurnStore, tracked_instruments
-from core.churn_engine import InstrumentSpec, Path, Settings, analyse, count_oscillations, day_ladder, prepare, simulate, trading_calendar
+from core.churn_engine import InstrumentSpec, Path, Settings, analyse, count_oscillations, day_ladder, folds_of, prepare, simulate, t_stat, trading_calendar
 
 TODAY = date(2026, 10, 14)
 COSTS = dict(cc.DEFAULT_COSTS)
@@ -263,9 +263,20 @@ def test_the_stop_and_the_patience_change_what_the_ladder_does():
 def test_the_target_is_chosen_on_the_early_days_and_scored_on_the_late_ones():
     bars = make_bars(days=35)  # 25 weekdays
     result = analyse(bars, make_spec(), "long", [1, 2, 3, 4], 3.0, Settings(), calendar_of(bars))
-    assert result["split"] and result["worse"][0].days == 10 and result["test_days"] == 10  # the last 40% of 25 days
-    assert result["insample"].days == 15 and result["best"] in result["grid"]
+    assert result["split"] and result["worse"][0].days == 15 and result["test_days"] == 15  # the last 60% of 25 days
+    assert result["insample"].days == 10 and result["best"] in result["grid"]  # the first 40% only pick a target
     assert result["grid"][result["best"]].days == 25  # the charts use every day
+    assert [(a, b) for a, b, _ in result["picks"]] == [(10, 15), (15, 20), (20, 25)] == folds_of(25)  # three rolling blocks
+    spec, settings = make_spec(), Settings()
+    ctx = prepare(bars, spec.tick, "long", settings.start_hour, settings.end_hour, calendar_of(bars))
+    runs = {t: day_ladder(ctx, t, settings.stop_mult * t, settings.patience_minutes, spec.half_spread, 0, spec.tick_value, spec.cost_rt) for t in result["grid"]}
+    scored = []
+    for first, end, target in result["picks"]:
+        assert target == max(runs, key=lambda t: runs[t].total[:first].mean())  # each block's target: the best on the days BEFORE it
+        scored += list(runs[target].total[first:end])
+    assert result["worse"][0].net_day == pytest.approx(np.mean(scored)) and result["worse"][0].tstat == pytest.approx(t_stat(np.array(scored)))
+    assert result["best"] == max(runs, key=lambda t: runs[t].total.mean())  # the target to trade now: best over every day
+    assert folds_of(14) == [] and t_stat(np.array([5.0, 5.0, 5.0])) == 20.0 and t_stat(np.array([-1.0, -1.0])) == -20.0
     short = make_bars(days=14)
     result = analyse(short, make_spec(), "long", [1, 2, 3, 4], 3.0, Settings(), calendar_of(short))
     assert not result["split"] and result["worse"][0].days == 10  # fewer than 15 days: no split
