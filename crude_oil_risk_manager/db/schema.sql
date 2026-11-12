@@ -130,6 +130,23 @@ CREATE TABLE IF NOT EXISTS audit_log (
     details TEXT NOT NULL DEFAULT '{}'      -- JSON
 );
 
+-- Price-level alerts (the Price Alerts page): a structure typed by its legs and a level, fired once when the price gets there.
+-- (no semicolons in these comments: the schema is split into statements on them)
+CREATE TABLE IF NOT EXISTS level_alerts (
+    alert_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    legs TEXT NOT NULL,                     -- JSON [{"symbol": "...", "ratio": 1}, ...]
+    level REAL NOT NULL,
+    direction TEXT NOT NULL,                -- above fires at or over the level, below at or under it
+    status TEXT NOT NULL DEFAULT 'active',  -- active | triggered
+    created_at TEXT NOT NULL,
+    created_price REAL,                     -- the structure's price when the alert was made (if known)
+    triggered_at TEXT,
+    triggered_price REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_level_alerts_status ON level_alerts(status);
+
 CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id);
 

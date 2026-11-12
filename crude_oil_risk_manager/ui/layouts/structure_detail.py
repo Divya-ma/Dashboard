@@ -285,7 +285,7 @@ def _net_outrights(structure: Structure) -> html.Details:
     )
 
 
-def _trade_history(trades: list[Trade], active_alert_trade_ids: frozenset[str] = frozenset()) -> html.Div:
+def _trade_history(trades: list[Trade], active_alert_trade_ids: frozenset[str] = frozenset(), stopped_alert_trade_ids: frozenset[str] = frozenset()) -> html.Div:
     rows = []
     for trade in sorted(trades, key=lambda t: t.timestamp, reverse=True):
         color = _EVENT_COLORS[trade.event_type]
@@ -301,6 +301,14 @@ def _trade_history(trades: list[Trade], active_alert_trade_ids: frozenset[str] =
                     "🔕 Stop Alerts", id={"type": "trade-stop-alert-btn", "index": trade.trade_id},
                     color="warning", outline=True, size="sm",
                     title="Stop the repeating stop-loss/target alert for this trade",
+                )
+            )
+        elif trade.trade_id in stopped_alert_trade_ids:
+            actions.append(
+                dbc.Button(
+                    "🔔 Start Alerts", id={"type": "trade-start-alert-btn", "index": trade.trade_id},
+                    color="success", outline=True, size="sm",
+                    title="Alerts for this trade were stopped: turn the stop-loss/target alerts back on",
                 )
             )
         rows.append(
@@ -633,6 +641,7 @@ def structure_detail_layout(
     pnl_record: PnLRecord | None,
     edit_mode: bool = False,
     active_alert_trade_ids: frozenset[str] = frozenset(),
+    stopped_alert_trade_ids: frozenset[str] = frozenset(),
 ) -> html.Div:
     """Content of the structure detail modal. Pure: everything it shows comes from the arguments."""
     prices = prices_from_store(live_prices)
@@ -664,7 +673,7 @@ def structure_detail_layout(
     sections.append(_legs_table(structure, prices, breakdown, total, edit_mode))
     sections.append(_net_outrights(structure))
     if trades:
-        sections.append(_trade_history(trades, active_alert_trade_ids))
+        sections.append(_trade_history(trades, active_alert_trade_ids, stopped_alert_trade_ids))
     sections.append(_entry_form(structure, live, prices))
     sections.append(_exit_form(structure, live))
     sections.append(_leg_exit_section(structure, prices))

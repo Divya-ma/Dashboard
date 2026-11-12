@@ -86,8 +86,10 @@ def _render_body(structure_id, live_prices, edit_mode: bool = False):
         return html.Div("Structure not found.", style={"color": COLORS["ACCENT_RED"]})
     trades = repository.get_trades_for_structure(structure_id)
     active_alert_trade_ids = _active_alert_trade_ids(structure, trades, live_prices)
+    alert_manager = container.alert_manager
+    stopped = frozenset(t.trade_id for t in trades if alert_manager is not None and alert_manager.is_alert_stopped(t))
     return structure_detail_layout(
-        structure, live_prices, trades, repository.get_latest_pnl(structure_id), edit_mode, active_alert_trade_ids
+        structure, live_prices, trades, repository.get_latest_pnl(structure_id), edit_mode, active_alert_trade_ids, stopped
     )
 
 
@@ -628,8 +630,7 @@ def cancel_delete(n_clicks):
 
 def stop_trade_alert(n_clicks_list, structure_id, live_prices):
     """Stop the repeating stop-loss/target alert for one trade (button click, no confirmation
-    needed since it only silences alerts and resumes automatically next time the level is
-    crossed again)."""
+    needed since it only silences alerts; the trade then shows a "Start Alerts" button, see start_trade_alert)."""
     trigger = callback_context.triggered_id
     if not isinstance(trigger, dict) or trigger.get("type") != "trade-stop-alert-btn":
         raise PreventUpdate
@@ -640,6 +641,20 @@ def stop_trade_alert(n_clicks_list, structure_id, live_prices):
     container.alert_manager.stop_repeating_alert(trigger["index"])
     body = _render_body(structure_id, live_prices)
     return (body, *_toast("Repeating alerts stopped for this trade.", header="Alerts stopped"))
+
+
+def start_trade_alert(n_clicks_list, structure_id, live_prices):
+    """Turn the stop-loss/target alerts of one trade back on after "Stop Alerts" (a hit level alerts again on the next price check)."""
+    trigger = callback_context.triggered_id
+    if not isinstance(trigger, dict) or trigger.get("type") != "trade-start-alert-btn":
+        raise PreventUpdate
+    if not callback_context.triggered[0]["value"]:
+        raise PreventUpdate  # the button was just created, not clicked
+    if container.alert_manager is None:
+        raise PreventUpdate
+    container.alert_manager.resume_alert(trigger["index"])
+    body = _render_body(structure_id, live_prices)
+    return (body, *_toast("Alerts are on again for this trade.", header="Alerts started"))
 
 
 def _delete_trade_and_recompute(structure_id: str, trade_id: str) -> None:
@@ -1006,6 +1021,15 @@ def register_structure_detail_callbacks(app) -> None:
         State("store-live-prices", "data"),
         prevent_initial_call=True,
     )(stop_trade_alert)
+
+    app.callback(
+        _body_dup(),
+        *_TOAST_OUTPUTS,
+        Input({"type": "trade-start-alert-btn", "index": ALL}, "n_clicks"),
+        State("store-selected-structure-id", "data"),
+        State("store-live-prices", "data"),
+        prevent_initial_call=True,
+    )(start_trade_alert)
 
     app.callback(
         Output("modal-confirm-delete", "is_open", allow_duplicate=True),

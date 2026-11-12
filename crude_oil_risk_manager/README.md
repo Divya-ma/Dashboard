@@ -401,8 +401,15 @@ How much the whole book could lose if its stops were hit, allowing for correlati
 ### 6.1 Sidebar and shell
 
 Navigation: **Home, Structures, Correlation, Exposure Map, VaR & Scenarios, Trade Analyzer, Curve Compare, Seasonality,
-Strategy Rollover, OI · Volume · ATR, Churn, Archive, Settings.** The sidebar also shows the time of the last price update, a stale-data
+Strategy Rollover, OI · Volume · ATR, Churn, Archive, Price Alerts, Settings.** The sidebar also shows the time of the last price update, a stale-data
 indicator and a countdown. A banner appears until an API token is configured. Alert toasts appear on screen.
+
+**Price Alerts.** Pick a structure type, type its legs (a leg may itself be a spread or a fly, for example `BRNJ27-K27`), type a price
+level and choose when it fires: *Auto* (from where the price is now: a level above it fires when the price rises to it, below when it
+falls to it), or rises to / falls to explicitly. The structure's price is the same composite as on the Structures page, from the live
+prices. Each alert fires **once**: a toast that stays until dismissed, plus Teams like any other alert. It then stays in the list as
+*Triggered* until you delete it. The list shows each alert's live price and how far it is from its level, and every alert has a delete
+button. Its contracts are saved so the live poll prices them. Creating and deleting alerts is in the audit log.
 
 Three clocks drive the app: a 10 s live-price poll, a 5 s portfolio refresh, a 1 s countdown.
 

@@ -273,6 +273,28 @@ class AlertManager:
             except Exception as exc:  # noqa: BLE001
                 logger.error("Could not save alert-stopped state for %s %s: %s", trade_id, kind, type(exc).__name__)
 
+    def resume_alert(self, trade_id: str) -> None:
+        """Undo stop_repeating_alert (the "Start Alerts" button): the stop / target alerts of this trade can fire again, and a level
+        that is hit right now alerts on the next price check."""
+        for kind in ("stop", "target"):
+            for prefix in ("alert_stopped_", "alert_last_sent_"):
+                try:
+                    self.repository.set_setting(f"{prefix}{trade_id}_{kind}", None if prefix == "alert_last_sent_" else False)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Could not clear alert state for %s %s: %s", trade_id, kind, type(exc).__name__)
+
+    def is_alert_stopped(self, trade: Trade) -> bool:
+        """True when the user stopped this trade's stop / target alerts (and a level is set that could alert)."""
+        if trade.stop_loss_price is None and trade.target_price is None:
+            return False
+        for kind in ("stop", "target"):
+            try:
+                if self.repository.get_setting(f"alert_stopped_{trade.trade_id}_{kind}", False):
+                    return True
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Could not read alert-stopped state for %s %s: %s", trade.trade_id, kind, type(exc).__name__)
+        return False
+
     def active_alert_kinds(self, trade: Trade, live: float | None) -> list[str]:
         """Which of 'stop'/'target' are currently hit for `trade` at `live` and still repeating
         (not yet stopped by the user). Used to show/hide the "Stop Alerts" button."""

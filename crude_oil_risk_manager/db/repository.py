@@ -32,6 +32,7 @@ from core.models import (
     TradeEventType,
 )
 
+from core.models.level_alert import LevelAlert
 from core.secret_box import SENSITIVE_SETTING_KEYS, SecretBox, is_encrypted
 
 logger = logging.getLogger(__name__)
@@ -976,6 +977,67 @@ class Repository:
                     "channels_sent": json.dumps(alert.channels_sent),
                 },
             )
+
+    # ------------------------------------------------------------------
+    # Price-level alerts (core.level_alerts)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_level_alert(row) -> LevelAlert:
+        def moment(value):
+            return datetime.fromisoformat(value) if value else None
+
+        return LevelAlert(
+            alert_id=row["alert_id"], name=row["name"], legs=json.loads(row["legs"]), level=row["level"], direction=row["direction"],
+            status=row["status"], created_at=moment(row["created_at"]), created_price=row["created_price"],
+            triggered_at=moment(row["triggered_at"]), triggered_price=row["triggered_price"],
+        )
+
+    def save_level_alert(self, alert: LevelAlert) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO level_alerts (alert_id, name, legs, level, direction, status, created_at, created_price)
+                    VALUES (:alert_id, :name, :legs, :level, :direction, :status, :created_at, :created_price)
+                    """
+                ),
+                {"alert_id": alert.alert_id, "name": alert.name, "legs": json.dumps(alert.legs), "level": alert.level,
+                 "direction": alert.direction, "status": alert.status, "created_at": alert.created_at.isoformat(),
+                 "created_price": alert.created_price},
+            )
+            self._audit(conn, "level_alert.create", "level_alert", alert.alert_id,
+                        f"price alert '{alert.name}': {alert.direction} {alert.level:g}", {"legs": alert.legs})
+
+    def get_level_alerts(self, status: str | None = None) -> list[LevelAlert]:
+        """Every level alert (newest first), or only those with this status ('active' / 'triggered')."""
+        query, params = "SELECT * FROM level_alerts", {}
+        if status:
+            query, params = query + " WHERE status = :status", {"status": status}
+        with self._engine.connect() as conn:
+            rows = conn.execute(text(query + " ORDER BY created_at DESC"), params).mappings().all()
+        return [self._row_to_level_alert(row) for row in rows]
+
+    def delete_level_alert(self, alert_id: str) -> bool:
+        """Remove a level alert (active or triggered); False if it was already gone."""
+        with self._engine.begin() as conn:
+            row = conn.execute(text("SELECT name, direction, level FROM level_alerts WHERE alert_id = :id"), {"id": alert_id}).first()
+            if row is None:
+                return False
+            conn.execute(text("DELETE FROM level_alerts WHERE alert_id = :id"), {"id": alert_id})
+            self._audit(conn, "level_alert.delete", "level_alert", alert_id, f"price alert '{row[0]}' deleted ({row[1]} {row[2]:g})")
+            return True
+
+    def mark_level_alert_triggered(self, alert_id: str, price: float) -> bool:
+        """Active -> triggered. True only for the call that changed the row (so an alert is sent once); False if it was
+        already triggered or deleted."""
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                text("UPDATE level_alerts SET status = 'triggered', triggered_at = :at, triggered_price = :price "
+                     "WHERE alert_id = :id AND status = 'active'"),
+                {"at": datetime.now(timezone.utc).isoformat(), "price": price, "id": alert_id},
+            )
+            return result.rowcount == 1
 
     def get_unacknowledged_alerts(self) -> list[Alert]:
         """Return all alerts where acknowledged == 0, ordered by timestamp DESC."""

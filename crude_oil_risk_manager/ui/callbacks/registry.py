@@ -9,6 +9,7 @@ from ui.callbacks.curve_compare_callbacks import register_curve_compare_callback
 from ui.callbacks.dissolve_callbacks import register_dissolve_callbacks
 from ui.callbacks.exposure_callbacks import register_exposure_callbacks
 from ui.callbacks.home_callbacks import register_home_callbacks
+from ui.callbacks.level_alerts_callbacks import register_level_alerts_callbacks
 from ui.callbacks.oi_callbacks import register_oi_callbacks
 from ui.callbacks.rollover_callbacks import register_rollover_callbacks
 from ui.callbacks.rollover_study_callbacks import register_rollover_study_callbacks
@@ -26,6 +27,7 @@ REGISTRATIONS = (
     register_correlation_callbacks, register_corr_matrix_callbacks, register_exposure_callbacks, register_var_callbacks,
     register_curve_callbacks, register_curve_compare_callbacks, register_oi_callbacks, register_churn_callbacks,
     register_seasonality_callbacks, register_rollover_callbacks, register_rollover_study_callbacks, register_archive_callbacks,
+    register_level_alerts_callbacks,
 )
 
 

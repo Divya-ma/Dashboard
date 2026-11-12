@@ -853,6 +853,32 @@ def test_stop_trade_alert_button_stops_future_resends(repo, monkeypatch):
         dc.cancel_delete(None)
 
 
+def test_start_alerts_button_turns_a_stopped_alert_back_on(repo, monkeypatch):
+    sid, trade = _open_trade_with_stop(repo)
+    fresh = Container(repository=repo, alert_manager=AlertManager(repo))
+    monkeypatch.setattr(dc, "container", fresh)
+    below, above = {"CLZ26": {"price": 72.0}}, {"CLZ26": {"price": 76.0}}
+
+    assert "Start Alerts" not in str(dc.render_structure_detail(sid, below))  # nothing stopped yet
+    trigger_stop_alert_btn(monkeypatch, trade.trade_id)
+    dc.stop_trade_alert([1], sid, below)
+    assert "Start Alerts" in str(dc.render_structure_detail(sid, below))
+    assert "Start Alerts" in str(dc.render_structure_detail(sid, above))  # still offered when the price has moved off the level
+
+    class Ctx:
+        triggered_id = {"type": "trade-start-alert-btn", "index": trade.trade_id}
+        triggered = [{"prop_id": "x.n_clicks", "value": 1}]
+
+    monkeypatch.setattr(dc, "callback_context", Ctx())
+    body, toast_open, message, icon, header = dc.start_trade_alert([1], sid, below)
+    assert toast_open is True and "on again" in message
+    assert "Start Alerts" not in str(body) and "Stop Alerts" in str(body)  # and the stop button is back
+    assert not repo.get_setting(f"alert_stopped_{trade.trade_id}_stop")
+    Ctx.triggered = [{"prop_id": "x.n_clicks", "value": None}]
+    with pytest.raises(PreventUpdate):
+        dc.start_trade_alert([None], sid, below)
+
+
 def test_execute_delete_removes_structure_and_closes_both_modals(repo):
     sid = save(repo, outright(StructureStatus.OPEN, 10, 75.0))
     pending = {"kind": "structure", "id": sid}

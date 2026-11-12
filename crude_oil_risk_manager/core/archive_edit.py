@@ -29,7 +29,7 @@ from core.models import StructureStatus, TradeEventType
 from core.models.structure import parse_structure_type
 from core.structure_builder import StructureBuildError
 from core.structure_edit import apply_leg_edits
-from core.trade_entry import TradeError, recompute_structure_from_trades
+from core.trade_entry import TradeError, _validate_alert_levels, recompute_structure_from_trades
 
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 NAME_LIMIT = 100
@@ -265,6 +265,22 @@ def edit_trades(repository, structure_id: str, rows: list[dict], recalculate: bo
     if not changes:
         return "No changes to save."
 
+    warnings = []
+    for trade_id, new in edited.items():  # a stop / target typed now must make sense; a stored one a corrected price crosses is only flagged
+        old = by_id[trade_id]
+        if new.event_type not in (TradeEventType.TRADE, TradeEventType.ADD):
+            continue
+        problems = _validate_alert_levels(new.price, new.direction, new.stop_loss_price, new.target_price)
+        if not problems:
+            continue
+        typed = (old.stop_loss_price, old.target_price) != (new.stop_loss_price, new.target_price)
+        if typed:
+            errors.extend(f"Trade {numbering[trade_id]}: {p}" for p in problems)
+        else:
+            warnings.append(f"trade {numbering[trade_id]}: the stored stop / target is on the wrong side of the new price")
+    if errors:
+        raise ArchiveEditError(errors)
+
     if recalculate:  # a cost follows the lots (in proportion) unless a cost was typed for that trade
         for trade_id, new in edited.items():
             old = by_id[trade_id]
@@ -310,7 +326,7 @@ def edit_trades(repository, structure_id: str, rows: list[dict], recalculate: bo
     exits = [t for t in final.values() if t.event_type in EXIT_EVENTS]
     if exits and structure.status == StructureStatus.CLOSED and any(by_id[t.trade_id].timestamp != t.timestamp for t in exits):
         repository.set_structure_lifecycle(structure_id, StructureStatus.CLOSED, max(t.timestamp for t in exits), structure.close_trigger)
-    return f"Saved {len(edited)} trade(s): " + "; ".join(changes) + "."
+    return f"Saved {len(edited)} trade(s): " + "; ".join(changes) + "." + (" Check " + "; ".join(warnings) + "." if warnings else "")
 
 
 # ----------------------------------------------------------------------

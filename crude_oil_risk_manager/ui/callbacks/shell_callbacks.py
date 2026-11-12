@@ -17,6 +17,7 @@ from dash.exceptions import PreventUpdate
 
 from adapters.base import APIError, AuthenticationError, SymbolTranslator
 from config.settings import settings
+from core.level_alerts import check_level_alerts
 from core.models import AlertLevel, StructureStatus, TradeEventType
 from core.packets import RiskCache, build_packets
 from core.portfolio_risk import PortfolioRisk
@@ -70,6 +71,7 @@ _ROUTES = {
     "/oi-volume-atr": ("oi_tab", "oi_layout"),
     "/churn": ("churn_tab", "churn_layout"),
     "/archive": ("archive_tab", "archive_layout"),
+    "/level-alerts": ("level_alerts_tab", "level_alerts_layout"),
     "/settings": ("settings", "settings_layout"),
 }
 
@@ -419,14 +421,15 @@ _ENTRY_EVENTS = (TradeEventType.TRADE, TradeEventType.ADD)
 
 
 def _price_alert_toast(alert) -> dbc.Toast:
-    """Stop-loss toasts stay until dismissed (duration 0); target toasts close after 8 seconds."""
-    critical = alert.level == AlertLevel.CRITICAL
+    """Stop-loss toasts and price-level toasts stay until dismissed (duration 0); target toasts close after 8 seconds."""
+    persistent = alert.level in (AlertLevel.CRITICAL, AlertLevel.WARNING)
+    icon = {AlertLevel.CRITICAL: "danger", AlertLevel.WARNING: "warning"}.get(alert.level, "success")
     return dbc.Toast(
         alert.body,
         id=f"toast-{alert.alert_id}",
         header=alert.title,
-        icon="danger" if critical else "success",
-        duration=0 if critical else 8000,
+        icon=icon,
+        duration=0 if persistent else 8000,
         is_open=True,
         dismissable=True,
         style={"width": "380px", "marginBottom": "10px", "backgroundColor": COLORS["CARD_BG"]},
@@ -455,11 +458,9 @@ def check_price_alerts(live_prices, existing_toasts):
         for t in group
         if t.event_type in _ENTRY_EVENTS and (t.stop_loss_price is not None or t.target_price is not None)
     ]
-    if not open_trades:
-        raise PreventUpdate
-    alerts = manager.check_price_alerts(
-        _price_map(live_prices), open_trades, {s.structure_id: s for s in structures}
-    )
+    prices = _price_map(live_prices)
+    alerts = manager.check_price_alerts(prices, open_trades, {s.structure_id: s for s in structures}) if open_trades else []
+    alerts += check_level_alerts(container.repository, manager, prices)  # the Price Alerts page: a typed level was reached
     if not alerts:
         raise PreventUpdate
     kept = [toast for toast in (existing_toasts or []) if _still_open(toast)]

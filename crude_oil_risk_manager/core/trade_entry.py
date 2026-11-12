@@ -219,7 +219,7 @@ def _validate_leg_prices(legs: list[Leg], leg_prices: list | None) -> list[str]:
 def enter_trade(
     structure: Structure, price, lots, direction: str, notes: str | None, live_prices: dict[str, float],
     stop_loss_price: float | None = None, target_price: float | None = None,
-    leg_prices: list[float | None] | None = None,
+    leg_prices: list[float | None] | None = None, check_alert_levels: bool = True,
 ) -> EntryResult:
     """First entry (SHELL -> OPEN, TRADE event) or an add to an open position (ADD event, average price).
 
@@ -246,7 +246,8 @@ def enter_trade(
             f"This position is a {structure.legs[0].direction}; an add must be a {structure.legs[0].direction} too. "
             "Exit it and create a new structure to trade the other side."
         )
-    errors += _validate_alert_levels(price, direction, stop_loss_price, target_price)
+    if check_alert_levels:  # a replay of stored trades does not re-judge the stop and target a trader recorded
+        errors += _validate_alert_levels(price, direction, stop_loss_price, target_price)
     errors += _validate_leg_prices(structure.legs, leg_prices)
     notes = (notes or "").strip()
     if len(notes) > 200:
@@ -513,7 +514,7 @@ def recompute_structure_from_trades(structure: Structure, trades: list[Trade], f
         if trade.event_type in (TradeEventType.TRADE, TradeEventType.ADD):
             result = enter_trade(
                 current, trade.price, trade.lots, trade.direction, trade.notes, anchors,
-                stop_loss_price=trade.stop_loss_price, target_price=trade.target_price,
+                stop_loss_price=trade.stop_loss_price, target_price=trade.target_price, check_alert_levels=False,
             )
             current = current.model_copy(update={"legs": result.legs, "status": result.status})
             queue.append(EntrySlice(trade, trade.lots))

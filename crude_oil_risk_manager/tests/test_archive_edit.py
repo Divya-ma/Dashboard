@@ -137,11 +137,13 @@ def test_changing_the_entry_price_moves_the_entry_price_column_and_the_exit_pnl(
     sid = make_closed(repo)
     rows, _ = rows_of(repo, sid)
     with pytest.raises(ArchiveEditError, match="stop loss must be below the entry price"):
-        edit_trades(repo, sid, edit(rows, 0, price=0.20))  # the stop (0.30) would now be above a buy at 0.20
-    edit_trades(repo, sid, edit(rows, 0, price=0.20, stop_loss_price=0.10))
+        edit_trades(repo, sid, edit(rows, 0, price=0.20, stop_loss_price=0.35))  # a stop typed now must be on the right side
+    message = edit_trades(repo, sid, edit(rows, 0, price=0.20))  # the stored stop (0.30) is now above a buy at 0.20: saved, but flagged
+    assert "stored stop / target is on the wrong side" in message
     row = archive_row(repo, sid)
     assert row["entry_price"] == pytest.approx(0.20)
     assert exit_of(repo, sid).realized_pnl == pytest.approx((0.80 - 0.20) * 5 * 1000)
+    edit_trades(repo, sid, edit(rows, 0, price=0.20, stop_loss_price=0.10))  # and the stop can be corrected afterwards
 
 
 def test_a_pnl_typed_in_the_same_save_wins_and_so_does_switching_the_recalculation_off(repo):

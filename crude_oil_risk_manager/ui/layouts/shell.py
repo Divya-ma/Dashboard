@@ -48,6 +48,7 @@ NAV_ITEMS = [
     ("/oi-volume-atr", "📊 OI · Volume · ATR"),
     ("/churn", "♻️ Churn"),
     ("/archive", "📁 Archive"),
+    ("/level-alerts", "🔔 Price Alerts"),
     ("/settings", "⚙️ Settings"),
 ]
 
