@@ -464,3 +464,18 @@ def test_every_component_library_a_lazily_loaded_page_uses_is_imported_at_startu
     startup = (root / "ui" / "app.py").read_text(encoding="utf-8")
     for library in ("dash_ag_grid", "dash_bootstrap_components"):
         assert f"import {library}" in startup, library
+
+
+def test_a_saved_contract_the_feed_never_polls_does_not_keep_the_data_stale(env, repo, with_token):
+    """Contracts of closed structures stay saved but are never requested: they used to count as missing prices, so the sidebar said 'Data Stale' for good."""
+    repo.save_contract(make_contract("CLZ26"))
+    repo.save_contract(make_contract("CLF27"))  # saved, not polled
+    real = env.live_adapter.get_live_prices
+    env.live_adapter.get_live_prices = lambda symbols: {s: p for s, p in real(symbols).items() if s == "CLZ26"}  # the feed prices CLZ26 only
+    env.live_adapter.polled_symbols = lambda: {"CLZ26"}
+    prices, _, indicator, _ = cb.fetch_live_prices(0)
+    assert set(prices) == {"CLZ26"} and "Data Live" in str(indicator)
+    env.live_adapter.polled_symbols = lambda: {"CLZ26", "CLF27"}  # polled but no price came back: that IS stale
+    cb.container.live_cache.fetched_at = None
+    _, _, indicator, _ = cb.fetch_live_prices(1)
+    assert "Data Stale" in str(indicator)

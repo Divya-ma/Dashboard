@@ -158,6 +158,9 @@ CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
 
 CREATE INDEX IF NOT EXISTS idx_pnl_records_structure_id ON pnl_records(structure_id);
 CREATE INDEX IF NOT EXISTS idx_pnl_records_timestamp ON pnl_records(timestamp);
+-- The first or latest record of a structure since a time (Today's PnL, every 5 s per open page) is a lookup with this index.
+-- With only the two above, SQLite walks all of a structure's records (54 ms against 0.01 ms on 445,000 rows).
+CREATE INDEX IF NOT EXISTS idx_pnl_records_structure_ts ON pnl_records(structure_id, timestamp);
 
 CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp);
 CREATE INDEX IF NOT EXISTS idx_alerts_acknowledged ON alerts(acknowledged);

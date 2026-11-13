@@ -16,6 +16,8 @@ argument. Per spec the live feed must cover only:
      definition, so all of its legs are included — you want a live price while still
      deciding whether to enter a structure, not only after), and
   2. the correlation watchlist's instrument symbols,
+  3. every leg of an ACTIVE price-level alert (the Price Alerts page), so its live price keeps coming in even when the legs are in
+     no structure; a triggered alert is no longer polled,
 rebuilt on structure/watchlist change rather than on every poll. This adapter
 re-derives (1) fresh from the repository on every call (two cheap, already-indexed
 SQLite reads) and only logs/rebuilds its cached view when the resulting symbol set
@@ -51,6 +53,7 @@ from adapters.qh_api import QHApi, make_api
 from core.box import is_box_symbol
 from core.derived_prices import components_needed, derive_price
 from core.models import StructureStatus
+from core.models.level_alert import ACTIVE as LEVEL_ALERT_ACTIVE
 from db.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -147,9 +150,21 @@ class FairValueLiveAdapter(LiveDataAdapter):
         """Instrument symbols from the persisted correlation watchlist, if any (see module docstring)."""
         return set(self._repository.get_setting(WATCHLIST_SETTING_KEY, []) or [])
 
+    def _level_alert_symbols(self) -> set[str]:
+        """Leg symbols of the active price-level alerts. A read that fails must not stop the position prices."""
+        try:
+            return {symbol for alert in self._repository.get_level_alerts(LEVEL_ALERT_ACTIVE) for symbol in alert.symbols}
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not read the price alerts for the live feed")
+            return set()
+
     def _target_symbols(self) -> set[str]:
         """The full set of internal symbols the live feed should cover right now."""
-        return self._open_structure_leg_symbols() | self._watchlist_symbols()
+        return self._open_structure_leg_symbols() | self._watchlist_symbols() | self._level_alert_symbols()
+
+    def polled_symbols(self) -> set[str]:
+        """The internal symbols the live feed polls (what a price is expected for): positions, watchlist and active alerts."""
+        return self._target_symbols()
 
     # ------------------------------------------------------------------
     # Public interface (LiveDataAdapter)

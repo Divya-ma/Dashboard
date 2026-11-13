@@ -168,6 +168,56 @@ SEPARATION_COLUMNS = [
 ]
 
 
+def build_week_cards(stats: dict) -> list:
+    """The current week's headline measures as small cards (trades closed this week, net PnL, win rate, profit factor; before and after rebates)."""
+    def tone(value):
+        return None if value is None or value == 0 else value > 0
+
+    items = [
+        ("Trades closed this week", str(stats["trades"]), None),
+        ("Net PnL", _money(stats["total_pnl"]), tone(stats["total_pnl"])),
+        ("Net PnL (with rebates)", _money(stats["total_pnl_rebate"]), tone(stats["total_pnl_rebate"])),
+        ("Win rate", _pct(stats["win_rate"] / 100.0), None if not (stats["winners"] + stats["losers"]) else stats["win_rate"] >= 50.0),
+        ("Win rate (with rebates)", _pct(stats["win_rate_rebate"] / 100.0), None if not stats["decided_rebate"] else stats["win_rate_rebate"] >= 50.0),
+        ("Profit factor", _ratio(stats["profit_factor"]), None if stats["profit_factor"] is None else stats["profit_factor"] >= 1.0),
+        ("Profit factor (with rebates)", _ratio(stats["profit_factor_rebate"]), None if stats["profit_factor_rebate"] is None else stats["profit_factor_rebate"] >= 1.0),
+    ]
+    cards = []
+    for label, value, good in items:
+        color = COLORS["TEXT_PRIMARY"] if good is None else COLORS["ACCENT_GREEN"] if good else COLORS["ACCENT_RED"]
+        cards.append(dbc.Col(dbc.Card(dbc.CardBody([
+            html.Div(label, style=_LABEL), html.Div(value, style={"fontSize": "22px", "fontWeight": "bold", "color": color}),
+        ]), style={**_CARD, "height": "100%"}), md=6, xl=3, className="mb-3"))
+    return cards
+
+
+CONTRACT_COLUMNS = [
+    {"id": "contract", "name": "Contract"}, {"id": "trades", "name": "Trades", "type": "numeric"},
+    {"id": "round_trips", "name": "Round trips", "type": "numeric"},
+    {"id": "win_rate", "name": "Win rate", "type": "numeric", "format": Format(precision=0, scheme=Scheme.percentage)},
+    {"id": "win_rate_rebate", "name": "Win rate (with rebates)", "type": "numeric", "format": Format(precision=0, scheme=Scheme.percentage)},
+    {"id": "total_pnl", "name": "Net PnL ($)", "type": "numeric", "format": _MONEY},
+    {"id": "total_pnl_rebate", "name": "Net PnL with rebates ($)", "type": "numeric", "format": _MONEY},
+]
+
+
+def contract_records(table: list[dict]) -> list[dict]:
+    """core.archive.contract_summary's rows as DataTable records (win rates as a 0-1 fraction for the percentage format)."""
+    return [{
+        "contract": row["contract"], "trades": row["trades"], "round_trips": row["round_trips"],
+        "win_rate": row["win_rate"] / 100.0, "win_rate_rebate": row["win_rate_rebate"] / 100.0,
+        "total_pnl": row["total_pnl"], "total_pnl_rebate": row["total_pnl_rebate"],
+    } for row in table]
+
+
+WEEK_CONTRACT_COLUMNS = [c for c in CONTRACT_COLUMNS if c["id"] != "round_trips"]
+
+
+def week_contract_records(table: list[dict]) -> list[dict]:
+    """core.archive.contract_summary's rows (for the week's rows) as DataTable records, without the round-trips column."""
+    return [{k: v for k, v in record.items() if k != "round_trips"} for record in contract_records(table)]
+
+
 def _table_style(left_columns: tuple) -> dict:
     return dict(
         sort_action="native", page_size=20, style_table={"overflowX": "auto"},
@@ -187,6 +237,62 @@ def analysis_tab() -> html.Div:
             ),
             dbc.Row(id="analysis-cards"),
             dbc.Card(dbc.CardBody(dcc.Graph(id="analysis-equity", config={"displayModeBar": False})), style=_CARD, className="mb-3"),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.Div("This week's closed trades", style=_LABEL),
+                        html.Div(
+                            "Every trade exited this week (Monday to Sunday, London time) — by when it was CLOSED, not when it was opened. "
+                            "A position opened last week but exited this week counts here; one opened this week but still open does not.",
+                            style={**_MUTED, "marginBottom": "8px"},
+                        ),
+                        dbc.Row(id="analysis-week-cards"),
+                        html.Div("By contract", style={**_LABEL, "marginTop": "8px"}),
+                        dash_table.DataTable(
+                            id="analysis-week-contract-table", columns=WEEK_CONTRACT_COLUMNS, data=[], sort_action="native", page_size=25,
+                            style_table={"overflowX": "auto"},
+                            style_header={"backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_SECONDARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "fontWeight": "bold"},
+                            style_cell={"backgroundColor": COLORS["CARD_BG"], "color": COLORS["TEXT_PRIMARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "padding": "8px 12px", "textAlign": "right"},
+                            style_cell_conditional=[{"if": {"column_id": "contract"}, "textAlign": "left"}],
+                            style_data_conditional=[
+                                {"if": {"column_id": "total_pnl", "filter_query": "{total_pnl} > 0"}, "color": COLORS["ACCENT_GREEN"]},
+                                {"if": {"column_id": "total_pnl", "filter_query": "{total_pnl} < 0"}, "color": COLORS["ACCENT_RED"]},
+                                {"if": {"column_id": "total_pnl_rebate", "filter_query": "{total_pnl_rebate} > 0"}, "color": COLORS["ACCENT_GREEN"]},
+                                {"if": {"column_id": "total_pnl_rebate", "filter_query": "{total_pnl_rebate} < 0"}, "color": COLORS["ACCENT_RED"]},
+                            ],
+                        ),
+                    ]
+                ),
+                style=_CARD, className="mb-3",
+            ),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.Div("Contract-wise analysis", style=_LABEL),
+                        html.Div(
+                            "Every contract you have traded (an outright, spread, fly, d-fly or CL-BZ box), by name. A contract traded again under "
+                            "a name ending \"(reuse)\" (the Structures page's \"Reuse as Shell\") is grouped with the one it was reused from: "
+                            "Trades is how many separate times you entered it, Round trips is every exit across all of them (a partial exit counts "
+                            "on its own). Win rate and Net PnL are shown before and after rebates.",
+                            style={**_MUTED, "marginBottom": "8px"},
+                        ),
+                        dash_table.DataTable(
+                            id="analysis-contract-table", columns=CONTRACT_COLUMNS, data=[], sort_action="native", page_size=25,
+                            style_table={"overflowX": "auto"},
+                            style_header={"backgroundColor": COLORS["SIDEBAR_BG"], "color": COLORS["TEXT_SECONDARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "fontWeight": "bold"},
+                            style_cell={"backgroundColor": COLORS["CARD_BG"], "color": COLORS["TEXT_PRIMARY"], "border": f"1px solid {COLORS['BORDER_COLOR']}", "padding": "8px 12px", "textAlign": "right"},
+                            style_cell_conditional=[{"if": {"column_id": "contract"}, "textAlign": "left"}],
+                            style_data_conditional=[
+                                {"if": {"column_id": "total_pnl", "filter_query": "{total_pnl} > 0"}, "color": COLORS["ACCENT_GREEN"]},
+                                {"if": {"column_id": "total_pnl", "filter_query": "{total_pnl} < 0"}, "color": COLORS["ACCENT_RED"]},
+                                {"if": {"column_id": "total_pnl_rebate", "filter_query": "{total_pnl_rebate} > 0"}, "color": COLORS["ACCENT_GREEN"]},
+                                {"if": {"column_id": "total_pnl_rebate", "filter_query": "{total_pnl_rebate} < 0"}, "color": COLORS["ACCENT_RED"]},
+                            ],
+                        ),
+                    ]
+                ),
+                style=_CARD, className="mb-3",
+            ),
             dbc.Card(
                 dbc.CardBody(
                     [

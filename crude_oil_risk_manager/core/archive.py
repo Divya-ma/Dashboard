@@ -10,7 +10,9 @@ core.pnl.calculate_net_realized_pnl of the whole structure. With per-leg exits, 
 a closed structure keeps the older single row for the whole structure.
 """
 
-from datetime import date, datetime
+import re
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 from core.fifo import match_exits
 from core.journal import PRODUCT_LABELS, format_risk_reward, risk_reward, with_defaults
@@ -303,6 +305,89 @@ def summarize(rows: list[dict]) -> dict:
         "best": max(pnls) if pnls else 0.0,
         "worst": min(pnls) if pnls else 0.0,
     }
+
+
+# ----------------------------------------------------------------------
+# Weekly and contract-wise analysis
+# ----------------------------------------------------------------------
+
+_REUSE_SUFFIX = re.compile(r"\s*\(reuse\)\s*$", re.IGNORECASE)
+
+
+def strip_reuse_suffix(name: str) -> str:
+    """A structure's name with every trailing " (reuse)" removed (the "Reuse as Shell" button copies a closed structure's own
+    name unless you type a new one, so a contract traded again under the same name picks up one more "(reuse)" each time).
+    Never returns an empty string: a name that is only "(reuse)" is kept as it is."""
+    stripped = name
+    while True:
+        reduced = _REUSE_SUFFIX.sub("", stripped)
+        if reduced == stripped:
+            return stripped.strip() or name
+        stripped = reduced
+
+
+def _profit_factor(pnls: list[float]) -> float | None:
+    """Gross wins / gross losses. None with nothing decided, infinite (no losses but at least one win) as float('inf')."""
+    gross_win = sum(p for p in pnls if p > 0)
+    gross_loss = -sum(p for p in pnls if p < 0)
+    if gross_loss == 0:
+        return float("inf") if gross_win > 0 else None
+    return gross_win / gross_loss
+
+
+def week_bounds(today: date) -> tuple[date, date]:
+    """Monday-to-Sunday week containing `today`."""
+    monday = today - timedelta(days=today.weekday())
+    return monday, monday + timedelta(days=6)
+
+
+def rows_closed_this_week(rows: list[dict], today: date) -> list[dict]:
+    """Rows whose exit falls in the Monday-Sunday week containing `today` (the week's closes, not the week's entries)."""
+    start, end = week_bounds(today)
+    kept = []
+    for row in rows:
+        if not row["exit_date"]:
+            continue
+        exit_date = date.fromisoformat(row["exit_date"])
+        if start <= exit_date <= end:
+            kept.append(row)
+    return kept
+
+
+def week_summary(rows: list[dict]) -> dict:
+    """summarize()'s figures for one week, plus the week's number of distinct structures and its profit factor before/after rebates."""
+    stats = summarize(rows)
+    pnls = [cents(row["realized_pnl"]) for row in rows]
+    after = [cents(row.get("pnl_after_rebate", row["realized_pnl"])) for row in rows]
+    stats["trades"] = len({row["structure_id"] for row in rows})
+    stats["profit_factor"] = _profit_factor(pnls)
+    stats["profit_factor_rebate"] = _profit_factor(after)
+    return stats
+
+
+def contract_summary(rows: list[dict]) -> list[dict]:
+    """One row per CONTRACT: every structure traded under the same name, stripped of a "(reuse)" suffix (see
+    strip_reuse_suffix), grouped together as the one contract they really are (e.g. "BZ May27 DFly" and "BZ May27 DFly
+    (reuse)" are the same contract traded twice). For each contract:
+
+      trades       distinct structures traded (an original and each later reuse of it each count once)
+      round_trips  archive rows (one per exit, see the module docstring) across every one of those structures
+      win_rate / win_rate_rebate, total_pnl / total_pnl_rebate   the same figures as summarize(), over all of them together
+
+    Sorted by round trips, most-traded contract first; ties broken by name. Rows with no name are their own contract (kept,
+    not dropped)."""
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        groups[strip_reuse_suffix(row.get("name") or "")].append(row)
+    out = []
+    for contract, group in groups.items():
+        stats = summarize(group)
+        out.append({
+            "contract": contract, "trades": len({row["structure_id"] for row in group}), "round_trips": stats["total"],
+            "win_rate": stats["win_rate"], "win_rate_rebate": stats["win_rate_rebate"],
+            "total_pnl": stats["total_pnl"], "total_pnl_rebate": stats["total_pnl_rebate"],
+        })
+    return sorted(out, key=lambda r: (-r["round_trips"], r["contract"]))
 
 
 # ----------------------------------------------------------------------

@@ -256,3 +256,164 @@ def test_the_page_is_in_the_menu_and_the_router():
 
     assert shell._ROUTES["/level-alerts"] == ("level_alerts_tab", "level_alerts_layout")
     assert any(path == "/level-alerts" for path, _ in NAV_ITEMS)
+
+
+# ---------------- editing a saved alert ----------------
+
+
+def test_editing_replaces_the_alert_and_arms_it_again_keeping_its_id_and_creation_time(repo):
+    old = stored(repo, level=0.8, name="old")
+    assert repo.mark_level_alert_triggered(old.alert_id, 0.85)
+    new, contracts, _ = build(repo, level=0.3, name="new", direction=BELOW, symbols=["BRNJ27", "BRNM27"])
+    new.alert_id = old.alert_id
+    for contract in contracts:
+        repo.save_contract(contract)
+    assert repo.update_level_alert(new) is True
+    (edited,) = repo.get_level_alerts()
+    assert (edited.alert_id, edited.name, edited.level, edited.direction, edited.status) == (old.alert_id, "new", 0.3, BELOW, ACTIVE)
+    assert edited.symbols == ["BRNJ27", "BRNM27"] and edited.triggered_at is None and edited.triggered_price is None
+    assert abs((edited.created_at - old.created_at).total_seconds()) < 1  # created_at is not touched
+    assert [r["action"] for r in repo.get_audit_log(10, entity_type="level_alert")][0] == "level_alert.update"
+    ghost = build(repo)[0]
+    assert repo.update_level_alert(ghost) is False  # deleted meanwhile (or never stored)
+
+
+def test_a_template_is_found_from_the_ratios_of_the_legs():
+    assert lc.template_for([{"ratio": 1}]) == "outright" and lc.template_for([{"ratio": 1}, {"ratio": -1}]) == "spread"
+    assert lc.template_for([{"ratio": 1}, {"ratio": -2}, {"ratio": 1}]) == "fly" and lc.template_for([{"ratio": 1}, {"ratio": -2}]) == "custom"
+
+
+def _click(monkeypatch, trigger_id, value=1, prop="x.n_clicks"):
+    class Ctx:
+        triggered_id = trigger_id
+        triggered = [{"prop_id": prop, "value": value}]
+
+    monkeypatch.setattr(lc, "callback_context", Ctx())
+
+
+def test_edit_loads_the_alert_into_the_form_and_save_updates_it(page, repo, monkeypatch):
+    alert = stored(repo, level=0.8, name="mine")
+    repo.mark_level_alert_triggered(alert.alert_id, 0.85)
+    _click(monkeypatch, {"type": "la-edit", "index": alert.alert_id}, value=None)
+    with pytest.raises(lc.PreventUpdate):
+        lc.start_edit([None])  # a button that was just drawn
+    _click(monkeypatch, {"type": "la-edit", "index": alert.alert_id})
+    state, template, level, direction, name, title, label, cancel, message = lc.start_edit([1])
+    assert state == {"id": alert.alert_id, "template": "spread", "legs": alert.legs} and (template, level, direction, name) == ("spread", 0.8, ABOVE, "mine")
+    assert title == "Edit price alert" and label == "💾 Save changes" and cancel == {"display": "inline-block"} and "arms it again" in str(message)
+    _click(monkeypatch, {"type": "la-edit", "index": "gone"})
+    with pytest.raises(lc.PreventUpdate):
+        lc.start_edit([1])
+    # the same button creates nothing while editing, and saves instead
+    with pytest.raises(lc.PreventUpdate):
+        lc.create_alert(1, "spread", ["BRNJ27", "BRNK27"], [1, -1], 0.9, ABOVE, "", LIVE, 2, state)
+    status, counter, lvl, nm, editing, title, label, cancel = lc.save_edit(1, "spread", ["BRNJ27", "BRNM27"], [1, -1], 0.4, BELOW, "renamed", LIVE, 2, state)
+    assert "saved and armed" in str(status) and counter == 3 and (lvl, nm, editing) == (None, None, None) and title == "New price alert" and cancel == {"display": "none"}
+    (saved,) = repo.get_level_alerts()
+    assert (saved.alert_id, saved.name, saved.level, saved.direction, saved.status, saved.symbols) == (alert.alert_id, "renamed", 0.4, BELOW, ACTIVE, ["BRNJ27", "BRNM27"])
+    with pytest.raises(lc.PreventUpdate):
+        lc.save_edit(1, "spread", [], [], 1, AUTO, "", LIVE, 0, None)  # not editing: the create callback handles the button
+
+
+def test_a_bad_edit_keeps_the_form_and_the_alert_and_a_deleted_alert_is_reported(page, repo):
+    alert = stored(repo, level=0.8)
+    state = {"id": alert.alert_id, "template": "spread", "legs": alert.legs}
+    refused = lc.save_edit(1, "spread", ["BRNJ27", "BRNK27"], [1, -1], "oops", AUTO, "", LIVE, 2, state)
+    assert "price level as a number" in str(refused[0]) and refused[1:] == (lc.no_update,) * 7
+    assert repo.get_level_alerts()[0].level == 0.8
+    repo.delete_level_alert(alert.alert_id)
+    gone = lc.save_edit(1, "spread", ["BRNJ27", "BRNK27"], [1, -1], 0.5, ABOVE, "", LIVE, 2, state)
+    assert "deleted meanwhile" in str(gone[0]) and gone[4] is None and repo.get_level_alerts() == []
+
+
+def test_cancel_leaves_edit_mode_and_the_leg_rows_come_from_the_alert_being_edited(page, repo, monkeypatch):
+    assert lc.cancel_edit(1) == (None, None, None, "New price alert", "🔔 Create alert", {"display": "none"}, "")
+    with pytest.raises(lc.PreventUpdate):
+        lc.cancel_edit(None)
+    legs = [{"symbol": "BRNJ27", "ratio": 1}, {"symbol": "BRNK27", "ratio": -1}]
+    _click(monkeypatch, "la-edit", value={"id": "a"}, prop="la-edit.data")
+    rows = lc.update_leg_rows("spread", None, [], [], [], {"id": "a", "template": "spread", "legs": legs})
+    assert [r.children[1].children.value for r in rows] == ["BRNJ27", "BRNK27"] and [r.children[2].children.value for r in rows] == [1, -1]
+    _click(monkeypatch, "la-template", value="fly", prop="la-template.value")  # a template pick while editing still resets the rows
+    assert [r.children[1].children.value for r in lc.update_leg_rows("fly", None, [], [], [], {"id": "a", "legs": legs})] == [None, None, None]
+
+
+def test_every_row_has_an_edit_and_a_delete_button(page, repo):
+    stored(repo, name="a")
+    text = str(alerts_table(repo.get_level_alerts(), PRICES))
+    assert text.count("la-edit") == 1 and text.count("la-delete") == 1
+
+
+# ---------------- stop / start ----------------
+
+
+def test_stopping_pauses_an_active_alert_and_starting_makes_it_active_again(repo):
+    alert = stored(repo, level=0.8)
+    assert repo.pause_level_alert(alert.alert_id) is True
+    (paused,) = repo.get_level_alerts()
+    assert paused.status == "paused"
+    assert repo.pause_level_alert(alert.alert_id) is False  # already paused
+    assert repo.get_level_alerts(ACTIVE) == [] and repo.get_level_alerts("paused") == [paused]
+    assert repo.resume_level_alert(alert.alert_id) is True
+    assert repo.get_level_alerts()[0].status == ACTIVE
+    assert repo.resume_level_alert(alert.alert_id) is False  # already active
+    assert repo.pause_level_alert("gone") is False and repo.resume_level_alert("gone") is False
+    actions = [row["action"] for row in repo.get_audit_log(10, entity_type="level_alert")]
+    assert actions[:2] == ["level_alert.resume", "level_alert.pause"]
+
+
+def test_a_paused_alert_cannot_fire_and_a_triggered_one_cannot_be_paused(repo):
+    alert = stored(repo, level=0.8)
+    repo.pause_level_alert(alert.alert_id)
+    manager = Recorder()
+    assert check_level_alerts(repo, manager, {"BRNJ27": 85.0, "BRNK27": 1.0}) == [] and manager.sent == []
+    assert repo.get_level_alerts()[0].status == "paused"  # still paused, not triggered
+    repo.resume_level_alert(alert.alert_id)
+    assert len(check_level_alerts(repo, manager, {"BRNJ27": 85.0, "BRNK27": 1.0})) == 1
+    assert repo.pause_level_alert(alert.alert_id) is False  # triggered now: pausing it does nothing
+
+
+def test_a_paused_alert_leg_is_dropped_from_the_live_feed(repo):
+    from adapters.live.fairvalue import FairValueLiveAdapter
+
+    alert = stored(repo, symbols=["BRNJ27", "BRNK27"], level=0.8)
+    adapter = FairValueLiveAdapter(repo, staleness_threshold_seconds=10.0)
+    assert adapter.polled_symbols() == {"BRNJ27", "BRNK27"}
+    repo.pause_level_alert(alert.alert_id)
+    assert adapter.polled_symbols() == set()
+    repo.resume_level_alert(alert.alert_id)
+    assert adapter.polled_symbols() == {"BRNJ27", "BRNK27"}
+
+
+def test_stop_and_start_buttons_toggle_the_status(page, repo):
+    alert = stored(repo, level=0.8)
+
+    def click(button_type, value=1):
+        _click_pause = type("Ctx", (), {"triggered_id": {"type": button_type, "index": alert.alert_id}, "triggered": [{"prop_id": "x.n_clicks", "value": value}]})()
+        return _click_pause
+
+    import ui.callbacks.level_alerts_callbacks as lc2
+
+    lc2.callback_context = click("la-pause")
+    assert lc2.pause_alert([1], 3) == 4
+    assert repo.get_level_alerts()[0].status == "paused"
+    lc2.callback_context = click("la-pause", value=None)
+    with pytest.raises(lc2.PreventUpdate):
+        lc2.pause_alert([None], 4)  # just drawn, not clicked
+    lc2.callback_context = click("la-resume")
+    assert lc2.resume_alert([1], 4) == 5
+    assert repo.get_level_alerts()[0].status == "active"
+    lc2.callback_context = click("la-delete")
+    with pytest.raises(lc2.PreventUpdate):
+        lc2.pause_alert([1], 5)  # the wrong button type triggered
+
+
+def test_an_active_row_shows_stop_a_paused_row_shows_start_a_triggered_row_shows_neither(page, repo):
+    active = stored(repo, name="a", level=0.8)
+    paused = stored(repo, name="b", level=0.5)
+    repo.pause_level_alert(paused.alert_id)
+    done = stored(repo, name="c", level=0.9)
+    repo.mark_level_alert_triggered(done.alert_id, 0.95)
+    text = str(alerts_table(repo.get_level_alerts(), PRICES))
+    assert text.count("la-pause") == 1 and text.count("la-resume") == 1
+    assert "⏸ Stopped" in text and "▶ Start" in text and "⏸ Stop" in text

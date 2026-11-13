@@ -256,7 +256,11 @@ def fetch_live_prices(n_intervals):
         }
         for symbol, p in live.items()
     }
-    missing = [s for s in symbols if s not in prices]
+    # A price is only expected for what the feed polls (open and shell structures, the watchlist, active price alerts). The other saved
+    # contracts (closed structures' legs) are never requested, so counting them would show "Data Stale" for good.
+    polled = getattr(container.live_adapter, "polled_symbols", None)
+    expected = [s for s in (sorted(polled()) if callable(polled) else symbols) if _is_translatable(s)]
+    missing = [s for s in expected if s not in prices]
     for symbol in missing:
         if symbol in cache.prices:
             prices[symbol] = {**cache.prices[symbol], "is_stale": True}

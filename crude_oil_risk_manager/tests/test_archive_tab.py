@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from dash.exceptions import PreventUpdate
 
-from core.archive import build_archive_rows, filter_archive_rows, summarize
+from core.archive import build_archive_rows, contract_summary, filter_archive_rows, rows_closed_this_week, strip_reuse_suffix, summarize, week_bounds, week_summary
 from core.models import Contract, Leg, Structure, StructureStatus, StructureType, Trade, TradeEventType
 from core.pnl import calculate_todays_realized_pnl
 from db.repository import Repository
@@ -492,3 +492,111 @@ def test_a_fly_minus_fly_earns_the_rebate_of_its_legs():
     diff = Structure(name="d", structure_type=StructureType.FLYDIFF, products=["BRN"], status=StructureStatus.CLOSED,
                      legs=[fly("BRNG28-H28-J28", 1), fly("BRNH28-J28-K28", -2)])
     assert RebateBook().per_side(diff) == pytest.approx((1.0 + 0.24) * 3)  # three BRN flies per lot
+
+
+# ---------- contract-wise analysis ----------
+
+
+def test_the_reuse_suffix_is_stripped_however_many_times_it_was_added():
+    assert strip_reuse_suffix("BZ May27 DFly") == "BZ May27 DFly"
+    assert strip_reuse_suffix("BZ May27 DFly (reuse)") == "BZ May27 DFly"
+    assert strip_reuse_suffix("BZ May27 DFly (reuse) (reuse)") == "BZ May27 DFly"
+    assert strip_reuse_suffix("BZ May27 DFly (Reuse)") == "BZ May27 DFly"  # case-insensitive
+    assert strip_reuse_suffix("(reuse)") == "(reuse)"  # never blank: nothing left to group by otherwise
+    assert strip_reuse_suffix("") == ""
+
+
+def test_contracts_traded_more_than_once_are_grouped_by_their_name_with_reuse_stripped(rows):
+    # two structures of "Z spread": the original (500, win) and a reuse (-100, loss); "F outright" traded once; "Flat fly" once, flat
+    original, extra = rows[0], closed("Z spread (reuse)", [("CLZ25", 1, "buy")], exit_=(2026, 8, 12), pnl=-100, stype=StructureType.OUTRIGHT)
+    more = build(extra)
+    summary = {r["contract"]: r for r in contract_summary([*rows, *more])}
+    assert set(summary) == {"Z spread", "F outright", "Flat fly"}
+    z = summary["Z spread"]
+    assert (z["trades"], z["round_trips"]) == (2, 2)  # two distinct structures (the original and its reuse), one round trip each
+    assert z["win_rate"] == pytest.approx(50.0) and z["total_pnl"] == pytest.approx(400.0)  # 500 - 100, one win one loss
+    assert z["win_rate_rebate"] == z["win_rate"] and z["total_pnl_rebate"] == z["total_pnl"]  # no RebateBook passed in: unchanged
+    assert summary["F outright"]["trades"] == 1 and summary["F outright"]["round_trips"] == 1
+    assert contract_summary([]) == []
+
+
+def test_contract_summary_is_sorted_by_round_trips_then_name():
+    busy = build(closed("Busy", [("CLZ25", 1, "buy")], exit_=(2026, 8, 1), pnl=10),
+                 closed("Busy (reuse)", [("CLZ25", 1, "buy")], exit_=(2026, 8, 2), pnl=10))
+    quiet = build(closed("Quiet", [("CLZ25", 1, "buy")], exit_=(2026, 8, 3), pnl=10))
+    summary = contract_summary([*busy, *quiet])
+    assert [r["contract"] for r in summary] == ["Busy", "Quiet"]
+
+
+def test_a_multi_leg_structure_keeps_its_own_round_trips_per_partial_exit():
+    structure, trades = closed("Partial", [("CLZ25", 1, "buy")], pnl=100, lots=5.0)
+    trades[1] = trades[1].model_copy(update={"lots": 2.0})  # a partial exit: a second exit still owes 3 lots, but this test only checks what happened
+    rows = build_archive_rows([structure], {structure.structure_id: trades})
+    summary = contract_summary(rows)
+    assert summary[0]["round_trips"] == len(rows) == summary[0]["trades"]  # one structure, one exit so far: one trade, one round trip
+
+
+def test_the_analysis_tab_fills_the_contract_table(repo, env):
+    from ui.layouts.archive_analysis import CONTRACT_COLUMNS, contract_records
+
+    rows = build(closed("A", [("CLZ25", 1, "buy")], pnl=500), closed("A (reuse)", [("CLZ25", 1, "buy")], pnl=-100, exit_=(2026, 8, 12)))
+    records = ac.render_contracts(rows)
+    assert {c["id"] for c in CONTRACT_COLUMNS} == set(records[0])
+    assert records[0]["contract"] == "A" and records[0]["trades"] == 2 and records[0]["round_trips"] == 2
+    assert records[0]["win_rate"] == pytest.approx(0.5) and records[0]["total_pnl"] == pytest.approx(400.0)  # a fraction, for the percentage format
+    assert ac.render_contracts([]) == contract_records(contract_summary([])) == []
+    assert "analysis-contract-table" in str(archive_layout())
+
+
+# ---------- weekly analysis ----------
+
+
+def test_week_bounds_is_the_monday_to_sunday_containing_the_day():
+    assert week_bounds(date(2026, 8, 10)) == (date(2026, 8, 10), date(2026, 8, 16))  # a Monday itself
+    assert week_bounds(date(2026, 8, 16)) == (date(2026, 8, 10), date(2026, 8, 16))  # the Sunday of the same week
+    assert week_bounds(date(2026, 8, 11)) == (date(2026, 8, 10), date(2026, 8, 16))  # a Tuesday in between
+
+
+def test_rows_closed_this_week_goes_by_exit_date_not_entry_date(rows):
+    # "Z spread" exits Mon 2026-08-10, "F outright" exits Thu 2026-08-20 (next week), "Flat fly" exits Sat 2026-09-05
+    this_week = rows_closed_this_week(rows, date(2026, 8, 10))
+    assert names(this_week) == {"Z spread"}
+    assert rows_closed_this_week(rows, date(2026, 8, 24)) == []  # the week between "F outright" and "Flat fly" holds nothing of "rows"
+    late_entry = build(closed("Carried over", [("CLZ25", 1, "buy")], entry=(2026, 7, 1), exit_=(2026, 8, 11), pnl=50))
+    assert names(rows_closed_this_week(late_entry, date(2026, 8, 10))) == {"Carried over"}  # entered weeks ago, closed this week: counted
+    assert rows_closed_this_week([], date(2026, 8, 10)) == []
+
+
+def test_week_summary_adds_trades_and_profit_factor_to_summarize(rows):
+    this_week = rows_closed_this_week(rows, date(2026, 8, 10))
+    stats = week_summary(this_week)
+    assert stats["trades"] == 1
+    assert stats["total_pnl"] == pytest.approx(500.0)
+    assert stats["profit_factor"] == float("inf")  # one winner, no loser
+    assert stats["profit_factor_rebate"] == float("inf")  # no RebateBook passed in: unchanged
+    assert week_summary([])["profit_factor"] is None  # nothing decided
+
+
+def test_week_summary_profit_factor_is_gross_win_over_gross_loss():
+    mixed = build(closed("Win", [("CLZ25", 1, "buy")], exit_=(2026, 8, 11), pnl=300),
+                 closed("Loss", [("CLZ25", 1, "buy")], exit_=(2026, 8, 12), pnl=-100))
+    stats = week_summary(mixed)
+    assert stats["trades"] == 2
+    assert stats["profit_factor"] == pytest.approx(3.0)
+    all_losses = build(closed("Loss", [("CLZ25", 1, "buy")], exit_=(2026, 8, 11), pnl=-100))
+    assert week_summary(all_losses)["profit_factor"] == 0.0
+
+
+def test_the_analysis_tab_fills_the_week_cards_and_table(repo, env, monkeypatch):
+    from ui.layouts.archive_analysis import WEEK_CONTRACT_COLUMNS
+
+    monkeypatch.setattr(ac, "london_today", lambda: date(2026, 8, 10))  # the Monday of the week both rows exit in
+    rows = build(closed("A", [("CLZ25", 1, "buy")], pnl=500, exit_=(2026, 8, 11)), closed("A (reuse)", [("CLZ25", 1, "buy")], pnl=-100, exit_=(2026, 8, 12)))
+    cards, records = ac.render_week(rows)
+    assert len(cards) == 7  # trades, net pnl x2, win rate x2, profit factor x2
+    assert records[0]["contract"] == "A" and records[0]["trades"] == 2
+    assert {c["id"] for c in WEEK_CONTRACT_COLUMNS} == set(records[0])
+    assert "round_trips" not in records[0]
+    empty_cards, empty_records = ac.render_week([])
+    assert len(empty_cards) == 7 and empty_records == []
+    assert "analysis-week-contract-table" in str(archive_layout())

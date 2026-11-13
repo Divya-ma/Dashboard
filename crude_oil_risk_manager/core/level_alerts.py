@@ -8,13 +8,17 @@ it stays on the page as a triggered alert until it is deleted.
 
 DIRECTION. "above" fires at or over the level, "below" at or under it. "auto" (the default on the page) looks at the structure's
 price when the alert is made: a level above it is "above", a level below it is "below", and a level equal to it is "above".
+
+STOP / START. An active alert can be stopped (PAUSED): it stays in the list, keeps its level and legs, but is skipped by
+check_level_alerts and dropped from the live feed's leg list (adapters.live.fairvalue), so it cannot fire while paused and costs
+nothing. Start makes it active again. A triggered alert is already done; Edit, not Start, is what arms it again.
 """
 
 import logging
 import math
 from core.exceptions import CrudeOilRiskError
 from core.models import AlertLevel
-from core.models.level_alert import ACTIVE, TRIGGERED, LevelAlert  # noqa: F401 - re-exported for the page
+from core.models.level_alert import ACTIVE, PAUSED, TRIGGERED, LevelAlert  # noqa: F401 - re-exported for the page
 from core.structure_builder import StructureBuildError, build_shell_structure
 from core.structure_utils import compose_structure_symbol
 

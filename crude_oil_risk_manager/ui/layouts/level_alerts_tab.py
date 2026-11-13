@@ -8,12 +8,14 @@ ui/callbacks/level_alerts_callbacks.py fills; core/level_alerts.py holds the rul
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 
-from core.level_alerts import ABOVE, AUTO, BELOW, DIRECTION_LABELS, TRIGGERED, level_price
+from core.level_alerts import ABOVE, AUTO, BELOW, DIRECTION_LABELS, PAUSED, TRIGGERED, level_price
 from core.structure_utils import STRUCTURE_TEMPLATES
 from ui.layouts.shell import COLORS
 
 EMPTY = "—"
 DEFAULT_TEMPLATE = "spread"
+NEW_TITLE, CREATE_LABEL = "New price alert", "🔔 Create alert"
+EDIT_TITLE, SAVE_LABEL = "Edit price alert", "💾 Save changes"
 
 _MUTED = {"color": COLORS["TEXT_SECONDARY"], "fontSize": "13px"}
 _LABEL = {**_MUTED, "textTransform": "uppercase", "letterSpacing": "0.05em", "marginBottom": "6px"}
@@ -43,7 +45,7 @@ def leg_rows(rows: list[dict], removable: bool) -> list:
 
 def _form() -> dbc.Card:
     return dbc.Card(dbc.CardBody([
-        html.H5("New price alert", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "12px"}),
+        html.H5(NEW_TITLE, id="la-form-title", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "12px"}),
         dbc.Row([
             dbc.Col([html.Div("Structure type", style=_LABEL), dcc.Dropdown(
                 id="la-template", options=[{"label": f"{spec['icon']} {spec['label']}", "value": key} for key, spec in STRUCTURE_TEMPLATES.items()],
@@ -57,7 +59,8 @@ def _form() -> dbc.Card:
             dbc.Col([html.Div("Price level", style=_LABEL), dbc.Input(id="la-level", type="number", step="any", placeholder="e.g. 0.45")], md=2),
             dbc.Col([html.Div("Fire when", style=_LABEL), dcc.Dropdown(id="la-trigger", options=TRIGGER_OPTIONS, value=AUTO, clearable=False, className="builder-dropdown")], md=4),
             dbc.Col([html.Div("Name (optional)", style=_LABEL), dbc.Input(id="la-name", maxLength=100, placeholder="blank = the structure's symbol")], md=4),
-            dbc.Col([html.Div(" ", style=_LABEL), dbc.Button("🔔 Create alert", id="la-create", color="primary")], md=2),
+            dbc.Col([html.Div(" ", style=_LABEL), dbc.Button(CREATE_LABEL, id="la-create", color="primary"),
+                                  dbc.Button("Cancel", id="la-cancel", color="secondary", outline=True, className="ms-2", style={"display": "none"})], md=2),
         ], className="g-2"),
         html.Div(id="la-status", style={"fontSize": "13px", "minHeight": "20px", "marginTop": "10px", "whiteSpace": "pre-wrap"}),
     ]), style=_CARD, className="mb-4")
@@ -82,8 +85,12 @@ def alerts_table(alerts: list, prices: dict[str, float]) -> html.Div:
     for alert in [*active, *done]:
         price, fired = live[alert.alert_id], alert.status == TRIGGERED
         legs = " / ".join(f"{leg['ratio']:+g} {leg['symbol']}" for leg in alert.legs)
+        paused = alert.status == PAUSED
         status = (html.Span(f"✓ Triggered {alert.triggered_at:%Y-%m-%d %H:%M} UTC at {alert.triggered_price:g}", style={"color": COLORS["ACCENT_YELLOW"]})
-                  if fired else html.Span("● Active", style={"color": COLORS["ACCENT_GREEN"]}))
+                  if fired else html.Span("⏸ Stopped", style=_MUTED) if paused else html.Span("● Active", style={"color": COLORS["ACCENT_GREEN"]}))
+        toggle = None if fired else (
+            dbc.Button("▶ Start", id={"type": "la-resume", "index": alert.alert_id}, color="success", outline=True, size="sm", className="me-1") if paused
+            else dbc.Button("⏸ Stop", id={"type": "la-pause", "index": alert.alert_id}, color="warning", outline=True, size="sm", className="me-1"))
         rows.append(html.Tr([
             html.Td(alert.name, style={**_CELL, "fontWeight": "bold"}),
             html.Td(legs, style={**_CELL, **_MUTED, "fontFamily": "monospace"}),
@@ -93,8 +100,10 @@ def alerts_table(alerts: list, prices: dict[str, float]) -> html.Div:
             html.Td(EMPTY if fired or price is None else f"{abs(alert.level - price):g} to go", style=_CELL),
             html.Td(status, style=_CELL),
             html.Td(f"{alert.created_at:%Y-%m-%d %H:%M}", style={**_CELL, **_MUTED}),
-            html.Td(dbc.Button("🗑 Delete", id={"type": "la-delete", "index": alert.alert_id}, color="danger", outline=True, size="sm"), style=_CELL),
-        ], style={"opacity": "0.75"} if fired else {}))
+            html.Td([dbc.Button("✏️ Edit", id={"type": "la-edit", "index": alert.alert_id}, color="secondary", outline=True, size="sm", className="me-1"),
+                     toggle,
+                     dbc.Button("🗑 Delete", id={"type": "la-delete", "index": alert.alert_id}, color="danger", outline=True, size="sm")], style={**_CELL, "whiteSpace": "nowrap"}),
+        ], style={"opacity": "0.75"} if fired or paused else {}))
     head = html.Thead(html.Tr([html.Th(h, style={**_CELL, **_MUTED, "textAlign": "left"}) for h in
                                ("Name", "Legs", "Level", "Fires when price", "Live price", "Distance", "Status", "Created (UTC)", "")]))
     return html.Div(html.Table([head, html.Tbody(rows)], style={"width": "100%", "color": COLORS["TEXT_PRIMARY"]}), style={"overflowX": "auto"})
@@ -104,8 +113,11 @@ def level_alerts_layout() -> html.Div:
     return html.Div([
         html.H3("🔔 Price Alerts", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "4px"}),
         html.Div("Make a structure, type a price level, and get an alert (in the app and in Teams) when its live price gets there. "
-                 "Each alert fires once and stays in the list as triggered until you delete it.", style={**_MUTED, "marginBottom": "16px"}),
+                 "Each alert fires once and stays in the list as triggered until you delete it. Edit changes an alert's legs, level or name, "
+                 "and arms a triggered alert again. Stop keeps an alert without it firing or being polled; Start makes it live again.",
+                 style={**_MUTED, "marginBottom": "16px"}),
         _form(),
         dbc.Card(dbc.CardBody([_heading("Your alerts"), html.Div(id="la-table")]), style=_CARD),
         dcc.Store(id="la-refresh", data=0),
+        dcc.Store(id="la-edit", data=None),  # the alert being edited: {"id", "template", "legs"}, None when the form makes a new one
     ], style={"padding": "24px"})

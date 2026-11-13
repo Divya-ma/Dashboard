@@ -15,9 +15,12 @@ from core.archive_edit import ArchiveEditError, edit_legs, edit_structure, edit_
 from core.archive_export import archive_to_excel
 from core.journal_analysis import equity_curve, group_table, headline, separation, trade_table, two_way
 from ui.layouts.archive_analysis import (
-    build_bar_figure, build_cards, build_equity_figure, separation_records, table_records, two_way_records,
+    build_bar_figure, build_cards, build_equity_figure, build_week_cards, contract_records, separation_records, table_records, two_way_records, week_contract_records,
 )
-from core.archive import ATR_DISPLAY_SCALE, build_archive_rows, delete_archived_structures, display_atr, filter_archive_rows, journal_columns, structure_id_of, summarize
+from core.archive import (
+    ATR_DISPLAY_SCALE, build_archive_rows, contract_summary, delete_archived_structures, display_atr, filter_archive_rows,
+    journal_columns, rows_closed_this_week, structure_id_of, summarize, week_summary,
+)
 from core.models import StructureStatus
 from core.rebates import RebateBook
 from core.pnl import calculate_net_realized_pnl
@@ -114,6 +117,17 @@ def render_analysis(rows, dimension):
     frame = trade_table(rows or [])
     table = group_table(frame, dimension or "type")
     return build_cards(headline(frame)), build_equity_figure(equity_curve(frame)), build_bar_figure(table), table_records(table)
+
+
+def render_contracts(rows):
+    """Contract-wise analysis table: every structure the filters leave, grouped by contract (core.archive.contract_summary)."""
+    return contract_records(contract_summary(rows or []))
+
+
+def render_week(rows):
+    """This week's closed trades: the filtered rows exited Monday-Sunday (London time) this week, as headline cards and a per-contract table."""
+    week_rows = rows_closed_this_week(rows or [], london_today())
+    return build_week_cards(week_summary(week_rows)), week_contract_records(contract_summary(week_rows))
 
 
 def render_two_way(rows, dim_a, dim_b):
@@ -512,6 +526,17 @@ def register_archive_callbacks(app) -> None:
         Input("archive-rows", "data"),
         Input("analysis-dimension", "value"),
     )(render_analysis)
+
+    app.callback(
+        Output("analysis-contract-table", "data"),
+        Input("archive-rows", "data"),
+    )(render_contracts)
+
+    app.callback(
+        Output("analysis-week-cards", "children"),
+        Output("analysis-week-contract-table", "data"),
+        Input("archive-rows", "data"),
+    )(render_week)
 
     app.callback(
         Output("archive-export-download", "data"),

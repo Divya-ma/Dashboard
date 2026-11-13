@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-ACTIVE, TRIGGERED = "active", "triggered"
+ACTIVE, TRIGGERED, PAUSED = "active", "triggered", "paused"
 
 
 @dataclass
@@ -14,7 +14,7 @@ class LevelAlert:
     level: float
     direction: str  # "above" (fires at or over the level) | "below" (at or under it)
     alert_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    status: str = ACTIVE
+    status: str = ACTIVE  # active (live, can fire) | paused (kept, but not polled or fired until started again) | triggered (fired once)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     created_price: float | None = None
     triggered_at: datetime | None = None

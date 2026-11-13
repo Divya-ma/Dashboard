@@ -1028,6 +1028,47 @@ class Repository:
             self._audit(conn, "level_alert.delete", "level_alert", alert_id, f"price alert '{row[0]}' deleted ({row[1]} {row[2]:g})")
             return True
 
+    def update_level_alert(self, alert: LevelAlert) -> bool:
+        """Replace the legs, level, direction and name of a stored alert (its id and creation time stay) and ARM it again: a
+        triggered alert that is edited is active, with no trigger recorded. False if it was deleted meanwhile."""
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                text("UPDATE level_alerts SET name = :name, legs = :legs, level = :level, direction = :direction, status = 'active', "
+                     "created_price = :created_price, triggered_at = NULL, triggered_price = NULL WHERE alert_id = :id"),
+                {"name": alert.name, "legs": json.dumps(alert.legs), "level": alert.level, "direction": alert.direction,
+                 "created_price": alert.created_price, "id": alert.alert_id},
+            )
+            if result.rowcount != 1:
+                return False
+            self._audit(conn, "level_alert.update", "level_alert", alert.alert_id,
+                        f"price alert '{alert.name}' edited: {alert.direction} {alert.level:g}", {"legs": alert.legs})
+            return True
+
+    def pause_level_alert(self, alert_id: str) -> bool:
+        """Active -> paused: it stops firing and the live feed stops polling its legs. False if it is not currently active
+        (already paused, triggered, or deleted)."""
+        with self._engine.begin() as conn:
+            row = conn.execute(text("SELECT name FROM level_alerts WHERE alert_id = :id"), {"id": alert_id}).first()
+            if row is None:
+                return False
+            result = conn.execute(text("UPDATE level_alerts SET status = 'paused' WHERE alert_id = :id AND status = 'active'"), {"id": alert_id})
+            if result.rowcount != 1:
+                return False
+            self._audit(conn, "level_alert.pause", "level_alert", alert_id, f"price alert '{row[0]}' stopped")
+            return True
+
+    def resume_level_alert(self, alert_id: str) -> bool:
+        """Paused -> active. False if it is not currently paused (already active, triggered, or deleted)."""
+        with self._engine.begin() as conn:
+            row = conn.execute(text("SELECT name FROM level_alerts WHERE alert_id = :id"), {"id": alert_id}).first()
+            if row is None:
+                return False
+            result = conn.execute(text("UPDATE level_alerts SET status = 'active' WHERE alert_id = :id AND status = 'paused'"), {"id": alert_id})
+            if result.rowcount != 1:
+                return False
+            self._audit(conn, "level_alert.resume", "level_alert", alert_id, f"price alert '{row[0]}' started")
+            return True
+
     def mark_level_alert_triggered(self, alert_id: str, price: float) -> bool:
         """Active -> triggered. True only for the call that changed the row (so an alert is sent once); False if it was
         already triggered or deleted."""

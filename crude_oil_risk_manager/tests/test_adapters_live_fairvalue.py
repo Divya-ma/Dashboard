@@ -355,3 +355,37 @@ def test_an_open_box_position_is_priced_from_its_legs_when_the_api_has_no_price(
     prices = adapter.get_live_prices([])
     assert request.call_args.kwargs["params"]["products"].split(",") == ["WTCLCOF27", "CLF27", "BZZF27"]  # the legs are asked for with it
     assert prices["CLBZF27"].price == pytest.approx(-2.5) and prices["CLBZF27"].derived
+
+
+# ---------- price-level alerts ----------
+
+
+def _level_alert(*symbols, status="active"):
+    from core.models.level_alert import LevelAlert
+
+    return LevelAlert(name="alert", legs=[{"symbol": s, "ratio": 1 if n == 0 else -1} for n, s in enumerate(symbols)], level=1.0, direction="above", status=status)
+
+
+def test_the_legs_of_active_price_alerts_are_polled_even_when_no_structure_holds_them(adapter, repo, mocker):
+    """A Price Alerts structure is not a position: its legs got no live price (and the page showed a dash) until the feed asked for them."""
+    repo.set_setting("api_access_token", "tok")
+    save_open_structure(repo, "Open CL", [make_leg()])
+    repo.save_level_alert(_level_alert("BRNZ26", "CLF27"))
+    repo.save_level_alert(_level_alert("WBSZ26", "CLG27", status="triggered"))  # fired already: nothing to watch
+    get = mocker.patch(
+        "adapters.qh_api.client.requests.Session.request",
+        return_value=mocker.Mock(headers={}, status_code=200, json=lambda: {"data": []}),
+    )
+    adapter.get_live_prices([])
+    assert set(get.call_args.kwargs["params"]["products"].split(",")) == {"CLZ26", "COZ26", "CLF27"}
+    assert adapter.polled_symbols() == {"CLZ26", "BRNZ26", "CLF27"}
+
+
+def test_a_failing_alert_read_never_stops_the_position_prices(adapter, repo, monkeypatch):
+    save_open_structure(repo, "Open CL", [make_leg()])
+
+    def broken(_status=None):
+        raise RuntimeError("table locked")
+
+    monkeypatch.setattr(repo, "get_level_alerts", broken)
+    assert adapter.polled_symbols() == {"CLZ26"}

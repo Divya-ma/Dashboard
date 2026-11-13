@@ -409,7 +409,14 @@ level and choose when it fires: *Auto* (from where the price is now: a level abo
 falls to it), or rises to / falls to explicitly. The structure's price is the same composite as on the Structures page, from the live
 prices. Each alert fires **once**: a toast that stays until dismissed, plus Teams like any other alert. It then stays in the list as
 *Triggered* until you delete it. The list shows each alert's live price and how far it is from its level, and every alert has a delete
-button. Its contracts are saved so the live poll prices them. Creating and deleting alerts is in the audit log.
+button, a **Stop/Start** button and an **Edit** button. Stop (⏸) pauses an active alert: it stays in the list with its level and legs,
+but is skipped by the price check and dropped from the live feed's requests until Start (▶) makes it active again — a paused alert
+shows *Stopped* and is dimmed like a triggered one, and neither is polled or can fire. Edit loads the alert into the form (the heading changes to *Edit price alert*), where its legs, level, direction or name can be
+changed and saved with the same checks as a new alert, or cancelled. Saving **arms the alert again**, so editing a triggered alert makes it active, with no
+trigger recorded. Its id and creation time stay, and the change is in the audit log. The live poll requests the legs of every **active** alert in the same `/fairvalue/` call as your positions (a triggered alert is no
+longer polled), so an alert on contracts that no structure holds still gets a live price. The sidebar's stale-data indicator counts only
+symbols the feed polls: contracts of closed structures stay saved but are never requested, so they do not keep it on "Data Stale".
+Creating and deleting alerts is in the audit log.
 
 Three clocks drive the app: a 10 s live-price poll, a 5 s portfolio refresh, a 1 s countdown.
 
@@ -824,6 +831,17 @@ the fee sheet and editable. How a trade's rebate is worked out (`core/rebates.py
   gross losses), payoff (average win ÷ average loss), total net P&L and costs paid, worst drawdown with the longest losing and
   winning runs, average payups.
 - *Equity curve and drawdown* (cumulative net P&L in exit order; the start counts as a peak).
+- **This week's closed trades** (`core.archive.week_summary` / `rows_closed_this_week`): every trade **exited** Monday-to-Sunday
+  this week, London time — closing date, not entry date, so a position opened last week and exited this week counts, and one
+  opened this week but still open does not. Cards: trades closed, net PnL, win rate and profit factor (gross wins ÷ gross
+  losses), each **before and after rebates**. Below the cards, the same per-contract breakdown as Contract-wise analysis
+  (reuse-merged, see below) but for the week only, with the Round trips column left out.
+- **Contract-wise analysis** (`core.archive.contract_summary`): every contract traded (an outright, spread, fly, d-fly or CL-BZ
+  box), by name — **Trades** (distinct structures entered), **Round trips** (every exit across them: see *one row per exit*
+  above), **Win rate** and **Net PnL**, each **before and after rebates**. A structure traded again under a name ending
+  `(reuse)` — the Structures page's *Reuse as Shell* copies the closed structure's own name unless you type a new one — is
+  grouped with the one it was reused from, however many times `(reuse)` was appended, so the contract's full history is one
+  row, not one per copy. Sorted by round trips, most-traded first.
 - *Group-by table and chart:* pick one column — structure type, product, trade idea, curve shape, outright price range (thirds
   of each product's own prices), day move, 1-minute move, stop distance in ATRs, planned risk:reward, conviction, exit reason,
   mistake tag, entry hour (London), weekday, days held, payups, volatility, volume, bid-ask, Brent–WTI, gasoil crack, and whether
