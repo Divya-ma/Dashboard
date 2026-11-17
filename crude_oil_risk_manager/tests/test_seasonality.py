@@ -290,19 +290,32 @@ def test_bad_controls_give_a_readable_message_not_a_crash(wired):
 
 
 def test_chart_has_a_line_per_year_the_band_and_the_live_marker(wired):
-    figure = callbacks.render_chart(0, 5, True, *CONTROLS)
+    figure = callbacks.render_chart(5, True, *CONTROLS)
     names = [t.name for t in figure.data if t.name]
     assert "Apr26" in names and "Apr20" in names
     assert any("band" in n for n in names) and "Average" in names and "Live" in names
     assert any("settlements" in n for n in names)
     assert figure.layout.xaxis.range == (pytest.approx(figure.layout.xaxis.range[0]), 0)
-    no_band = callbacks.render_chart(0, 5, False, *CONTROLS)
+    no_band = callbacks.render_chart(5, False, *CONTROLS)
     assert not any("band" in (t.name or "") for t in no_band.data)
     excluded = list(CONTROLS)
     excluded[9] = [2022]
-    figure = callbacks.render_chart(0, 5, True, *excluded)
+    figure = callbacks.render_chart(5, True, *excluded)
     assert "Apr22 (excluded)" in [t.name for t in figure.data]
-    assert callbacks.render_chart(0, None, True, *CONTROLS).layout.annotations[0].text == tab.PLACEHOLDER
+    assert callbacks.render_chart(None, True, *CONTROLS).layout.annotations[0].text == tab.PLACEHOLDER
+
+
+def test_chart_is_not_wired_to_the_live_interval_so_zooming_is_not_disturbed():
+    """A chart rebuilt on every live-price tick would fight the user's own zoom/pan while the page is open (see
+    render_chart's docstring); it still updates on its own Inputs, and fresh each time the page is (re)opened."""
+    import dash
+
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    callbacks.register_seasonality_callbacks(app)
+    spec = app.callback_map["season-graph.figure"]
+    input_ids = {item["id"] for item in spec["inputs"]}
+    assert "season-refresh" not in input_ids
+    assert "season-selected" in input_ids and "season-show-band" in input_ids
 
 
 def test_selecting_a_row_and_resetting_when_a_control_changes():

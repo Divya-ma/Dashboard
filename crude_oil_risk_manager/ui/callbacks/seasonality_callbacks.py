@@ -89,7 +89,10 @@ def select_row(active_cell, *controls):
     return selected_position(ctx.triggered_id, active_cell)
 
 
-def render_chart(n_intervals, selected, show_band, *controls):
+def render_chart(selected, show_band, *controls):
+    """Not on the live-price Interval: a chart rebuilt every tick fights the user's own zoom/pan while this page is open.
+    It still builds fresh on first load (and on revisiting the page, since the layout is rebuilt from scratch each time)
+    and whenever the row, band toggle or a control changes; the live price it shows then is whatever is cached at that moment."""
     service = container.seasonality
     if service is None or selected is None:
         return empty_figure(PLACEHOLDER)
@@ -122,7 +125,7 @@ def register_seasonality_callbacks(app) -> None:
         Output("season-selected", "data"), Input("season-table", "active_cell"), *INPUTS,
     )(select_row)
     app.callback(
-        Output("season-graph", "figure"), Input("season-refresh", "n_intervals"), Input("season-selected", "data"),
+        Output("season-graph", "figure"), Input("season-selected", "data"),
         Input("season-show-band", "value"), *INPUTS,
     )(render_chart)
     app.callback(Output("season-method", "disabled"), Input("season-family", "value"))(method_disabled)

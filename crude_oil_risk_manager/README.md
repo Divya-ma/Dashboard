@@ -339,6 +339,27 @@ a leg with a missing day cannot mix a one-day change with a two-day one.
 A trade structure's price series for correlation is built from its **outright legs' settlements**; BZ legs use the
 settlement of the ICE Brent contract of the same month and the result says so.
 
+### 5.5a Lead-Lag (`core/lead_lag.py`, `core/lead_lag_data.py`)
+
+Which of two contracts' moves line up with the other's a few bars later, on **5-minute bars** (price differences of the
+bar closes — never returns, same reasoning as 5.5: a spread/fly/box can be zero or negative).
+
+1. **Prewhitening.** A raw price-difference series has its own serial correlation (momentum, mean-reversion); left in, that
+   alone can make the cross-correlation peak away from zero for reasons that have nothing to do with either contract
+   leading the other. Each series is first run through its own AR(1) (OLS on its own previous value); only the
+   **residuals** go into the next step.
+2. **Cross-correlation function (CCF).** For lag *k* = −12..+12 bars: `CCF(k) = Corr(A(t), B(t+k))` of the two prewhitened
+   residual series, inner-joined on their own common bar timestamps first (at least 60 common bars, or the pair is
+   skipped). The *k* that maximizes `|CCF(k)|` is the lead-lag estimate: *k* > 0 means A leads B by *k* bars; *k* < 0 means
+   B leads A; *k* ≈ 0 or a flat CCF means no detectable lead-lag at this resolution.
+3. **Significance.** The usual t-test on a correlation from *n* observations (`t = r·√((n−2)/(1−r²))`, df = n−2), with the
+   same Bonferroni convention as 6.11's "what separates winners from losers": a lag **"stands out"** only if its p-value
+   beats 0.05 ÷ (lags tested); one that only beats 0.05 alone is **"worth a look"**; otherwise **"no sign"**.
+
+5-minute bars are cached locally the same way daily candles are (`adapters/historical/vendor.py`'s Parquet cache now keys
+by interval, not just by symbol), so the matrix only hits the live `/ohlc/` API for a window it has not already pulled; a
+bar that was still forming when first cached is overwritten the next time that same timestamp is requested.
+
 ### 5.6 Hedge ratio (`core/hedge.py`)
 
 For daily changes *y* of a position and *x* of the hedge instrument: **β = cov(y, x) / var(x)** (sample statistics). To hedge
@@ -517,6 +538,17 @@ differenced like everything else). Four views share the list: *Heatmap* (with an
 correlation of a pair for several windows), *Year Overlay* (the same pair across years by day of year), *Summary table*
 (lookback average, std, min, max, last, beta, R², observations for every pair). A "Backfill missing data" button downloads
 history for symbols with none (the only place this tab calls the API).
+
+**Lead-Lag (intraday, collapsible)** (`core/lead_lag.py`, `core/lead_lag_data.py`). Which of two contracts moves first, on
+5-minute bars. Pick a **group** — a single product (CL / BRN / G / CL-BZ box: the next 4 consecutive live outright contracts
+starting at a chosen generic position) or **All** (one contract per product, same generic position, so the matrix compares
+across products instead of across months) — a starting month and a lookback (1-20 days of 5-minute candles, cached locally
+after the first pull: see 5.5a), then **Compute** (never automatic, to keep this off the shared `/ohlc/` rate budget until
+asked for). The matrix: colour is the strength (|ρ| at the best lag, found by scanning ±12 bars of the **prewhitened**
+price-difference cross-correlation — see 5.5a for the full math); the cell text is that lag in minutes, signed from the
+row's side (positive: row leads column). Click a cell for the full cross-correlation-by-lag chart, the exact lag, p-value,
+Bonferroni reading ("stands out" / "worth a look" / "no sign", same convention as 6.11's "what separates winners from
+losers") and a plain-English sentence.
 
 ### 6.5 Exposure Map
 

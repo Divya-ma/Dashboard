@@ -2,6 +2,7 @@
 
 import logging
 import math
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ _MAX_ROWS_PER_REQUEST = 10_000
 
 _OHLC_COLUMNS = ["symbol", "timestamp", "open", "high", "low", "close", "volume"]
 _SYNC_LOG_COLUMNS = ["symbol", "last_sync_utc", "row_count", "status", "error_msg"]
+_INTRADAY_FILE = re.compile(r"_\d+[A-Z]\.parquet$")  # e.g. "..._5M.parquet": an intraday cache file, not a daily one
 
 # Same look-back core.data_loader.DataLoader and core.structure_builder use for an on-demand backfill.
 _FULL_BACKFILL_DAYS = 365 * 3
@@ -46,12 +48,17 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
     # Local cache methods
     # ------------------------------------------------------------------
 
-    def _get_parquet_path(self, api_symbol: str) -> Path:
-        """Return the Parquet path for an API symbol, e.g. 'COZ26' -> data_dir/CO/COZ26.parquet."""
+    def _get_parquet_path(self, api_symbol: str, interval: str = "1D") -> Path:
+        """Return the Parquet path for an API symbol, e.g. 'COZ26' -> data_dir/CO/COZ26.parquet.
+
+        A non-daily interval gets its own file next to it ('COZ26_5M.parquet'), so caching an intraday
+        resolution (added for the Correlation page's Lead-Lag view) never touches the daily file or its
+        sync log; '1D' keeps the original bare filename for every file already on disk."""
         api_code, _ = SymbolTranslator._match_product_prefix(api_symbol, API_CODE_TO_PRODUCT)
         directory = self._data_dir / api_code
         directory.mkdir(parents=True, exist_ok=True)
-        return directory / f"{api_symbol}.parquet"
+        suffix = "" if interval == "1D" else f"_{interval}"
+        return directory / f"{api_symbol}{suffix}.parquet"
 
     def _has_local_history(self, symbol: str) -> bool:
         """True if an internal symbol already has any cached Parquet data at all."""
@@ -59,9 +66,9 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         df = self._load_local(api_symbol)
         return df is not None and not df.empty
 
-    def _load_local(self, api_symbol: str) -> pd.DataFrame | None:
+    def _load_local(self, api_symbol: str, interval: str = "1D") -> pd.DataFrame | None:
         """Load the cached Parquet file for an API symbol, translating symbol to internal."""
-        path = self._get_parquet_path(api_symbol)
+        path = self._get_parquet_path(api_symbol, interval)
         if not path.exists():
             return None
         df = pd.read_parquet(path)
@@ -76,9 +83,13 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
             df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
         return df.sort_values("timestamp").reset_index(drop=True)
 
-    def _save_local(self, api_symbol: str, df: pd.DataFrame) -> None:
-        """Deduplicate on timestamp, sort ascending, and persist to the local Parquet cache."""
-        path = self._get_parquet_path(api_symbol)
+    def _save_local(self, api_symbol: str, df: pd.DataFrame, interval: str = "1D") -> None:
+        """Deduplicate on timestamp, sort ascending, and persist to the local Parquet cache.
+
+        The sync log (and its "needs sync" freshness check) stays about the daily cache only; an
+        intraday bar can still be "in progress" when fetched, so re-fetching a range always lets a
+        freshly-returned bar overwrite what's cached at the same timestamp (`keep="last"` below)."""
+        path = self._get_parquet_path(api_symbol, interval)
         internal_symbol = SymbolTranslator.api_to_internal(api_symbol)
         if df is None or df.empty:
             out = pd.DataFrame(columns=_OHLC_COLUMNS)
@@ -88,7 +99,8 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
             out = out.drop_duplicates(subset="timestamp", keep="last")
             out = out.sort_values("timestamp").reset_index(drop=True)
         out.to_parquet(path, index=False)
-        self._update_sync_log(internal_symbol, status="ok", row_count=len(out))
+        if interval == "1D":
+            self._update_sync_log(internal_symbol, status="ok", row_count=len(out))
 
     def _sync_log_path(self) -> Path:
         return self._data_dir / "_metadata" / "sync_log.parquet"
@@ -244,20 +256,16 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
     ) -> pd.DataFrame:
         api_symbol = SymbolTranslator.internal_to_api(symbol)
 
-        if interval == "1D":
-            local_df = self._load_local(api_symbol)
-            if self._covers_request(local_df, start, end, count):
-                result = self._filter(local_df, start, end, count)
-            else:
-                fetched = self._fetch_from_api([api_symbol], interval, start=start, end=end, count=count)
-                new_df = fetched.get(api_symbol, pd.DataFrame(columns=_OHLC_COLUMNS))
-                merged = pd.concat([local_df, new_df]) if local_df is not None else new_df
-                self._save_local(api_symbol, merged)
-                merged = self._load_local(api_symbol)
-                result = self._filter(merged, start, end, count)
+        local_df = self._load_local(api_symbol, interval)
+        if self._covers_request(local_df, start, end, count):
+            result = self._filter(local_df, start, end, count)
         else:
             fetched = self._fetch_from_api([api_symbol], interval, start=start, end=end, count=count)
-            result = fetched.get(api_symbol, pd.DataFrame(columns=_OHLC_COLUMNS))
+            new_df = fetched.get(api_symbol, pd.DataFrame(columns=_OHLC_COLUMNS))
+            merged = pd.concat([local_df, new_df]) if local_df is not None else new_df
+            self._save_local(api_symbol, merged, interval)
+            merged = self._load_local(api_symbol, interval)
+            result = self._filter(merged, start, end, count)
 
         if result.empty:
             logger.warning(
@@ -276,33 +284,26 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
     ) -> dict[str, pd.DataFrame]:
         results: dict[str, pd.DataFrame] = {}
 
-        if interval == "1D":
-            need_fetch: list[str] = []
-            for symbol in symbols:
-                api_symbol = SymbolTranslator.internal_to_api(symbol)
-                local_df = self._load_local(api_symbol)
-                if self._covers_request(local_df, start, end, count):
-                    results[symbol] = self._filter(local_df, start, end, count)
-                else:
-                    need_fetch.append(symbol)
+        need_fetch: list[str] = []
+        for symbol in symbols:
+            api_symbol = SymbolTranslator.internal_to_api(symbol)
+            local_df = self._load_local(api_symbol, interval)
+            if self._covers_request(local_df, start, end, count):
+                results[symbol] = self._filter(local_df, start, end, count)
+            else:
+                need_fetch.append(symbol)
 
-            if need_fetch:
-                api_symbols = [SymbolTranslator.internal_to_api(s) for s in need_fetch]
-                fetched = self._fetch_from_api(api_symbols, interval, start=start, end=end, count=count)
-                for symbol in need_fetch:
-                    api_symbol = SymbolTranslator.internal_to_api(symbol)
-                    new_df = fetched.get(api_symbol, pd.DataFrame(columns=_OHLC_COLUMNS))
-                    local_df = self._load_local(api_symbol)
-                    merged = pd.concat([local_df, new_df]) if local_df is not None else new_df
-                    self._save_local(api_symbol, merged)
-                    merged = self._load_local(api_symbol)
-                    results[symbol] = self._filter(merged, start, end, count)
-        else:
-            api_symbols = [SymbolTranslator.internal_to_api(s) for s in symbols]
+        if need_fetch:
+            api_symbols = [SymbolTranslator.internal_to_api(s) for s in need_fetch]
             fetched = self._fetch_from_api(api_symbols, interval, start=start, end=end, count=count)
-            for symbol in symbols:
+            for symbol in need_fetch:
                 api_symbol = SymbolTranslator.internal_to_api(symbol)
-                results[symbol] = fetched.get(api_symbol, pd.DataFrame(columns=_OHLC_COLUMNS))
+                new_df = fetched.get(api_symbol, pd.DataFrame(columns=_OHLC_COLUMNS))
+                local_df = self._load_local(api_symbol, interval)
+                merged = pd.concat([local_df, new_df]) if local_df is not None else new_df
+                self._save_local(api_symbol, merged, interval)
+                merged = self._load_local(api_symbol, interval)
+                results[symbol] = self._filter(merged, start, end, count)
 
         for symbol in symbols:
             if symbol not in results:
@@ -360,8 +361,8 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         }
 
     def get_local_data_summary(self) -> dict:
-        """Count and total size of cached symbol Parquet files (excludes the sync log)."""
-        files = [p for p in self._data_dir.glob("*/*.parquet") if p.parent.name != "_metadata"]
+        """Count and total size of cached DAILY symbol Parquet files (excludes the sync log and any intraday cache)."""
+        files = [p for p in self._data_dir.glob("*/*.parquet") if p.parent.name != "_metadata" and not _INTRADAY_FILE.search(p.name)]
         return {"symbol_count": len(files), "total_bytes": sum(p.stat().st_size for p in files)}
 
     def _sync_latest_candle(self, symbols: list[str]) -> dict[str, str]:
