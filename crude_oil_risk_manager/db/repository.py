@@ -11,7 +11,7 @@ no ORM mapping.
 
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1063,20 +1063,23 @@ class Repository:
             row = conn.execute(text("SELECT name FROM level_alerts WHERE alert_id = :id"), {"id": alert_id}).first()
             if row is None:
                 return False
-            result = conn.execute(text("UPDATE level_alerts SET status = 'active' WHERE alert_id = :id AND status = 'paused'"), {"id": alert_id})
+            result = conn.execute(text("UPDATE level_alerts SET status = 'active' WHERE alert_id = :id AND status IN ('paused', 'triggered')"), {"id": alert_id})
             if result.rowcount != 1:
                 return False
             self._audit(conn, "level_alert.resume", "level_alert", alert_id, f"price alert '{row[0]}' started")
             return True
 
-    def mark_level_alert_triggered(self, alert_id: str, price: float) -> bool:
-        """Active -> triggered. True only for the call that changed the row (so an alert is sent once); False if it was
-        already triggered or deleted."""
+    def record_level_alert_fire(self, alert_id: str, price: float, min_interval_seconds: float = 0) -> bool:
+        """Stamp an ACTIVE alert as fired now (it stays active: only Stop ends it). True only for the call that changed
+        the row, so overlapping checks send once; False if it is not active, was deleted, or last fired less than
+        `min_interval_seconds` ago."""
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(seconds=min_interval_seconds)).isoformat()
         with self._engine.begin() as conn:
             result = conn.execute(
-                text("UPDATE level_alerts SET status = 'triggered', triggered_at = :at, triggered_price = :price "
-                     "WHERE alert_id = :id AND status = 'active'"),
-                {"at": datetime.now(timezone.utc).isoformat(), "price": price, "id": alert_id},
+                text("UPDATE level_alerts SET triggered_at = :at, triggered_price = :price "
+                     "WHERE alert_id = :id AND status = 'active' AND (triggered_at IS NULL OR triggered_at <= :cutoff)"),
+                {"at": now.isoformat(), "price": price, "id": alert_id, "cutoff": cutoff},
             )
             return result.rowcount == 1
 

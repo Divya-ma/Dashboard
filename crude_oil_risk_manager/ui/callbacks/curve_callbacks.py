@@ -1,4 +1,7 @@
-"""Curve Kinks page callbacks: render the selected curve, snapshot list, log, backtest, thresholds.
+"""LEGACY (retired, kept for possible later use): the Curve Kinks page and engine are no longer wired into the app (the Trade
+Analyzer is now ui/layouts/trade_analyzer_tab.py). Daily curve snapshots moved to Curve Compare (core/curve_compare.py).
+
+Curve Kinks page callbacks: render the selected curve, snapshot list, log, backtest, thresholds.
 
 The maths and the alerting run in core.curve_service on every live poll whether or not this
 page is open; these callbacks only read its latest state (no API calls, no recomputation).

@@ -47,7 +47,7 @@ class Container:
     alert_manager: AlertManager | None = None
     data_loader: DataLoader | None = None
     excel_store: ExcelCorrelationStore | None = None
-    curve_service: CurveService | None = None  # Curve Kinks engine (fed by the live poll)
+    curve_service: CurveService | None = None  # LEGACY Curve Kinks engine: no longer started (see core/curve_service.py)
     curve_compare: CurveCompare | None = None  # Curve Compare page (quote VWAP vs previous settlement)
     oi_service: OiService | None = None  # OI / Volume / ATR page (daily OI download + research)
     churn_service: ChurnService | None = None  # Churn page (five-minute candles, small-target simulation)

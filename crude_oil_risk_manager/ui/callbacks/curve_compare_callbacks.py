@@ -30,7 +30,7 @@ def parse_months(value) -> int | None:
     return months if 1 <= months <= MAX_MONTHS and months == float(value) else None
 
 
-def render_compare(n_intervals, product, months, family, method):
+def render_compare(n_intervals, product, months, family, method, snapshot_date=None):
     service = container.curve_compare
     if service is None:
         return _notice("The curve compare service is not running")
@@ -44,7 +44,15 @@ def render_compare(n_intervals, product, months, family, method):
     except Exception:  # noqa: BLE001 - a bad render must not leave the page blank
         logger.exception("Curve compare failed")
         return _notice("Could not build this curve; see the log")
-    return build_compare_figure(view), build_change_figure(view), build_status(view), build_table(view)
+    snapshots = getattr(container.curve_compare, "snapshots", None)
+    snapshot = snapshots.load(product, snapshot_date, family) if snapshots is not None and snapshot_date else None
+    return build_compare_figure(view, snapshot, snapshot_date), build_change_figure(view), build_status(view), build_table(view)
+
+
+def snapshot_options(product):
+    """The days a curve snapshot was saved for the product, newest first."""
+    store = getattr(container.curve_compare, "snapshots", None)
+    return [] if store is None else [{"label": d, "value": d} for d in store.dates(product)]
 
 
 def method_disabled(family):
@@ -63,6 +71,11 @@ def register_curve_compare_callbacks(app) -> None:
         Input("compare-months", "value"),
         Input("compare-family", "value"),
         Input("compare-method", "value"),
+        Input("compare-snapshot", "value"),
     )(render_compare)
+
+    app.callback(Output("compare-snapshot", "options"), Output("compare-snapshot", "value"), Input("compare-product", "value"))(
+        lambda product: (snapshot_options(product), None)
+    )
 
     app.callback(Output("compare-method", "disabled"), Input("compare-family", "value"))(method_disabled)

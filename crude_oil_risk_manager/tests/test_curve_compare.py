@@ -279,11 +279,11 @@ class FakeSettlements:
         return {"fetched": len(symbols), "missing": []}
 
 
-def make_service(rows, prev=None, fallback=None):
+def make_service(rows, prev=None, fallback=None, snapshots=None):
     api = FakeTaq(rows)
     store = QuoteStore(api, clock=lambda: NOW, autostart=False)
     settlements = FakeSettlements(prev or {})
-    return CurveCompare(store, settlements, api, fallback_prices=fallback, clock=lambda: NOW, background=False), store, settlements
+    return CurveCompare(store, settlements, api, fallback_prices=fallback, clock=lambda: NOW, background=False, snapshots=snapshots), store, settlements
 
 
 def test_view_compares_live_with_previous_and_registers_demand():
@@ -650,3 +650,27 @@ def test_the_widest_usable_quote_is_counted_in_ticks_so_gasoil_quotes_are_not_th
     assert usable_quote("GOZ26", Quote(bid=1400.0, ask=1405.0, bid_size=1, ask_size=1, ts=0.0))  # 20 ticks of 0.25
     assert not usable_quote("GOZ26", Quote(bid=1400.0, ask=1407.0, bid_size=1, ask_size=1, ts=0.0))  # 28 ticks: junk, as for the other products
     assert usable_quote("GOZ26-F27", Quote(bid=40.0, ask=42.0, bid_size=1, ask_size=1, ts=0.0)) and not usable_quote("GOZ26-F27", Quote(bid=40.0, ask=43.0, bid_size=1, ask_size=1, ts=0.0))
+
+
+def test_the_previous_settlement_curve_is_saved_as_a_snapshot_for_every_family_and_reused_on_the_page(tmp_path, monkeypatch):
+    from core.curve_store import SnapshotStore
+
+    out = outright_prices()
+    store_ = SnapshotStore(tmp_path)
+    service, _, settlements = make_service([], prev={s: p - 1.0 for s, p in out.items()}, snapshots=store_)
+    service.view("CL", 8, OUTRIGHT)
+    assert store_.dates("CL") == ["2026-10-05"] and store_.dates("BRN") == []  # saved under the settlement's own day; BRN has no settlements
+    contracts = generic_contracts("CL", AS_OF, 8)
+    outright = store_.load("CL", "2026-10-05", "outright")
+    assert len(outright) == 8 and outright[contracts[0].label] == pytest.approx(out[contracts[0].symbol] - 1.0)
+    spread = store_.load("CL", "2026-10-05", "spread")
+    assert len(spread) == 7 and spread[f"{contracts[0].label}/{contracts[1].label}"] == pytest.approx(out[contracts[0].symbol] - out[contracts[1].symbol])
+    assert len(store_.load("CL", "2026-10-05", "dfly")) == 5
+    service.view("CL", 8, OUTRIGHT)
+    service.view("CL", 8, SPREAD)  # saved once per settlement day, whichever curve the page shows
+    assert service._snapshot_done == date(2026, 10, 5)
+
+    monkeypatch.setattr(ccc, "container", Container(curve_compare=service))
+    assert ccc.snapshot_options("CL") == [{"label": "2026-10-05", "value": "2026-10-05"}]
+    figure = ccc.render_compare(0, "CL", 8, OUTRIGHT, "flies", "2026-10-05")[0]
+    assert any(t.name == "Snapshot 2026-10-05" and sum(y is not None for y in t.y) == 8 for t in figure.data)

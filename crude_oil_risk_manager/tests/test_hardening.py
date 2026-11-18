@@ -70,7 +70,7 @@ def parts_for(tmp_db_path, tmp_path, host="127.0.0.1", users=False, **overrides)
     repo = Repository(str(tmp_db_path))
     config = SimpleNamespace(APP_HOST=host, APP_PORT=8050, AUTH_USERNAME="a" if users else "", AUTH_PASSWORD="b" if users else "", AUTH_USERS="")
     values = dict(repository=repo, backup=BackupScheduler(tmp_db_path, tmp_path / "bk"), live_cache=LivePriceCache(), qh_api=None,
-                  oi_service=None, churn_service=None, curve_service=None, app_settings=config)
+                  oi_service=None, churn_service=None, curve_compare=None, app_settings=config)
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -125,10 +125,11 @@ def test_a_check_that_cannot_be_read_never_stops_the_others(tmp_db_path, tmp_pat
     assert len(failed) == 1 and failed[0].status == WARN and any(c.area == "Database" for c in checks)
 
 
-def test_a_curve_state_with_a_recent_update_is_ok(tmp_db_path, tmp_path):
-    state = SimpleNamespace(updated_at=datetime.now(timezone.utc))
-    checks = by_name(collect_health(parts_for(tmp_db_path, tmp_path, curve_service=SimpleNamespace(state=lambda: state))))
-    assert checks[("Curve Kinks", "Last computation")].status == OK
+def test_a_recent_curve_snapshot_is_ok(tmp_db_path, tmp_path):
+    today = datetime.now(timezone.utc).date().isoformat()
+    service = SimpleNamespace(snapshots=SimpleNamespace(dates=lambda product: [today]))
+    checks = by_name(collect_health(parts_for(tmp_db_path, tmp_path, curve_compare=service)))
+    assert checks[("Curve snapshots", "Latest snapshot")].status == OK
 
 
 def test_the_health_panel_callback_fills_the_table(tmp_db_path, tmp_path, monkeypatch):

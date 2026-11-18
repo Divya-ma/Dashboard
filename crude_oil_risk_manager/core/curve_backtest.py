@@ -1,4 +1,7 @@
-"""Backtest of the kink signals on stored generic history.
+"""LEGACY (retired, kept for possible later use): the Curve Kinks page and engine are no longer wired into the app (the Trade
+Analyzer is now ui/layouts/trade_analyzer_tab.py). Daily curve snapshots moved to Curve Compare (core/curve_compare.py).
+
+Backtest of the kink signals on stored generic history.
 
 For each of the last `test_days` days the detector is run exactly as it runs live, but fitted
 only on the history BEFORE that day (no look-ahead). Every kink it flags (echoes excluded) is

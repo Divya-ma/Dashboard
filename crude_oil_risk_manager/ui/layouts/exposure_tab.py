@@ -8,6 +8,8 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 
+from core.curve_calendar import product_spec
+from core.structure_utils import parse_symbol
 from ui.layouts.correlation_tab import empty_figure
 from ui.layouts.shell import COLORS
 
@@ -30,7 +32,7 @@ def _lots(value: float) -> str:
     return f"{value:g}"
 
 
-def build_bar_figure(rows: list[dict]) -> go.Figure:
+def build_bar_figure(rows: list[dict], title: str = "Net Exposure by Contract Month") -> go.Figure:
     """Horizontal net-lots bars, chronological top to bottom; zero-net months are left out."""
     if not rows:
         return empty_figure(NO_EXPOSURE_TEXT)
@@ -52,7 +54,7 @@ def build_bar_figure(rows: list[dict]) -> go.Figure:
     )
     figure.add_vline(x=0, line_width=2, line_color=COLORS["TEXT_PRIMARY"])
     figure.update_layout(
-        title={"text": "Net Exposure by Contract Month", "font": {"size": 18}},
+        title={"text": title, "font": {"size": 18}},
         paper_bgcolor=COLORS["CARD_BG"],
         plot_bgcolor=COLORS["CARD_BG"],
         font={"color": COLORS["TEXT_PRIMARY"]},
@@ -62,6 +64,46 @@ def build_bar_figure(rows: list[dict]) -> go.Figure:
         showlegend=False,
     )
     return figure
+
+
+def _product_name(code: str) -> str:
+    try:
+        return product_spec(code).name
+    except KeyError:
+        return code
+
+
+def build_product_maps(rows: list[dict]) -> list:
+    """One exposure map (bar chart card) per instrument that has exposure, in the order the products first appear.
+
+    Each map shows only that product's outright months, labelled by month alone, and is sized to its number of bars."""
+    by_product: dict[str, list[dict]] = {}
+    for row in rows:
+        by_product.setdefault(parse_symbol(row["symbol"])[0]["product"], []).append(row)
+    if not by_product:
+        return [html.Div(NO_EXPOSURE_TEXT, style={**_MUTED, "padding": "8px 0"})]
+    cards = []
+    for code, product_rows in by_product.items():
+        own = [{**row, "label": row["label"].removeprefix(f"{code} ")} for row in product_rows]
+        net = sum(row["net_lots"] for row in own)
+        bars = sum(1 for row in own if row["net_lots"] != 0)
+        cards.append(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.Div(f"{_product_name(code)}: net {net:+g} lots across {len(own)} contract month(s)", style=_MUTED),
+                        dcc.Graph(
+                            figure=build_bar_figure(own, f"Net Exposure: {_product_name(code)}"),
+                            config={"displayModeBar": False},
+                            style={"height": f"{max(260, 110 + 38 * bars)}px"},
+                        ),
+                    ]
+                ),
+                style=_CARD_STYLE,
+                className="mb-3",
+            )
+        )
+    return cards
 
 
 def build_table_rows(rows: list[dict]) -> list[dict]:
@@ -146,6 +188,9 @@ def exposure_layout() -> html.Div:
         [
             dcc.Store(id="exposure-data", data=[]),
             html.H3("📈 Exposure Map", style={**_HEADING, "marginBottom": "16px"}),
+            html.H5("By instrument", style=_HEADING),
+            html.Div(id="exposure-product-maps", children=build_product_maps([])),
+            html.H5("All instruments together", style=_HEADING),
             dbc.Card(
                 dbc.CardBody(
                     dcc.Graph(

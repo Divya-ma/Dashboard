@@ -30,15 +30,13 @@ from adapters.qh_api import make_api  # noqa: E402
 from config.settings import settings  # noqa: E402
 from core.alerts import AlertManager  # noqa: E402
 from core.curve_compare import CurveCompare  # noqa: E402
-from core.curve_history import CurveHistoryStore  # noqa: E402
-from core.curve_service import CurveService  # noqa: E402
 from core.curve_store import PrevSettlementStore, SnapshotStore  # noqa: E402
 from core.excel_correlation import ExcelCorrelationStore  # noqa: E402
 from core.fifo_migration import migrate_to_fifo_once  # noqa: E402
 from core.atr_data import AtrStore  # noqa: E402
 from core.churn_data import ChurnStore  # noqa: E402
 from core.churn_service import ChurnService  # noqa: E402
-from core.curve_calendar import EXTRA_PRODUCTS  # noqa: E402
+from core.curve_calendar import EXTRA_PRODUCTS, N_MONTHS, PRODUCTS, live_symbols  # noqa: E402
 from core.oi_data import OiStore  # noqa: E402
 from core.oi_settings import load_history_days  # noqa: E402
 from core.oi_service import OiService  # noqa: E402
@@ -133,18 +131,17 @@ container.excel_store = ExcelCorrelationStore(_resolve_path(settings.CORRELATION
 container.qh_api = qh_api
 
 _curve_dir = _resolve_path(settings.CURVE_DATA_DIR)
-_prev_settlements = PrevSettlementStore(Path(_curve_dir) / "prev_settlement.json")  # shared by Curve Kinks and Curve Compare
-container.curve_service = CurveService(
-    repository, qh_api, CurveHistoryStore(_curve_dir, qh_api), _prev_settlements, SnapshotStore(_curve_dir), alert_manager,
+_prev_settlements = PrevSettlementStore(Path(_curve_dir) / "prev_settlement.json")  # Curve Compare's previous settlements
+# The old Curve Kinks engine (core.curve_service) is retired and not started. The curve ladder (the first 15 months) is still priced in the
+# same /fairvalue/ request as the position prices, as Curve Compare's fresher fallback, so it costs no extra call.
+live_adapter.set_curve_symbols_provider(
+    lambda: sorted({s for p in PRODUCTS for s in live_symbols(p, datetime.now(timezone.utc).date(), N_MONTHS)})
 )
-# The curve ladder (outrights, spreads, flies of CL and BRN) is priced in the same /fairvalue/
-# request as the position prices, so it costs no extra call.
-live_adapter.set_curve_symbols_provider(container.curve_service.symbols_to_poll)
 # Curve Compare polls /taq/ quotes only while its page is open; /fairvalue/ prices from the poll above
 # fill in any symbol that has no quote.
 container.curve_compare = CurveCompare(
     QuoteStore(qh_api), _prev_settlements, qh_api,
-    fallback_prices=live_adapter.curve_prices, fair_values=FairValueStore(qh_api),
+    fallback_prices=live_adapter.curve_prices, fair_values=FairValueStore(qh_api), snapshots=SnapshotStore(_curve_dir),
 )
 # OI / Volume / ATR page: daily OI of every outright; downloads only while that page is open.
 container.oi_service = OiService(

@@ -16,18 +16,19 @@ from ui.layouts.exposure_tab import (
     DEFAULT_THRESHOLD,
     build_alerts,
     build_bar_figure,
+    build_product_maps,
     build_table_rows,
 )
 from ui.layouts.shell import COLORS
 
 
 def load_exposure(pathname):
-    """On tab open: query the open structures, aggregate, and render the chart and table."""
+    """On tab open: query the open structures, aggregate, and render the charts (overall and per instrument) and table."""
     if pathname != "/exposure":
         raise PreventUpdate
     structures = container.repository.get_all_structures(status_filter=statuses_for_filter("open"))
     rows = build_exposure_map(structures)
-    return build_bar_figure(rows), build_table_rows(rows), rows
+    return build_bar_figure(rows), build_table_rows(rows), rows, build_product_maps(rows)
 
 
 def update_concentration_alerts(threshold, rows):
@@ -43,6 +44,7 @@ def register_exposure_callbacks(app) -> None:
         Output("exposure-bar-chart", "figure"),
         Output("exposure-table", "data"),
         Output("exposure-data", "data"),
+        Output("exposure-product-maps", "children"),
         Input("url", "pathname"),
     )(load_exposure)
 

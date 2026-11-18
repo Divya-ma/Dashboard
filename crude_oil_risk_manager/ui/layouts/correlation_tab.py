@@ -20,7 +20,6 @@ from config.settings import settings
 from core.user_settings import correlation_windows
 from ui.container import container
 from ui.layouts.corr_matrix_view import corr_matrix_section
-from ui.layouts.lead_lag_view import lead_lag_section
 from ui.layouts.shell import COLORS
 
 PLACEHOLDER_TEXT = "Add instruments or structures and click Compute"
@@ -554,16 +553,6 @@ def correlation_layout() -> html.Div:
             html.H3("🔗 Correlation", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "16px"}),
             corr_matrix_section(default_rolling_window(), default_lookback()),
             portfolio_matrix_section(),
-            html.Details(
-                [
-                    html.Summary(
-                        "Lead-Lag (intraday, 5-minute bars): which contract moves first",
-                        style={"color": COLORS["TEXT_PRIMARY"], "cursor": "pointer", "fontSize": "16px", "margin": "26px 0 12px"},
-                    ),
-                    lead_lag_section(),
-                ],
-                open=False,
-            ),
             html.Details(
                 [
                     html.Summary(

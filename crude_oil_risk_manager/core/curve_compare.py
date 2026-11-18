@@ -53,7 +53,7 @@ from typing import Callable
 
 from core.contract_specs import spec_for_product
 from core.curve_calendar import (
-    DFLY, FAMILY_WEIGHTS, FLY, OUTRIGHT, PRODUCTS, SPREAD, CurveContract, generic_contracts, product_of_symbol, structure_symbol,
+    DFLY, FAMILIES, FAMILY_WEIGHTS, FLY, OUTRIGHT, PRODUCTS, SPREAD, CurveContract, generic_contracts, product_of_symbol, structure_symbol,
 )
 from core.box import outbox_components, price_with_components
 
@@ -424,7 +424,7 @@ class CurveCompare:
     def __init__(
         self, quotes, settlements, api, fallback_prices: Callable[[], dict] | None = None,
         clock: Callable[[], float] = time.time, fresh_age: float = FRESH_SECONDS,
-        stale_age: float = STALE_LIMIT_SECONDS, background: bool = True, fair_values=None,
+        stale_age: float = STALE_LIMIT_SECONDS, background: bool = True, fair_values=None, snapshots=None,
     ):
         self.quotes = quotes
         self.settlements = settlements
@@ -438,6 +438,33 @@ class CurveCompare:
         self._fetching = False
         self._retry_after = 0.0
         self._settlement_message: str | None = None
+        self.snapshots = snapshots  # core.curve_store.SnapshotStore: one saved previous-settlement curve per settlement day
+        self._snapshot_done: date | None = None
+
+    # -- snapshots ------------------------------------------------------
+
+    def _save_snapshots(self, as_of: date) -> None:
+        """Save the previous-settlement curve of every product and curve type, MAX_MONTHS out, under the settlement's own day
+        (the dotted line of this page), so any months setting can later draw it. Once per settlement day; never raises."""
+        settled = self.settlements.settlement_date()
+        if self.snapshots is None or settled is None or settled == self._snapshot_done:
+            return
+        try:
+            prices = self.settlements.prices()
+            for product in PRODUCTS:
+                contracts = generic_contracts(product, as_of, MAX_MONTHS)
+                rows = []
+                for family in FAMILIES:
+                    length = len(FAMILY_WEIGHTS[family])
+                    for i, value in enumerate(settlement_curve(product, as_of, MAX_MONTHS, family, prices)):
+                        if value is not None:
+                            label = "/".join(c.label for c in contracts[i:i + length])
+                            rows.append({"family": family, "position": i + 1, "label": label, "value": value})
+                if rows:
+                    self.snapshots.save(product, settled, rows)
+            self._snapshot_done = settled
+        except Exception:  # noqa: BLE001 - a snapshot must never break the page
+            logger.exception("Saving the curve snapshots failed")
 
     # -- settlements ----------------------------------------------------
 
@@ -482,6 +509,8 @@ class CurveCompare:
         needed = list(dict.fromkeys(s for tier in tiers for s in tier))
         self.quotes.request((product, n, family, method), needed, primary=len(tiers[0]) if tiers else 0)
         self._ensure_settlements(as_of)
+        if self.settlements.fetched_on == as_of.isoformat() and self.settlements.attempted(self._all_outrights(as_of)):
+            self._save_snapshots(as_of)
 
         quotes = self.quotes.quotes(needed)
         wanted = set(needed)

@@ -8,7 +8,7 @@ ui/callbacks/level_alerts_callbacks.py fills; core/level_alerts.py holds the rul
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 
-from core.level_alerts import ABOVE, AUTO, BELOW, DIRECTION_LABELS, PAUSED, TRIGGERED, level_price
+from core.level_alerts import ABOVE, ACTIVE, AUTO, BELOW, DIRECTION_LABELS, is_hit, level_price
 from core.structure_utils import STRUCTURE_TEMPLATES
 from ui.layouts.shell import COLORS
 
@@ -79,16 +79,19 @@ def alerts_table(alerts: list, prices: dict[str, float]) -> html.Div:
         return None if price is None else abs(alert.level - price)
 
     live = {alert.alert_id: level_price(alert.legs, prices) for alert in alerts}
-    active = sorted((a for a in alerts if a.status != TRIGGERED), key=lambda a: (away(a, live[a.alert_id]) is None, away(a, live[a.alert_id]) or 0.0))
-    done = sorted((a for a in alerts if a.status == TRIGGERED), key=lambda a: a.triggered_at or a.created_at, reverse=True)
+    active = sorted((a for a in alerts if a.status == ACTIVE), key=lambda a: (away(a, live[a.alert_id]) is None, away(a, live[a.alert_id]) or 0.0))
+    stopped = sorted((a for a in alerts if a.status != ACTIVE), key=lambda a: a.triggered_at or a.created_at, reverse=True)
     rows = []
-    for alert in [*active, *done]:
-        price, fired = live[alert.alert_id], alert.status == TRIGGERED
+    for alert in [*active, *stopped]:
+        price = live[alert.alert_id]
         legs = " / ".join(f"{leg['ratio']:+g} {leg['symbol']}" for leg in alert.legs)
-        paused = alert.status == PAUSED
-        status = (html.Span(f"✓ Triggered {alert.triggered_at:%Y-%m-%d %H:%M} UTC at {alert.triggered_price:g}", style={"color": COLORS["ACCENT_YELLOW"]})
-                  if fired else html.Span("⏸ Stopped", style=_MUTED) if paused else html.Span("● Active", style={"color": COLORS["ACCENT_GREEN"]}))
-        toggle = None if fired else (
+        paused = alert.status != ACTIVE  # stopped by the user (or stored as "triggered" by the old fire-once behaviour)
+        firing = not paused and alert.triggered_at is not None and price is not None and is_hit(alert.direction, alert.level, price)
+        last = f" (last sent {alert.triggered_at:%Y-%m-%d %H:%M} UTC at {alert.triggered_price:g})" if alert.triggered_at else ""
+        status = (html.Span(f"🔔 Firing, press Stop to end{last}", style={"color": COLORS["ACCENT_YELLOW"]}) if firing
+                  else html.Span(f"⏸ Stopped{last}", style=_MUTED) if paused
+                  else html.Span(f"● Active{last}", style={"color": COLORS["ACCENT_GREEN"]}))
+        toggle = (
             dbc.Button("▶ Start", id={"type": "la-resume", "index": alert.alert_id}, color="success", outline=True, size="sm", className="me-1") if paused
             else dbc.Button("⏸ Stop", id={"type": "la-pause", "index": alert.alert_id}, color="warning", outline=True, size="sm", className="me-1"))
         rows.append(html.Tr([
@@ -97,13 +100,13 @@ def alerts_table(alerts: list, prices: dict[str, float]) -> html.Div:
             html.Td(f"{alert.level:g}", style={**_CELL, "fontWeight": "bold"}),
             html.Td(DIRECTION_LABELS[alert.direction], style=_CELL),
             html.Td(EMPTY if price is None else f"{price:g}", style=_CELL),
-            html.Td(EMPTY if fired or price is None else f"{abs(alert.level - price):g} to go", style=_CELL),
+            html.Td(EMPTY if price is None else "at / beyond level" if is_hit(alert.direction, alert.level, price) else f"{abs(alert.level - price):g} to go", style=_CELL),
             html.Td(status, style=_CELL),
             html.Td(f"{alert.created_at:%Y-%m-%d %H:%M}", style={**_CELL, **_MUTED}),
             html.Td([dbc.Button("✏️ Edit", id={"type": "la-edit", "index": alert.alert_id}, color="secondary", outline=True, size="sm", className="me-1"),
                      toggle,
                      dbc.Button("🗑 Delete", id={"type": "la-delete", "index": alert.alert_id}, color="danger", outline=True, size="sm")], style={**_CELL, "whiteSpace": "nowrap"}),
-        ], style={"opacity": "0.75"} if fired or paused else {}))
+        ], style={"opacity": "0.75"} if paused else {}))
     head = html.Thead(html.Tr([html.Th(h, style={**_CELL, **_MUTED, "textAlign": "left"}) for h in
                                ("Name", "Legs", "Level", "Fires when price", "Live price", "Distance", "Status", "Created (UTC)", "")]))
     return html.Div(html.Table([head, html.Tbody(rows)], style={"width": "100%", "color": COLORS["TEXT_PRIMARY"]}), style={"overflowX": "auto"})
@@ -113,8 +116,8 @@ def level_alerts_layout() -> html.Div:
     return html.Div([
         html.H3("🔔 Price Alerts", style={"color": COLORS["TEXT_PRIMARY"], "marginBottom": "4px"}),
         html.Div("Make a structure, type a price level, and get an alert (in the app and in Teams) when its live price gets there. "
-                 "Each alert fires once and stays in the list as triggered until you delete it. Edit changes an alert's legs, level or name, "
-                 "and arms a triggered alert again. Stop keeps an alert without it firing or being polled; Start makes it live again.",
+                 "An alert keeps firing (at most once a minute) while the price stays at or beyond the level, until you press Stop. "
+                 "Edit changes an alert's legs, level or name. Stop keeps an alert without it firing or being polled; Start makes it live again.",
                  style={**_MUTED, "marginBottom": "16px"}),
         _form(),
         dbc.Card(dbc.CardBody([_heading("Your alerts"), html.Div(id="la-table")]), style=_CARD),

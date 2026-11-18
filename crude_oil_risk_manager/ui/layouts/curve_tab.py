@@ -1,4 +1,8 @@
-"""Curve Kinks page (route /trade-analyzer): live curves, kinks, data quality, log, backtest, thresholds.
+"""LEGACY page (retired, kept for possible later use): the Curve Kinks page and engine are no longer wired into the app (the Trade
+Analyzer is now ui/layouts/trade_analyzer_tab.py). Daily curve snapshots moved to Curve Compare (core/curve_compare.py).
+The shared chart/table helpers below (_layout, _table, empty_figure, ...) are still imported by other pages.
+
+Curve Kinks page (route /trade-analyzer): live curves, kinks, data quality, log, backtest, thresholds.
 
 Nothing is typed in to analyse: the engine (core.curve_service) prices the whole 15-month
 ladder of CL and BRN every poll and runs the kink maths on every curve in the background;

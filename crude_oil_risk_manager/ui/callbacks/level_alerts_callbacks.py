@@ -67,7 +67,7 @@ def create_alert(n_clicks, template, symbols, ratios, level, trigger, name, live
         logger.exception("Could not create the price alert")
         return _message("Could not save the alert; see the server log.", False), no_update, no_update, no_update
     when = "rises to or above" if alert.direction == "above" else "falls to or below"
-    done = f"Alert '{alert.name}' created: it fires once when the price {when} {alert.level:g}."
+    done = f"Alert '{alert.name}' created: it fires (repeating every minute) while the price is {when} {alert.level:g}, until you stop it."
     return _message(done, True, warnings), (counter or 0) + 1, None, None  # the level and name are cleared for the next alert
 
 
@@ -128,7 +128,7 @@ def save_edit(n_clicks, template, symbols, ratios, level, trigger, name, live_pr
         logger.exception("Could not save the price alert")
         return (_message("Could not save the changes; see the server log.", False), *[no_update] * 7)
     when = "rises to or above" if alert.direction == "above" else "falls to or below"
-    return (_message(f"Alert '{alert.name}' saved and armed: it fires once when the price {when} {alert.level:g}.", True, warnings),
+    return (_message(f"Alert '{alert.name}' saved and armed: it fires (repeating every minute) while the price is {when} {alert.level:g}, until you stop it.", True, warnings),
             (counter or 0) + 1, None, None, None, *_NEW_FORM)
 
 

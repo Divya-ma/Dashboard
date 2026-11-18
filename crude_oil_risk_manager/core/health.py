@@ -14,7 +14,7 @@ cannot hide the rest of the page.
 import shutil
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from core.clock import london_today
@@ -119,14 +119,15 @@ def _store(area: str, service, today: date) -> list[Check]:
 
 
 def _curves(parts) -> list[Check]:
-    service = parts.curve_service
-    if service is None:
-        return [Check("Curve Kinks", "Service", WARN, "not started")]
-    updated = service.state().updated_at
-    if updated is None:
-        return [Check("Curve Kinks", "Last computation", WARN, "none yet")]
-    age = (datetime.now(updated.tzinfo) - updated).total_seconds()
-    return [Check("Curve Kinks", "Last computation", WARN if age > 600 else OK, f"{_age(age)} ago")]
+    service = getattr(parts, "curve_compare", None)
+    snapshots = getattr(service, "snapshots", None)
+    if snapshots is None:
+        return [Check("Curve snapshots", "Service", WARN, "not started")]
+    dates = snapshots.dates("CL")
+    if not dates:
+        return [Check("Curve snapshots", "Latest snapshot", WARN, "none yet (saved after the day's settlements are fetched)")]
+    days = (datetime.now(timezone.utc).date() - date.fromisoformat(dates[0])).days
+    return [Check("Curve snapshots", "Latest snapshot", WARN if days > STALE_DATA_DAYS else OK, f"settlement of {dates[0]} ({days} day(s) ago)")]
 
 
 def _access(parts) -> list[Check]:
@@ -141,7 +142,7 @@ def _access(parts) -> list[Check]:
 
 
 def collect_health(parts, today: date | None = None) -> list[Check]:
-    """Every check, in page order. `parts` carries: repository, backup, live_cache, qh_api, oi_service, churn_service, curve_service,
+    """Every check, in page order. `parts` carries: repository, backup, live_cache, qh_api, oi_service, churn_service, curve_compare,
     app_settings (config.settings)."""
     today = today or london_today()
     checks: list[Check] = []

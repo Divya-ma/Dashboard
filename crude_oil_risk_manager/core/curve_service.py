@@ -1,4 +1,7 @@
-"""The Curve Kinks engine: turns live prices + history into curves, kinks, alerts and a status page.
+"""LEGACY (retired, kept for possible later use): the Curve Kinks page and engine are no longer wired into the app (the Trade
+Analyzer is now ui/layouts/trade_analyzer_tab.py). Daily curve snapshots moved to Curve Compare (core/curve_compare.py).
+
+The Curve Kinks engine: turns live prices + history into curves, kinks, alerts and a status page.
 
 `CurveService.on_prices` is called after every live poll (10 s). It builds the 15-month ladder
 for each product (outrights, spreads, flies, dflies), values every structure live, runs the

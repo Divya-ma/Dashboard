@@ -25,7 +25,7 @@ OLD_SECONDS = 3600
 DEFAULT_MONTHS = 32
 PLACEHOLDER = "Waiting for quotes..."
 
-LIVE_COLOR, PREV_COLOR = "#4da3ff", "#9aa0a6"
+LIVE_COLOR, PREV_COLOR, SNAP_COLOR = "#4da3ff", "#9aa0a6", "#f2a900"
 SOURCE_MARKERS = {
     SOURCE_QUOTE: ("Live (quote VWAP)", {"symbol": "circle", "size": 8, "color": LIVE_COLOR}),
     SOURCE_FAIR: ("Live (fair value)", {"symbol": "square", "size": 8, "color": COLORS["ACCENT_YELLOW"]}),
@@ -59,8 +59,8 @@ def _hover(row) -> str:
     return "<br>".join(lines)
 
 
-def build_compare_figure(view: CompareView | None) -> go.Figure:
-    """Live line (marker per source) over the previous-settlement line."""
+def build_compare_figure(view: CompareView | None, snapshot: dict | None = None, snapshot_date: str | None = None) -> go.Figure:
+    """Live line (marker per source) over the previous-settlement line, and an earlier day's snapshot when one is chosen."""
     if view is None or not view.rows:
         return empty_figure(PLACEHOLDER)
     rows = view.rows
@@ -73,6 +73,13 @@ def build_compare_figure(view: CompareView | None) -> go.Figure:
         line={"color": PREV_COLOR, "width": 2, "dash": "dash"}, marker={"size": 5, "color": PREV_COLOR},
         connectgaps=False, hovertext=[_hover(r) for r in rows], hoverinfo="text",
     ))
+    if snapshot:
+        figure.add_trace(go.Scatter(
+            x=x, y=[snapshot.get(r.point.label) for r in rows], mode="lines+markers", name=f"Snapshot {snapshot_date}",
+            line={"color": SNAP_COLOR, "width": 2, "dash": "dot"}, marker={"size": 5, "color": SNAP_COLOR},
+            connectgaps=False, hovertext=[f"<b>{r.point.label}</b><br>Snapshot {snapshot_date}: {_fmt(snapshot.get(r.point.label))}" for r in rows],
+            hoverinfo="text",
+        ))
     figure.add_trace(go.Scatter(  # the connecting line, no markers: markers are drawn per source below
         x=x, y=[r.point.value for r in rows], mode="lines", name="Live", showlegend=False,
         line={"color": LIVE_COLOR, "width": 2}, connectgaps=False, hoverinfo="skip",
@@ -92,7 +99,7 @@ def build_compare_figure(view: CompareView | None) -> go.Figure:
         xaxis={"tickangle": -45, "gridcolor": COLORS["BORDER_COLOR"]},
         yaxis={"title": "Price", "gridcolor": COLORS["BORDER_COLOR"], "zerolinecolor": COLORS["BORDER_COLOR"]},
         hovermode="closest",
-        uirevision=f"{view.product}|{view.family}|{view.months}|{view.method}",  # keep the zoom across refreshes
+        uirevision=f"{view.product}|{view.family}|{view.months}|{view.method}|{snapshot_date}",  # keep the zoom across refreshes
     ))
     return figure
 
@@ -193,7 +200,9 @@ def curve_compare_layout() -> html.Div:
             dbc.Col([html.Div("Curve", style=_LABEL),
                      _dropdown("compare-family", [{"label": FAMILY_LABELS[f], "value": f} for f in FAMILIES], OUTRIGHT)], md=3),
             dbc.Col([html.Div("D-fly built from", style=_LABEL),
-                     _dropdown("compare-method", method_options, DEFAULT_DFLY_METHOD)], md=5),
+                     _dropdown("compare-method", method_options, DEFAULT_DFLY_METHOD)], md=3),
+            dbc.Col([html.Div("Compare with a daily snapshot", style=_LABEL),
+                     dcc.Dropdown(id="compare-snapshot", options=[], value=None, placeholder="None", clearable=True)], md=2),
         ], className="mb-3"),
         dbc.Card(dbc.CardBody([
             dcc.Graph(id="compare-graph", figure=empty_figure(PLACEHOLDER), config={"displayModeBar": False}, style={"height": "460px"}),

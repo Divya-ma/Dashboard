@@ -177,7 +177,7 @@ def find(node, component_id):
 
 def test_layout_components_and_table_styling():
     layout = exposure_layout()
-    for component_id in ("exposure-bar-chart", "exposure-table", "exposure-threshold", "exposure-alerts", "exposure-data"):
+    for component_id in ("exposure-bar-chart", "exposure-table", "exposure-threshold", "exposure-alerts", "exposure-data", "exposure-product-maps"):
         assert find(layout, component_id) is not None, component_id
     assert find(layout, "exposure-threshold").value == 10
     table = find(layout, "exposure-table")
@@ -210,16 +210,16 @@ def save(repo, s):
 def test_load_exposure_reads_open_structures_from_the_repository(repo):
     save(repo, structure("Open", [("CLZ26", 1, "sell", 12)]))
     save(repo, structure("Closed", [("CLF27", 1, "buy", 0)], StructureStatus.CLOSED))
-    figure, table, rows = ec.load_exposure("/exposure")
-    assert list(figure.data[0].x) == [-12] and table[0]["symbol"] == "CLZ26" and table[0]["net_lots"] == -12
+    figure, table, rows, maps = ec.load_exposure("/exposure")
+    assert len(maps) == 1 and "WTI (CL)" in str(maps[0]) and list(figure.data[0].x) == [-12] and table[0]["symbol"] == "CLZ26" and table[0]["net_lots"] == -12
     assert [r["symbol"] for r in rows] == ["CLZ26"]
     with pytest.raises(PreventUpdate):
         ec.load_exposure("/structures")
 
 
 def test_load_exposure_with_no_open_structures(repo):
-    figure, table, rows = ec.load_exposure("/exposure")
-    assert figure.layout.annotations[0].text == NO_EXPOSURE_TEXT and table == [] and rows == []
+    figure, table, rows, maps = ec.load_exposure("/exposure")
+    assert NO_EXPOSURE_TEXT in str(maps) and figure.layout.annotations[0].text == NO_EXPOSURE_TEXT and table == [] and rows == []
 
 
 def test_threshold_change_rerenders_only_the_alert_panel(repo):
@@ -229,3 +229,15 @@ def test_threshold_change_rerenders_only_the_alert_panel(repo):
     assert ec.update_concentration_alerts(0, [])[0].children == NO_WARNINGS_TEXT
     for bad in (None, -1, float("nan"), True):
         assert "threshold of 0 or more" in ec.update_concentration_alerts(bad, rows).children
+
+
+def test_one_map_per_instrument_with_month_only_labels(repo):
+    save(repo, structure("A", [("CLZ26", 1, "buy", 5), ("CLF27", 1, "sell", 2)]))
+    save(repo, structure("B", [("BRNZ26", 1, "sell", 3)]))
+    _, _, rows, maps = ec.load_exposure("/exposure")
+    assert len(maps) == 2
+    brent, wti = maps  # ordered by earliest contract month, then product
+    assert "WTI (CL)" in str(wti) and "Brent (BRN)" in str(brent)
+    graph = wti.children.children[1]
+    assert list(graph.figure.data[0].x) == [5, -2] and list(graph.figure.data[0].y) == ["Dec-26", "Jan-27"]
+    assert list(brent.children.children[1].figure.data[0].x) == [-3]

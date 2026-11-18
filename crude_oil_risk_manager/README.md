@@ -27,7 +27,7 @@ a setting, the default is given.
    - [Correlation](#64-correlation)
    - [Exposure Map](#65-exposure-map)
    - [VaR & Scenarios](#66-var--scenarios)
-   - [Trade Analyzer (Curve Kinks)](#67-trade-analyzer-curve-kinks)
+   - [Trade Analyzer](#67-trade-analyzer)
    - [Curve Compare](#68-curve-compare)
    - [OI · Volume · ATR](#69-oi--volume--atr)
    - [Churn](#610-churn)
@@ -339,27 +339,6 @@ a leg with a missing day cannot mix a one-day change with a two-day one.
 A trade structure's price series for correlation is built from its **outright legs' settlements**; BZ legs use the
 settlement of the ICE Brent contract of the same month and the result says so.
 
-### 5.5a Lead-Lag (`core/lead_lag.py`, `core/lead_lag_data.py`)
-
-Which of two contracts' moves line up with the other's a few bars later, on **5-minute bars** (price differences of the
-bar closes — never returns, same reasoning as 5.5: a spread/fly/box can be zero or negative).
-
-1. **Prewhitening.** A raw price-difference series has its own serial correlation (momentum, mean-reversion); left in, that
-   alone can make the cross-correlation peak away from zero for reasons that have nothing to do with either contract
-   leading the other. Each series is first run through its own AR(1) (OLS on its own previous value); only the
-   **residuals** go into the next step.
-2. **Cross-correlation function (CCF).** For lag *k* = −12..+12 bars: `CCF(k) = Corr(A(t), B(t+k))` of the two prewhitened
-   residual series, inner-joined on their own common bar timestamps first (at least 60 common bars, or the pair is
-   skipped). The *k* that maximizes `|CCF(k)|` is the lead-lag estimate: *k* > 0 means A leads B by *k* bars; *k* < 0 means
-   B leads A; *k* ≈ 0 or a flat CCF means no detectable lead-lag at this resolution.
-3. **Significance.** The usual t-test on a correlation from *n* observations (`t = r·√((n−2)/(1−r²))`, df = n−2), with the
-   same Bonferroni convention as 6.11's "what separates winners from losers": a lag **"stands out"** only if its p-value
-   beats 0.05 ÷ (lags tested); one that only beats 0.05 alone is **"worth a look"**; otherwise **"no sign"**.
-
-5-minute bars are cached locally the same way daily candles are (`adapters/historical/vendor.py`'s Parquet cache now keys
-by interval, not just by symbol), so the matrix only hits the live `/ohlc/` API for a window it has not already pulled; a
-bar that was still forming when first cached is overwritten the next time that same timestamp is requested.
-
 ### 5.6 Hedge ratio (`core/hedge.py`)
 
 For daily changes *y* of a position and *x* of the hedge instrument: **β = cov(y, x) / var(x)** (sample statistics). To hedge
@@ -428,14 +407,14 @@ indicator and a countdown. A banner appears until an API token is configured. Al
 **Price Alerts.** Pick a structure type, type its legs (a leg may itself be a spread or a fly, for example `BRNJ27-K27`), type a price
 level and choose when it fires: *Auto* (from where the price is now: a level above it fires when the price rises to it, below when it
 falls to it), or rises to / falls to explicitly. The structure's price is the same composite as on the Structures page, from the live
-prices. Each alert fires **once**: a toast that stays until dismissed, plus Teams like any other alert. It then stays in the list as
-*Triggered* until you delete it. The list shows each alert's live price and how far it is from its level, and every alert has a delete
-button, a **Stop/Start** button and an **Edit** button. Stop (⏸) pauses an active alert: it stays in the list with its level and legs,
-but is skipped by the price check and dropped from the live feed's requests until Start (▶) makes it active again — a paused alert
-shows *Stopped* and is dimmed like a triggered one, and neither is polled or can fire. Edit loads the alert into the form (the heading changes to *Edit price alert*), where its legs, level, direction or name can be
-changed and saved with the same checks as a new alert, or cancelled. Saving **arms the alert again**, so editing a triggered alert makes it active, with no
-trigger recorded. Its id and creation time stay, and the change is in the audit log. The live poll requests the legs of every **active** alert in the same `/fairvalue/` call as your positions (a triggered alert is no
-longer polled), so an alert on contracts that no structure holds still gets a live price. The sidebar's stale-data indicator counts only
+prices. An alert **keeps firing** while the price is at or beyond its level: a toast that stays until dismissed, plus Teams like any other
+alert, repeated at most once a minute (`REPEAT_SECONDS` in `core/level_alerts.py`) until you press **Stop**; it shows *Firing* in the
+list meanwhile and the time and price of the last send. The list shows each alert's live price and how far it is from its level, and
+every alert has a delete button, a **Stop/Start** button and an **Edit** button. Stop (⏸) pauses an alert, firing or not: it stays in
+the list with its level and legs, but is skipped by the price check and dropped from the live feed's requests until Start (▶) makes it
+active again — a paused alert shows *Stopped* and is dimmed, and is neither polled nor can fire. Edit loads the alert into the form (the heading changes to *Edit price alert*), where its legs, level, direction or name can be
+changed and saved with the same checks as a new alert, or cancelled. Saving makes the alert active, with no last-send recorded. Its id and creation time stay, and the change is in the audit log. The live poll requests the legs of every **active** alert in the same `/fairvalue/` call as your positions (a stopped alert is not
+polled), so an alert on contracts that no structure holds still gets a live price. The sidebar's stale-data indicator counts only
 symbols the feed polls: contracts of closed structures stay saved but are never requested, so they do not keep it on "Data Stale".
 Creating and deleting alerts is in the audit log.
 
@@ -539,20 +518,9 @@ correlation of a pair for several windows), *Year Overlay* (the same pair across
 (lookback average, std, min, max, last, beta, R², observations for every pair). A "Backfill missing data" button downloads
 history for symbols with none (the only place this tab calls the API).
 
-**Lead-Lag (intraday, collapsible)** (`core/lead_lag.py`, `core/lead_lag_data.py`). Which of two contracts moves first, on
-5-minute bars. Pick a **group** — a single product (CL / BRN / G / CL-BZ box: the next 4 consecutive live outright contracts
-starting at a chosen generic position) or **All** (one contract per product, same generic position, so the matrix compares
-across products instead of across months) — a starting month and a lookback (1-20 days of 5-minute candles, cached locally
-after the first pull: see 5.5a), then **Compute** (never automatic, to keep this off the shared `/ohlc/` rate budget until
-asked for). The matrix: colour is the strength (|ρ| at the best lag, found by scanning ±12 bars of the **prewhitened**
-price-difference cross-correlation — see 5.5a for the full math); the cell text is that lag in minutes, signed from the
-row's side (positive: row leads column). Click a cell for the full cross-correlation-by-lag chart, the exact lag, p-value,
-Bonferroni reading ("stands out" / "worth a look" / "no sign", same convention as 6.11's "what separates winners from
-losers") and a plain-English sentence.
-
 ### 6.5 Exposure Map
 
-Net lots per outright contract across open structures (legs split into outrights, sign rule 3). A bar chart, a table (net,
+Net lots per outright contract across open structures (legs split into outrights, sign rule 3). **One map per instrument** (WTI, Brent, gasoil, ... each with its own net lots by month, only for instruments you hold), then a combined bar chart of all of them, a table (net,
 gross long, gross short, contributing structures) and **concentration warnings**: every delivery month whose absolute net
 lots exceed the threshold (default **10 lots**, editable on the page) gets an amber alert naming the structures behind it.
 
@@ -569,76 +537,49 @@ lots exceed the threshold (default **10 lots**, editable on the page) gets an am
 - **Beta vs portfolio — position sizing.** Pick a candidate, a window and see β of the candidate on the book's outright P&L,
   with the lots to hedge or match.
 
-### 6.7 Trade Analyzer (Curve Kinks)
+### 6.7 Trade Analyzer
 
-Route `/trade-analyzer`. Nothing is typed in to analyse: the engine (`core/curve_service.py`) prices the whole 15-month
-ladder (outrights, spreads, flies, d-flies) of CL, BRN and gasoil on every 10 s poll, runs the kink maths on every curve in
-the background whether or not the page is open, raises alerts, logs events, saves daily snapshots and keeps data-quality
-flags. The page only chooses which curve to display.
+Route `/trade-analyzer` (`core/trade_analysis.py`, `ui/layouts/trade_analyzer_tab.py`). Build the structure as in *New Structure*: pick a
+type (outright / spread / fly / custom), then one row per leg with its symbol and ratio (a leg may itself be a spread or a fly, such as
+`BRNJ27-K27`). Then buy or sell the legs as entered, lots, **risk per trade** (default from the trade-plan risk per trade in Settings, or the
+value you saved with *Save risk per trade*), how many days to give the trade, and optionally a stop and target of your own. **Analyze**
+(never automatic; it reads only stored daily settlements, no API call) answers: how often is the target met before the stop, and which
+stops and targets have worked best within your risk?
 
-**What is a kink.** A contract (or spread / fly / d-fly) that sits away from the rest of its curve. Four methods each produce
-a z-score per position:
+1. **Replay.** The same structure of earlier delivery years (BRNJ27-K27 -> BRNJ26-K26, BRNJ25-K25 ...) is priced from its outrights'
+   settlements, and the trade is replayed forward day by day, as bought or sold, from every earlier day that is within +/- N trading
+   days (default 7) of today's distance from the front leg's expiry.
+2. **Outcome.** For a stop S and target T (points) a replayed trade wins if its profit reaches +T before -S, loses if -S comes first
+   (or the same day, since only daily closes are known) and is "still open" if neither happens within your days or the front leg
+   expires first. **Chance of winning = wins / (wins + losses)**, so the target is simply required before the stop, however long it
+   takes within the days you allow. The expected result per trade closes open trades at their last price.
+3. **Stops and targets.** The widest stop that fits is `risk per trade / (lots x point value)`. Candidate
+   stops are percentiles of how far replayed trades went against you and 1-3 daily standard deviations; targets are percentiles of
+   how far they went your way and 1 / 1.5 / 2 / 3 times the stop. Each pair is scored; the page recommends the best expected result
+   among pairs where at least half the replayed trades reached a level and the low end of the interval is still positive (otherwise it
+   says no edge was found). Your own pair, if typed, is scored and shown instead.
+4. **Price context.** Each replayed day carries the front CL, BRN and gasoil settlements, the front CL-BZ box (WTI minus Brent) and the
+   gasoil crack (gasoil / 7.45 minus Brent). Days whose context is close to today's (Gaussian kernel on the standardised distance)
+   count for more; the page shows the chance with and without this weighting, the effective number of days, and where today sits
+   among the replayed days for each measure.
+5. **Uncertainty.** Replayed days of one year overlap, so the 90% range is a block bootstrap over YEARS. A random walk with the same
+   daily volatility is simulated as a benchmark.
+6. **Portfolio.** The trade's daily P&L (lots x side x point value) is correlated with the open book's, and the book's 1-day historical
+   VaR (250 days) is recomputed with the trade added: it says whether the trade adds to or reduces the risk you hold.
 
-| Method | Definition |
-|---|---|
-| **fit** | robust polynomial (degree 3, Tukey-biweight IRLS so a kink does not drag the fit) across the curve; residual ÷ the larger of today's cross-sectional robust scale and that position's historical fit-residual scale |
-| **neighbour** | leave-one-out interpolation (cubic Lagrange inside, quadratic near the ends) — equivalent to a second difference; residual ÷ that position's own historical residual scale. **Not scored at the first and last contract** (it extrapolates there) unless `ends_use_neighbour` is on |
-| **pca** | the curve rebuilt from the top 3 principal components of its history (level, slope, curvature); leftover ÷ the historical leftover scale |
-| **history** | value against its own history at the same generic position (median / robust σ); spreads, flies and d-flies only. Judged **relative to the curve's common move today** (the median z across the curve is removed), so a whole curve shifting is not N kinks |
-
-Scales are `max(1.4826·MAD, standard deviation)` (the MAD alone ignores the fat tails and made z-scores 2–3× too big) and are
-**never below the same measure over the last 60 days** (`recent_scale_days`), so a market that has become more volatile does
-not flag everything. All scales have a floor (`min_scale`, 0.005 points). A method **flags** a position when |z| exceeds its
-threshold (3.0 each). Agreement sets the priority: **HIGH** needs 2 methods, **MEDIUM** one. A kink that is the
-neighbour-method echo of a stronger neighbouring kink is recognised and suppressed (the strongest flagged point is masked,
-all methods re-run, repeat up to 6 times). A curve with more than 40% of its points flagged is treated as a data mismatch or
-a whole-curve move and reports no kinks. **Seasonality:** the neighbour residual of the same delivery month at the same time of
-year (±15 days) in earlier years gives a seasonal z; if |z| ≤ 1.5 the kink is "seasonally normal" and drops one priority level.
-
-**Direction.** A contract rich against its curve is a **SELL**, a cheap one a **BUY** (`trade_side`).
-
-**Tabs:** *Kinks* (the current kinks, strongest first, with z by method and fair values), *Change vs settlement*, *Trade
-plans*, *Data quality*, *History log* (every kink event with its detail), *Backtest*, *Thresholds* (editable).
-
-**Trade plan** for a kink (`core/curve_trade.py`):
-
-- *Entry*: live price of the structure at alert time.
-- *Stop*: `min(vol_stop_mult × daily move, risk_per_lot ÷ point_value)`, never narrower than one tick; the plan says when the
-  per-lot cap wins.
-- *Lots*: `floor(risk_per_trade ÷ (stop distance × point value))`, capped at `max_lots`. Point value scales with the product's
-  contract size (gasoil is a tenth).
-- *Target*: `entry + (fair − entry) × share`, fair = median fair value of the methods that flagged; the share is what such
-  kinks have historically closed within `reversion_horizon` days (backtest), floored at `min_reversion_fraction`.
-- *Time stop*: about 2 half-lives (AR(1) on the neighbour residual history).
-- *Hedges*: candidate curve types per kink type (Settings), same product, optionally not sharing a contract; each scored on
-  the last 120 days of changes; the ratio minimising the 1-day historical 95% VaR of trade + h × hedge is chosen, with the
-  minimum-variance ratio shown beside it; the best two with |correlation| ≥ 0.5 are listed.
-
-**Backtest.** For each of the last N days the detector runs exactly as live but fitted only on history before that day; each
-flagged kink is followed forward for `reversion_horizon` days and its residual compared with the flag-day residual (reverted
-= shrank below half). Read across groups (1 vs 2 vs 3+ methods), not as proof.
-
-**Alerts.** A kink alerts when it first appears at or above the minimum priority (MEDIUM), when its priority rises, or when it
-reappears after the cooldown (60 min). It must be present on **3 polls in a row** before it alerts (a one-poll flicker never
-does), a kink resting on a price older than the stale limit (120 s) never alerts (it is still shown), and one alert per product
-per poll lists related kinks. **By default only d-flies alert** (ticks per product and curve type on the Thresholds tab;
-others are still shown and logged). Alerts also fire on a product's "buffer day" (a contract treated as rolled out one business
-day before its rule-based expiry) asking you to confirm the expiry date.
-
-**Calendar.** Contracts are live while `as_of < buffer day` (one business day before the rule-based expiry). The gasoil rule
-was checked against the exchange's own front-contract history and agrees on every day of the last 260.
-
-Defaults (all editable on the *Thresholds* tab): z 3.0 ×4; methods for HIGH 2; max kinked share 0.4; seasonal z 1.5, window 15
-days; lookback 504 days; PCA components 3; polynomial degree 3; min scale 0.005; alert from MEDIUM; cooldown 60 min;
-persistence 3 polls; recent-volatility window 60 days; stale 120 s; snapshot every 15 min; 5 years of history. Trade plan:
-risk per trade $5,000, per lot $1,000, point value $1,000 (per 1,000-unit contract), max 100 lots, volatility stop 1.5 × the
-60-day daily move, reversion horizon 10 days, minimum reversion share 0.5, minimum reward:risk 0 (off).
+Needs at least 3 earlier years and 20 comparable days, else it says so. The old Curve Kinks page and engine (kink maths, alerts, event
+log, data-quality flags, backtest, history download) are retired but kept in `core/curve_service.py`, `core/curve_kinks.py`,
+`core/curve_trade.py`, `core/curve_backtest.py`, `core/curve_history.py`, `ui/layouts/curve_tab.py` and `ui/callbacks/curve_callbacks.py`,
+marked LEGACY and not started or registered. Their Settings (opening time, thresholds, trade plan) remain stored but unused,
+except the trade-plan risk per trade, which seeds the Trade Analyzer's default.
 
 ### 6.8 Curve Compare
 
 Route `/curve-compare`. Pick a product (CL / BRN / G), months out (1–36), curve type, and for a d-fly how its price is built.
 The chart shows the **live curve** against the **previous settlement**; points built from other quotes are hollow diamonds,
-and a curve stops where nothing can be priced. A table lists live, previous settlement and the change.
+and a curve stops where nothing can be priced. A table lists live, previous settlement and the change. **Daily snapshots:** the previous-settlement curve (the dotted line) of every product and curve type is saved for the full 36
+months, under the settlement's own day, once the day's settlements have been fetched (`core/curve_compare.py`; no extra call); pick a saved day in
+*Compare with a daily snapshot* to draw that day's settlement curve over today's, for whatever months the page shows (matched by contract).
 
 - **Live price of a symbol** = size-weighted mid of the best bid and ask: `(bid × ask size + ask × bid size) ÷ (bid size +
   ask size)` (the side with less size trades next); plain mid with no sizes. No usable quote → `/fairvalue/`.
@@ -894,13 +835,13 @@ the fee sheet and editable. How a trade's rebate is worked out (`core/rebates.py
 | **API Configuration** | Bearer token (stored in the settings table, shown masked), *Save Token*, *Test Connection* |
 | **Risk & Alert Thresholds** | portfolio P&L stop (default −$50,000), structure max loss (−$10,000, stored but not evaluated by an alert today), staleness threshold (10 s), portfolio margin limit ($1,000,000, shown on Home) |
 | **Analysis Defaults** | VaR confidence (95%, stored), correlation rolling window (5) and lookback (20) |
-| **Curve Kinks** | opening time and time zone of the daily previous-settlement fetch; trade-plan settings (risk, stop multiple, volatility window, hedge types…) |
+| **Curve Kinks** (legacy, unused) | opening time and time zone of the daily previous-settlement fetch; trade-plan settings (risk, stop multiple, volatility window, hedge types…) |
 | **OI / Volume / ATR** | OI history length (1,500 calendar days before expiry), ATR history length (400) |
 | **Trade Journal lists** | trade ideas, exit reasons and mistake tags (one per line), and the switch "a first entry must have a stop and a target" |
 | **Microsoft Teams Alerts** | webhook URL (masked, https only), enable switch, **@mention me** (your Teams email, an optional name, and which alerts: all / warnings and critical / critical only), *Test*, *Save* |
 | **Account Reset** | *Reset total P&L to zero* (stores baselines for total and realized P&L, confirm first) and *Clear reset* |
 | **Rebates** | the rebate rates per product and structure type (Archive) |
-| **System health** | one table of what works, what needs a look and what is broken: login vs listening address, database size and free disk, secret encryption, newest backup, API token and free requests, last live poll, OI / ATR / Churn downloads, Curve Kinks. Fills when the tab opens; *Refresh* re-reads it |
+| **System health** | one table of what works, what needs a look and what is broken: login vs listening address, database size and free disk, secret encryption, newest backup, API token and free requests, last live poll, OI / ATR / Churn downloads, curve snapshots. Fills when the tab opens; *Refresh* re-reads it |
 | **Backup & audit log** | backup status, *Back up now*, *Download a backup*, and the audit log (see section 8) |
 | **Data Management** | last sync summary (symbols tracked / ok / error), stored data size, *Run sync now* |
 
@@ -1242,8 +1183,6 @@ temp-file-and-replace helpers.
   symbol is short has a short VaR sample (the result says how many days it used).
 - The structure-max-loss threshold and the VaR-confidence default are stored settings that no alert or page currently
   evaluates; the margin limit is displayed on Home but margin usage is not tracked.
-- The Curve Kinks outright curves of Brent and CL still flag about one kink a day; alerts default to d-flies, where the rate is
-  lower. Gasoil flies flag more often than the other products' (steep recent backwardation and 0.25-tick price steps).
 - With few archived trades the journal analysis can only point to where to look; groups under 15 trades are marked "low" and
   the winners-vs-losers table is labelled a pointer below 100 trades.
 - Churn candles of d-flies are derived close to close; targets are therefore slightly harder to hit than on a real instrument.

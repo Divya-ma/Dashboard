@@ -371,7 +371,7 @@ def health_panel(pathname, refresh_clicks):
     if callback_context.triggered_id != "settings-health-refresh" and pathname != "/settings":
         raise PreventUpdate
     parts = SimpleNamespace(**{name: getattr(container, name, None) for name in (
-        "repository", "backup", "live_cache", "qh_api", "oi_service", "churn_service", "curve_service")}, app_settings=settings)
+        "repository", "backup", "live_cache", "qh_api", "oi_service", "churn_service", "curve_compare")}, app_settings=settings)
     checks = collect_health(parts)
     rows = [{"mark": _HEALTH_MARK[c.status], "area": c.area, "name": c.name, "detail": c.detail} for c in checks]
     return _HEALTH_HEADLINE[overall(checks)], rows

@@ -96,7 +96,7 @@ def test_the_default_name_is_the_exchange_symbol_or_the_legs():
 # ---------------- storage ----------------
 
 
-def test_alerts_are_stored_listed_marked_triggered_once_and_deleted(repo):
+def test_alerts_are_stored_listed_stamped_as_fired_and_deleted(repo):
     alert, contracts, _ = build(repo)
     for contract in contracts:
         repo.save_contract(contract)
@@ -104,10 +104,11 @@ def test_alerts_are_stored_listed_marked_triggered_once_and_deleted(repo):
     (stored,) = repo.get_level_alerts()
     assert stored.name == alert.name and stored.legs == alert.legs and stored.level == 0.8 and stored.status == ACTIVE
     assert repo.get_level_alerts(TRIGGERED) == [] and len(repo.get_level_alerts(ACTIVE)) == 1
-    assert repo.mark_level_alert_triggered(alert.alert_id, 0.85) is True
-    assert repo.mark_level_alert_triggered(alert.alert_id, 0.9) is False  # only one caller wins: the alert is sent once
-    (done,) = repo.get_level_alerts(TRIGGERED)
-    assert done.triggered_price == 0.85 and isinstance(done.triggered_at, datetime)
+    assert repo.record_level_alert_fire(alert.alert_id, 0.85, 60) is True
+    assert repo.record_level_alert_fire(alert.alert_id, 0.9, 60) is False  # sent a moment ago: only one caller wins
+    assert repo.record_level_alert_fire(alert.alert_id, 0.9, 0) is True  # the repeat interval has passed
+    (done,) = repo.get_level_alerts(ACTIVE)  # firing never ends the alert: it stays active until stopped
+    assert done.triggered_price == 0.9 and isinstance(done.triggered_at, datetime)
     assert repo.delete_level_alert(alert.alert_id) is True and repo.delete_level_alert(alert.alert_id) is False
     assert repo.get_level_alerts() == []
     actions = [row["action"] for row in repo.get_audit_log(10, entity_type="level_alert")]
@@ -134,14 +135,20 @@ def stored(repo, **kw):
     return alert
 
 
-def test_an_alert_fires_once_when_the_price_reaches_the_level(repo):
+def test_an_alert_keeps_firing_while_the_price_is_beyond_the_level_until_stopped(repo, monkeypatch):
     stored(repo, level=0.8)  # fires at or above 0.8
     manager = Recorder()
     assert check_level_alerts(repo, manager, {"BRNJ27": 80.2, "BRNK27": 79.5}) == []  # 0.7: not yet
     (sent,) = check_level_alerts(repo, manager, {"BRNJ27": 80.4, "BRNK27": 79.5})  # 0.9
     assert sent[0] == AlertLevel.WARNING and "BRNJ27-K27" in sent[1] and "0.8" in sent[2]
-    assert check_level_alerts(repo, manager, {"BRNJ27": 81.0, "BRNK27": 79.5}) == []  # still beyond the level: not sent again
-    assert len(manager.sent) == 1 and repo.get_level_alerts()[0].status == TRIGGERED
+    assert check_level_alerts(repo, manager, {"BRNJ27": 81.0, "BRNK27": 79.5}) == []  # sent a moment ago: not twice in one interval
+    assert len(manager.sent) == 1 and repo.get_level_alerts()[0].status == ACTIVE
+    monkeypatch.setattr("core.level_alerts.REPEAT_SECONDS", 0)
+    assert len(check_level_alerts(repo, manager, {"BRNJ27": 81.0, "BRNK27": 79.5})) == 1  # a minute later: it fires again
+    assert check_level_alerts(repo, manager, {"BRNJ27": 80.2, "BRNK27": 79.5}) == []  # back under the level: quiet, still active
+    alert_id = repo.get_level_alerts()[0].alert_id
+    repo.pause_level_alert(alert_id)
+    assert check_level_alerts(repo, manager, {"BRNJ27": 85.0, "BRNK27": 79.5}) == [] and len(manager.sent) == 2  # stopped: silent
 
 
 def test_a_falling_alert_fires_below_and_a_missing_price_is_skipped(repo):
@@ -222,15 +229,15 @@ def test_creating_an_alert_saves_it_and_its_contracts_and_clears_the_form(page, 
         lc.create_alert(None, "spread", [], [], 1, AUTO, "", LIVE, 0)
 
 
-def test_the_table_lists_active_alerts_closest_first_then_triggered_ones_with_a_delete_button(page, repo):
+def test_the_table_lists_active_alerts_closest_first_then_stopped_ones_with_a_delete_button(page, repo):
     stored(repo, level=0.8, name="far")
     stored(repo, level=0.55, name="near")
     done = stored(repo, level=0.9, name="done")
-    repo.mark_level_alert_triggered(done.alert_id, 0.95)
+    repo.pause_level_alert(done.alert_id)
     table = alerts_table(repo.get_level_alerts(), {"BRNJ27": 80.0, "BRNK27": 79.5})
     text = str(table)
     assert text.index("'near'") < text.index("'far'") < text.index("'done'")
-    assert text.count("la-delete") == 3 and "Triggered" in text and "to go" in text
+    assert text.count("la-delete") == 3 and "Stopped" in text and "to go" in text
     assert "No price alerts yet" in str(alerts_table([], {}))
     assert "to go" not in str(alerts_table(repo.get_level_alerts(), {}))  # no live price: no distance
 
@@ -263,7 +270,7 @@ def test_the_page_is_in_the_menu_and_the_router():
 
 def test_editing_replaces_the_alert_and_arms_it_again_keeping_its_id_and_creation_time(repo):
     old = stored(repo, level=0.8, name="old")
-    assert repo.mark_level_alert_triggered(old.alert_id, 0.85)
+    assert repo.record_level_alert_fire(old.alert_id, 0.85)
     new, contracts, _ = build(repo, level=0.3, name="new", direction=BELOW, symbols=["BRNJ27", "BRNM27"])
     new.alert_id = old.alert_id
     for contract in contracts:
@@ -293,14 +300,14 @@ def _click(monkeypatch, trigger_id, value=1, prop="x.n_clicks"):
 
 def test_edit_loads_the_alert_into_the_form_and_save_updates_it(page, repo, monkeypatch):
     alert = stored(repo, level=0.8, name="mine")
-    repo.mark_level_alert_triggered(alert.alert_id, 0.85)
+    repo.record_level_alert_fire(alert.alert_id, 0.85)
     _click(monkeypatch, {"type": "la-edit", "index": alert.alert_id}, value=None)
     with pytest.raises(lc.PreventUpdate):
         lc.start_edit([None])  # a button that was just drawn
     _click(monkeypatch, {"type": "la-edit", "index": alert.alert_id})
     state, template, level, direction, name, title, label, cancel, message = lc.start_edit([1])
     assert state == {"id": alert.alert_id, "template": "spread", "legs": alert.legs} and (template, level, direction, name) == ("spread", 0.8, ABOVE, "mine")
-    assert title == "Edit price alert" and label == "💾 Save changes" and cancel == {"display": "inline-block"} and "arms it again" in str(message)
+    assert title == "Edit price alert" and label == "💾 Save changes" and cancel == {"display": "inline-block"} and "Editing" in str(message)
     _click(monkeypatch, {"type": "la-edit", "index": "gone"})
     with pytest.raises(lc.PreventUpdate):
         lc.start_edit([1])
@@ -362,15 +369,16 @@ def test_stopping_pauses_an_active_alert_and_starting_makes_it_active_again(repo
     assert actions[:2] == ["level_alert.resume", "level_alert.pause"]
 
 
-def test_a_paused_alert_cannot_fire_and_a_triggered_one_cannot_be_paused(repo):
+def test_a_paused_alert_cannot_fire_and_a_firing_one_can_be_stopped(repo):
     alert = stored(repo, level=0.8)
     repo.pause_level_alert(alert.alert_id)
     manager = Recorder()
     assert check_level_alerts(repo, manager, {"BRNJ27": 85.0, "BRNK27": 1.0}) == [] and manager.sent == []
-    assert repo.get_level_alerts()[0].status == "paused"  # still paused, not triggered
+    assert repo.get_level_alerts()[0].status == "paused"
     repo.resume_level_alert(alert.alert_id)
     assert len(check_level_alerts(repo, manager, {"BRNJ27": 85.0, "BRNK27": 1.0})) == 1
-    assert repo.pause_level_alert(alert.alert_id) is False  # triggered now: pausing it does nothing
+    assert repo.pause_level_alert(alert.alert_id) is True  # it fired, yet Stop still works
+    assert repo.get_level_alerts()[0].status == "paused"
 
 
 def test_a_paused_alert_leg_is_dropped_from_the_live_feed(repo):
@@ -408,12 +416,12 @@ def test_stop_and_start_buttons_toggle_the_status(page, repo):
         lc2.pause_alert([1], 5)  # the wrong button type triggered
 
 
-def test_an_active_row_shows_stop_a_paused_row_shows_start_a_triggered_row_shows_neither(page, repo):
+def test_an_active_or_firing_row_shows_stop_a_paused_row_shows_start(page, repo):
     active = stored(repo, name="a", level=0.8)
     paused = stored(repo, name="b", level=0.5)
     repo.pause_level_alert(paused.alert_id)
-    done = stored(repo, name="c", level=0.9)
-    repo.mark_level_alert_triggered(done.alert_id, 0.95)
-    text = str(alerts_table(repo.get_level_alerts(), PRICES))
-    assert text.count("la-pause") == 1 and text.count("la-resume") == 1
+    firing = stored(repo, name="c", level=0.9)
+    repo.record_level_alert_fire(firing.alert_id, 0.95)
+    text = str(alerts_table(repo.get_level_alerts(), {"BRNJ27": 81.0, "BRNK27": 79.9}))  # spread 1.1: beyond 0.9
+    assert text.count("la-pause") == 2 and text.count("la-resume") == 1 and "Firing" in text
     assert "⏸ Stopped" in text and "▶ Start" in text and "⏸ Stop" in text

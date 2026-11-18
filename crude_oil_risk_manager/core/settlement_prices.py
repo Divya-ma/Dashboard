@@ -62,6 +62,19 @@ class SettlementPrices:
             self._wide[product] = (version, wide)
         return self._wide[product][1]
 
+    def front_prices(self, product: str) -> pd.Series:
+        """Settlement of the front contract of a store product on each day (naive dates). The front contract on a day is the
+        one with data that stops trading first, i.e. whose last stored settlement is the earliest of those still trading."""
+        wide = self._matrix(product)
+        if wide.empty:
+            return pd.Series(dtype=float)
+        last = {column: wide[column].last_valid_index() for column in wide.columns}
+        front = pd.Series(float("nan"), index=wide.index)
+        for column in sorted((c for c in wide.columns if last[c] is not None), key=lambda c: last[c], reverse=True):
+            values = wide[column]
+            front[values.notna()] = values[values.notna()]  # later (earlier-expiring) columns overwrite
+        return front.dropna()
+
     def closes(self, symbol: str) -> tuple[pd.Series | None, bool]:
         """(daily settlement closes indexed by UTC midnight as the DataLoader's are, whether a proxy was used)."""
         code = settlement_code(symbol)

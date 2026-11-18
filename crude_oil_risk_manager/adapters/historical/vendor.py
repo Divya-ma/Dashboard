@@ -52,8 +52,7 @@ class VendorHistoricalAdapter(HistoricalDataAdapter):
         """Return the Parquet path for an API symbol, e.g. 'COZ26' -> data_dir/CO/COZ26.parquet.
 
         A non-daily interval gets its own file next to it ('COZ26_5M.parquet'), so caching an intraday
-        resolution (added for the Correlation page's Lead-Lag view) never touches the daily file or its
-        sync log; '1D' keeps the original bare filename for every file already on disk."""
+        resolution never touches the daily file or its sync log; '1D' keeps the original bare filename for every file already on disk."""
         api_code, _ = SymbolTranslator._match_product_prefix(api_symbol, API_CODE_TO_PRODUCT)
         directory = self._data_dir / api_code
         directory.mkdir(parents=True, exist_ok=True)

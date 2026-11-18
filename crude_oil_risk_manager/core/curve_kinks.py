@@ -1,4 +1,7 @@
-"""Kink detection on a forward curve, by four independent methods plus a seasonal check.
+"""LEGACY (retired, kept for possible later use): the Curve Kinks page and engine are no longer wired into the app (the Trade
+Analyzer is now ui/layouts/trade_analyzer_tab.py). Daily curve snapshots moved to Curve Compare (core/curve_compare.py).
+
+Kink detection on a forward curve, by four independent methods plus a seasonal check.
 
 A KINK is a contract (or spread / fly / dfly) that sits away from the rest of its curve. For
 each position of one curve (one product, one family) four methods each produce a z-score:

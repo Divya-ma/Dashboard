@@ -2,16 +2,15 @@
 
 A level alert is NOT a position: it is only the legs, a level and a direction, kept in the `level_alerts` table and shown on the
 Price Alerts page. The structure's price is the same composite the Structures page shows (sign of the first leg's ratio times the
-sum of ratio x leg price). Each alert fires ONCE: the moment the live price is at or beyond the level in its direction it is marked
-triggered (so a flickering price cannot send it twice), one alert is sent (in the app and to Teams, like every other alert) and
-it stays on the page as a triggered alert until it is deleted.
+sum of ratio x leg price). An alert keeps firing: while the live price is at or beyond the level in its direction it is sent (in
+the app and to Teams, like every other alert) at most once every REPEAT_SECONDS, and it stays active until the user stops it.
 
 DIRECTION. "above" fires at or over the level, "below" at or under it. "auto" (the default on the page) looks at the structure's
 price when the alert is made: a level above it is "above", a level below it is "below", and a level equal to it is "above".
 
 STOP / START. An active alert can be stopped (PAUSED): it stays in the list, keeps its level and legs, but is skipped by
 check_level_alerts and dropped from the live feed's leg list (adapters.live.fairvalue), so it cannot fire while paused and costs
-nothing. Start makes it active again. A triggered alert is already done; Edit, not Start, is what arms it again.
+nothing. Start makes it active again. (Alerts stored as "triggered" by the old fire-once behaviour can be started too.)
 """
 
 import logging
@@ -27,6 +26,7 @@ logger = logging.getLogger(__name__)
 ABOVE, BELOW, AUTO = "above", "below", "auto"
 DIRECTION_LABELS = {ABOVE: "rises to / above", BELOW: "falls to / below"}
 NAME_LIMIT = 100
+REPEAT_SECONDS = 60
 
 
 class LevelAlertError(CrudeOilRiskError):
@@ -99,10 +99,11 @@ def build_level_alert(name, template, symbols, ratios, level, direction, prices,
 
 
 def check_level_alerts(repository, alert_manager, prices: dict[str, float]) -> list:
-    """Fire every active level alert whose price has reached its level; returns the alerts sent. Never raises.
+    """Fire every active level alert whose price is at or beyond its level; returns the alerts sent. Never raises.
 
-    The alert is marked triggered BEFORE it is sent, and only the call that changed the row sends, so two checks that overlap
-    (two browser tabs, two polls) cannot send it twice."""
+    An alert keeps firing, at most once per REPEAT_SECONDS, for as long as the price stays at or beyond the level, until the
+    user stops it. The fire time is stamped BEFORE sending, and only the call that changed the row sends, so two checks that
+    overlap (two browser tabs, two polls) cannot send it twice."""
     try:
         active = repository.get_level_alerts(ACTIVE)
     except Exception as exc:  # noqa: BLE001 - a broken alert table must never stop the price checks
@@ -114,10 +115,10 @@ def check_level_alerts(repository, alert_manager, prices: dict[str, float]) -> l
         if price is None or not is_hit(alert.direction, alert.level, price):
             continue
         try:
-            if not repository.mark_level_alert_triggered(alert.alert_id, price):
-                continue  # another check got there first, or it was deleted a moment ago
+            if not repository.record_level_alert_fire(alert.alert_id, price, REPEAT_SECONDS):
+                continue  # sent recently, another check got there first, or it was stopped/deleted a moment ago
         except Exception as exc:  # noqa: BLE001
-            logger.error("Could not mark level alert %s as triggered: %s", alert.alert_id, type(exc).__name__)
+            logger.error("Could not record level alert %s as fired: %s", alert.alert_id, type(exc).__name__)
             continue
         verb = "reached" if alert.direction == ABOVE else "fallen to"
         sent.append(alert_manager.send_alert(

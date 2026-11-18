@@ -1,4 +1,7 @@
-"""Trade plan for a kink: entry, lots, stop, target and ranked hedges.
+"""LEGACY (retired, kept for possible later use): the Curve Kinks page and engine are no longer wired into the app (the Trade
+Analyzer is now ui/layouts/trade_analyzer_tab.py). Daily curve snapshots moved to Curve Compare (core/curve_compare.py).
+
+Trade plan for a kink: entry, lots, stop, target and ranked hedges.
 
 Everything here is a rule applied to numbers the engine already has (live price, the methods'
 fair values, daily history); nothing is predicted beyond the kink closing. The structure is

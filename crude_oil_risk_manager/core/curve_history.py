@@ -1,4 +1,7 @@
-"""Generic-contract history for the Curve Kinks page, cached as Parquet.
+"""LEGACY (retired, kept for possible later use): the Curve Kinks page and engine are no longer wired into the app (the Trade
+Analyzer is now ui/layouts/trade_analyzer_tab.py). Daily curve snapshots moved to Curve Compare (core/curve_compare.py).
+
+Generic-contract history for the Curve Kinks page, cached as Parquet.
 
 Source: POST /generic-charts/generic/data/ with resolve=1 (so CO1 is always the front Brent
 contract) and gap=0 (no roll adjustment: a generic series must show the curve's real shape).
