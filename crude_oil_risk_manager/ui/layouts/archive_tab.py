@@ -462,6 +462,34 @@ def _delete_modal() -> dbc.Modal:
     )
 
 
+def _undo_modal() -> dbc.Modal:
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("Undo exit")),
+            dbc.ModalBody(
+                [
+                    html.Div(id="archive-undo-body"),
+                    html.Div(
+                        dbc.Checkbox(
+                            id="archive-undo-baseline", value=False,
+                            label="These were closed before the Account Reset: keep the Home figure unchanged (move the reset baseline with them)",
+                        ),
+                        id="archive-undo-baseline-wrap", style={"display": "none", "marginTop": "10px"},
+                    ),
+                ]
+            ),
+            dbc.ModalFooter(
+                [
+                    dbc.Button("Cancel", id="archive-undo-cancel", color="secondary", outline=True),
+                    dbc.Button("Undo exit", id="archive-undo-confirm", color="warning"),
+                ]
+            ),
+        ],
+        id="archive-undo-modal",
+        is_open=False,
+    )
+
+
 def archive_layout() -> html.Div:
     """Filter bar, summary stats row and the archive table with an expandable detail panel."""
     return html.Div(
@@ -469,8 +497,10 @@ def archive_layout() -> html.Div:
             dcc.Store(id="archive-rows", data=[]),
             dcc.Store(id="archive-selected", data=None),
             dcc.Store(id="archive-delete-ids", data=[]),
+            dcc.Store(id="archive-undo-items", data=[]),
             dcc.Store(id="archive-deleted", data=0),
             _delete_modal(),
+            _undo_modal(),
             html.H3("📁 Archive", style={**_HEADING, "marginBottom": "16px"}),
             _filter_bar(),
             _stats_row(),
@@ -498,9 +528,11 @@ def _trades_tab() -> html.Div:
                                            title="Every trade the table shows now (after the filters), with its legs and the summary"),
                                 dcc.Download(id="archive-export-download"),
                                 dbc.Button("🗑 Delete selected", id="archive-delete-btn", color="danger", outline=True, size="sm"),
+                                dbc.Button("↩ Undo exit", id="archive-undo-btn", color="warning", outline=True, size="sm", className="ms-2",
+                                           title="Remove only the ticked exit(s): those lots come back and the structure is open again (an exit made by mistake)"),
                                 dbc.Button("📊 Fill market data for old trades", id="archive-backfill-btn", color="info", outline=True, size="sm", className="ms-2",
                                            title="Market prices, movement, curve shape and ATR at the entry and exit of trades that have none (a few per click)"),
-                                html.Span("Tick the boxes of the trades to delete (test trades, say).", style={**_MUTED, "marginLeft": "12px"}),
+                                html.Span("Tick the trades: Delete removes the whole structure for good; Undo exit removes only that exit and reopens its lots.", style={**_MUTED, "marginLeft": "12px"}),
                                 html.Span(id="archive-delete-status", style={"marginLeft": "12px", "fontSize": "13px"}),
                                 dcc.Loading(html.Span(id="archive-backfill-status", style={"marginLeft": "12px", "fontSize": "13px"}), type="dot"),
                             ],

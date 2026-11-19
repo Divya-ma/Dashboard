@@ -125,10 +125,16 @@ CLOSED_COLUMN_DEFS = [
     {
         "colId": "actions",
         "headerName": "Actions",
-        "width": 190,
+        "width": 300,
         "sortable": False,
-        "cellRenderer": "ButtonRenderer",
-        "cellRendererParams": {"colors": COLORS, "label": "♻️ Reuse as Shell", "action": "reuse"},
+        "cellRenderer": "ButtonsRenderer",
+        "cellRendererParams": {
+            "colors": COLORS,
+            "buttons": [
+                {"label": "📋 Trade log", "action": "view", "color": "TEXT_PRIMARY"},
+                {"label": "♻️ Reuse as Shell", "action": "reuse", "color": "ACCENT_GREEN"},
+            ],
+        },
     },
 ]
 

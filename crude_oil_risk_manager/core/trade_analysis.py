@@ -220,10 +220,8 @@ def structure_price(settlements, parts: dict[str, float]) -> pd.Series | None:
     return price if len(price) >= 2 else None
 
 
-def default_entry(settlements, parts: dict[str, float], live: dict[str, float] | None) -> tuple[float | None, str]:
-    """(entry price, where it came from): the live price when every outright has one, else the last settlement."""
-    if live and all(o in live for o in parts):
-        return sum(w * live[o] for o, w in parts.items()), "live price"
+def default_entry(settlements, parts: dict[str, float]) -> tuple[float | None, str]:
+    """(entry price, where it came from): the last settlement of the structure (never a live price)."""
     price = structure_price(settlements, parts)
     if price is None:
         return None, "none"
@@ -444,7 +442,7 @@ class Analysis:
     fan: dict[str, list[float]]
 
 
-def analyse(settlements, spec: TradeSpec, today: date, live: dict[str, float] | None = None) -> Analysis:
+def analyse(settlements, spec: TradeSpec, today: date) -> Analysis:
     """The whole analysis for one trade. Raises TradeAnalysisError for bad inputs or too little history."""
     if spec.side not in (1, -1):
         raise TradeAnalysisError("Choose buy or sell.")
@@ -458,7 +456,7 @@ def analyse(settlements, spec: TradeSpec, today: date, live: dict[str, float] | 
     dollars = point_value(parts)
     risk_limit = spec.risk_trade
     max_stop = risk_limit / (spec.lots * dollars)
-    entry, source = (spec.entry, "typed") if spec.entry is not None else default_entry(settlements, parts, live)
+    entry, source = (spec.entry, "typed") if spec.entry is not None else default_entry(settlements, parts)
     context = context_frame(settlements)
     paths = build_paths(settlements, parts, spec.side, today, horizon, spec.window, context)
     n_years = len(np.unique(paths.year))

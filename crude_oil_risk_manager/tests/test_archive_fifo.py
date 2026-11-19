@@ -260,3 +260,49 @@ def test_the_editor_changes_an_exit_of_an_open_trade_but_will_not_close_it(repo)
     with pytest.raises(ArchiveEditError, match="still open"):
         edit_trades(repo, sid, [{**r, "lots": 5} if r is exit_row else r for r in rows])
     assert repo.get_structure(sid).status is StructureStatus.OPEN
+
+
+# ---------- undoing an exit reopens the structure ----------
+
+
+def test_undoing_the_only_exit_of_a_closed_structure_opens_it_again(repo):
+    from core.archive import undo_archived_exits
+
+    sid = build_history(repo, [(5, 0.50, MON, 0.30, 1.00)], [(5, 0.80, WED)], name="Mistake")
+    assert repo.get_structure(sid).status == StructureStatus.CLOSED
+    (row,) = rows_for(repo, sid)
+    assert row["per_exit"] is True
+    report = undo_archived_exits(repo, [(sid, row["exit_trade_id"])])
+    structure = repo.get_structure(sid)
+    assert structure.status == StructureStatus.OPEN and structure.closed_at is None
+    assert [leg.lots for leg in structure.legs] == [5, 5]  # the lots are back, at the entry price
+    assert [t.event_type for t in repo.get_trades_for_structure(sid)] == [TradeEventType.TRADE]
+    assert report["undone"] == [("Mistake", "open")] and report["skipped"] == []
+    assert rows_for(repo, sid) == []  # nothing left in the archive
+    assert report["removed_pnl"] != 0
+
+
+def test_undoing_the_last_of_two_exits_leaves_the_structure_partly_closed_and_the_first_exit_alone(repo):
+    from core.archive import undo_archived_exits
+
+    sid = build_history(repo, [(5, 0.50, MON, 0.30, 1.00)], [(2, 0.80, WED), (3, 0.90, THU)])
+    first, second = sorted(rows_for(repo, sid), key=lambda r: r["exit_number"])
+    report = undo_archived_exits(repo, [(sid, second["exit_trade_id"]), (sid, second["exit_trade_id"]), ("gone", "x")])
+    structure = repo.get_structure(sid)
+    assert structure.status == StructureStatus.OPEN and structure.closed_at is None  # a partial exit leaves the structure open
+    assert structure.legs[0].lots == 3 and report["undone"] == [("Dec-Jan", "open")] and report["skipped"] == ["gone"]
+    (remaining,) = rows_for(repo, sid)
+    assert remaining["exit_trade_id"] == first["exit_trade_id"]  # (its saved cost is re-derived by the replay, as when a trade is deleted on the Structures page)
+
+
+def test_the_undo_dialog_lists_the_ticked_exits_and_the_confirm_reopens(repo, monkeypatch):
+    sid = build_history(repo, [(5, 0.50, MON, 0.30, 1.00)], [(5, 0.80, WED)], name="Mistake")
+    monkeypatch.setattr(ac, "container", Container(repository=repo))
+    rows = ac._load_rows()
+    table = [{"id": r["id"]} for r in rows]
+    opened, body, items, _wrap, disabled = ac.open_undo(1, table, [0], rows)
+    assert opened and disabled is False and items == [[sid, rows[0]["exit_trade_id"]]] and "Mistake" in str(body)
+    assert ac.open_undo(1, table, [], rows)[4] is True
+    closed_modal, status, selected, detail, counter = ac.confirm_undo(1, items, False, 3)
+    assert closed_modal is False and "mistake is open" in status.lower() and counter == 4
+    assert repo.get_structure(sid).status == StructureStatus.OPEN

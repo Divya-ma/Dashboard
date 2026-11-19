@@ -107,3 +107,33 @@ dagcomponentfuncs.ButtonRenderer = function (props) {
         props.label
     );
 };
+
+// Several buttons in one cell: cellRendererParams {buttons: [{label, action, color}], colors}. Each click reports
+// {action, structure_id} through cellRendererData.
+dagcomponentfuncs.ButtonsRenderer = function (props) {
+    var colors = props.colors || {};
+    var buttons = (props.buttons || []).map(function (spec) {
+        var color = colors[spec.color] || colors.ACCENT_GREEN;
+        return React.createElement(
+            "button",
+            {
+                key: spec.action,
+                onClick: function () {
+                    props.setData({ action: spec.action, structure_id: props.data.structure_id });
+                },
+                style: {
+                    color: color,
+                    backgroundColor: "transparent",
+                    border: "1px solid " + color,
+                    borderRadius: "4px",
+                    padding: "2px 10px",
+                    marginRight: "6px",
+                    fontSize: "12px",
+                    cursor: "pointer",
+                },
+            },
+            spec.label
+        );
+    });
+    return React.createElement("div", { style: { display: "flex", alignItems: "center", height: "100%" } }, buttons);
+};

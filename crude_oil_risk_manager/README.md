@@ -561,7 +561,8 @@ stops and targets have worked best within your risk?
 4. **Price context.** Each replayed day carries the front CL, BRN and gasoil settlements, the front CL-BZ box (WTI minus Brent) and the
    gasoil crack (gasoil / 7.45 minus Brent). Days whose context is close to today's (Gaussian kernel on the standardised distance)
    count for more; the page shows the chance with and without this weighting, the effective number of days, and where today sits
-   among the replayed days for each measure.
+   among the replayed days for each measure. "Front" is the earliest delivery month not yet expired (core.roll_days rules), and
+   today's context and the default entry price are the **last settlement** only: no live or fair-value price is used on this page.
 5. **Uncertainty.** Replayed days of one year overlap, so the 90% range is a block bootstrap over YEARS. A random walk with the same
    daily volatility is simulated as a benchmark.
 6. **Portfolio.** The trade's daily P&L (lots x side x point value) is correlated with the open book's, and the book's 1-day historical
@@ -734,6 +735,10 @@ mistakes.
 - **Delete selected** permanently deletes ticked closed trades (with their legs, trades and history). Home's realized P&L (all
   time and today's) drops by their net P&L automatically. If an Account Reset is active, a tickbox keeps the shown figure
   unchanged for trades closed before the reset (the baseline moves with them).
+- **↩ Undo exit** removes only the ticked exit(s) (an exit made by mistake): the structure's other trades stay, the lots come
+  back, and a closed structure moves from Closed Structures back to the open list. Every remaining trade is replayed, as when a
+  trade is deleted on the Structures page, and Home's realized P&L drops by what the exit had earned. A row that stands for a whole
+  structure (per-leg exits) cannot be undone exit by exit.
 - **⬇ Export to Excel** downloads exactly the trades the table shows: sheets *Trades* (every column, real numbers and dates,
   frozen header, filters, $ formats), *Legs* (a row per leg), *Summary*.
 - **📊 Fill market data for old trades** backfills snapshots (3 trades per click; each trade costs 6 `/ohlc/` requests) and

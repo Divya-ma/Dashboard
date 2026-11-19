@@ -220,3 +220,11 @@ def test_close_detail_modal():
     assert sc.close_detail_modal(1) is False
     with pytest.raises(PreventUpdate):
         sc.close_detail_modal(None)
+
+
+def test_handle_closed_structure_view_opens_the_detail_for_the_trade_log():
+    assert sc.handle_closed_structure_view(cell("view")) == (True, "abc")
+    assert sc.handle_closed_structure_view({"value": {"action": "view"}, "rowId": "row1"}) == (True, "row1")
+    for bad in (None, {}, cell("reuse"), {"value": {"action": "view"}}):
+        with pytest.raises(PreventUpdate):
+            sc.handle_closed_structure_view(bad)

@@ -10,6 +10,7 @@ outright is priced here from the BRN outright of that month, and the caller is t
 Anything else (WBS, a symbol that does not parse) returns None and the caller falls back to the DataLoader.
 """
 
+import numpy as np
 import pandas as pd
 
 from adapters.base import SymbolTranslator
@@ -63,17 +64,20 @@ class SettlementPrices:
         return self._wide[product][1]
 
     def front_prices(self, product: str) -> pd.Series:
-        """Settlement of the front contract of a store product on each day (naive dates). The front contract on a day is the
-        one with data that stops trading first, i.e. whose last stored settlement is the earliest of those still trading."""
-        wide = self._matrix(product)
-        if wide.empty:
+        """Settlement of the front contract of a store product on each day (naive dates).
+
+        The front contract is the earliest DELIVERY month that has not expired on that day (the rules of core.roll_days: an exact last
+        settlement day for a finished contract, the rule-based expiry for a live one). Days before the first stored front are left out."""
+        from core.roll_days import build_leg_data  # local import: roll_days reads the same store
+
+        frame = self._store.frame(product)
+        leg = build_leg_data(product, frame) if frame is not None and not frame.empty else None
+        if leg is None:
             return pd.Series(dtype=float)
-        last = {column: wide[column].last_valid_index() for column in wide.columns}
-        front = pd.Series(float("nan"), index=wide.index)
-        for column in sorted((c for c in wide.columns if last[c] is not None), key=lambda c: last[c], reverse=True):
-            values = wide[column]
-            front[values.notna()] = values[values.notna()]  # later (earlier-expiring) columns overwrite
-        return front.dropna()
+        values = leg.close.to_numpy(dtype=float)
+        rows = np.arange(len(values))
+        picked = np.where(leg.front >= 0, values[rows, np.maximum(leg.front, 0)], np.nan)
+        return pd.Series(picked, index=leg.close.index).dropna()
 
     def closes(self, symbol: str) -> tuple[pd.Series | None, bool]:
         """(daily settlement closes indexed by UTC midnight as the DataLoader's are, whether a proxy was used)."""

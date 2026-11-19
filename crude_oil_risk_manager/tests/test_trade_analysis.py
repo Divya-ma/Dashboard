@@ -189,12 +189,12 @@ def test_leg_rows_follow_the_template_and_custom_can_grow_and_shrink(monkeypatch
 def test_run_analysis_fills_every_panel_and_reports_errors(monkeypatch, settlements):
     monkeypatch.setattr(cb, "container", Container(settlements=settlements))
     monkeypatch.setattr(cb, "_today", lambda: TODAY)
-    out = cb.run_analysis(1, "spread", SYMS, RATIOS, -1, 5, None, 10000, 40, None, None, None, {})
+    out = cb.run_analysis(1, "spread", SYMS, RATIOS, -1, 5, None, 10000, 40, None, None, None)
     assert len(out) == 8 and "comparable days" in str(out[0]) and "met before the stop" in str(out[1]) and "ta-grid-table" in str(out[3])
-    bad = cb.run_analysis(1, "spread", ["", ""], RATIOS, -1, 5, None, 10000, 40, None, None, None, {})
+    bad = cb.run_analysis(1, "spread", ["", ""], RATIOS, -1, 5, None, 10000, 40, None, None, None)
     assert "Type the symbol of leg 1" in str(bad[0]) and len(bad) == 8
     with pytest.raises(cb.PreventUpdate):
-        cb.run_analysis(None, "spread", SYMS, RATIOS, 1, 1, None, 1, 1, None, None, None, {})
+        cb.run_analysis(None, "spread", SYMS, RATIOS, 1, 1, None, 1, 1, None, None, None)
 
 
 def test_risk_per_trade_is_saved_and_defaults_from_the_settings(tmp_db_path):
@@ -205,3 +205,25 @@ def test_risk_per_trade_is_saved_and_defaults_from_the_settings(tmp_db_path):
     assert load_risk_per_trade(repo) > 0
     save_risk_per_trade(repo, 12000)
     assert load_risk_per_trade(repo) == 12000.0
+
+
+def test_front_prices_pick_the_earliest_unexpired_delivery_not_a_far_contract():
+    """Every live contract ends on the same stored day; the front must still be the nearest delivery month."""
+    from core.settlement_prices import SettlementPrices
+
+    days = pd.bdate_range("2026-09-01", "2026-11-17")
+    rows = []
+    for symbol, level in (("COF27", 80.0), ("COG27", 79.0), ("COZ28", 68.0), ("COZ26", 86.0)):
+        for day in days:
+            rows.append({"contract": symbol, "date": day, "oi": 1.0, "close": level, "volume": 1.0})
+
+    class Store:
+        version = "v1"
+
+        def frame(self, product):
+            return pd.DataFrame(rows)
+
+    front = SettlementPrices(Store()).front_prices("BRN")
+    assert not front.empty
+    assert front.iloc[-1] == 86.0 or front.iloc[-1] == 80.0  # a near contract, never the Dec 2028 level of 68
+    assert front.iloc[-1] != 68.0

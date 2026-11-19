@@ -18,7 +18,7 @@ from ui.layouts.archive_analysis import (
     build_bar_figure, build_cards, build_equity_figure, build_week_cards, contract_records, separation_records, table_records, two_way_records, week_contract_records,
 )
 from core.archive import (
-    ATR_DISPLAY_SCALE, build_archive_rows, contract_summary, delete_archived_structures, display_atr, filter_archive_rows,
+    ATR_DISPLAY_SCALE, build_archive_rows, contract_summary, delete_archived_structures, display_atr, undo_archived_exits, filter_archive_rows,
     journal_columns, rows_closed_this_week, structure_id_of, summarize, week_summary,
 )
 from core.models import StructureStatus
@@ -374,6 +374,63 @@ def confirm_delete(n_clicks, ids, shift_baseline, counter):
     return False, message, [], None, (counter or 0) + 1
 
 
+def open_undo(n_clicks, virtual_data, selected_rows, rows):
+    """Ask before undoing the ticked exits: what comes back open, and how much realized PnL leaves Home's totals."""
+    if not n_clicks:
+        raise PreventUpdate
+    shown = virtual_data or []
+    by_id = {r["id"]: r for r in rows or []}
+    ticked = [by_id[shown[i]["id"]] for i in selected_rows or [] if 0 <= i < len(shown) and shown[i]["id"] in by_id]
+    if not ticked:
+        return True, [html.Div("Tick the exit(s) to undo first.", style={"color": "#f0b429"})], [], {"display": "none"}, True
+    items, lines, total, skipped = [], [], 0.0, []
+    for row in ticked:
+        if not row.get("per_exit") or not row.get("exit_trade_id"):
+            skipped.append(row["name"])  # one row for the whole structure: its exits cannot be told apart
+            continue
+        pnl = row["realized_pnl"] or 0.0
+        items.append([row["structure_id"], row["exit_trade_id"]])
+        total += pnl
+        lines.append(html.Li(f"{row['name']}: exit {row['exit_number']} of {row['exits_of_structure']}, {row['lots']:g} lot(s) at {row['exit_price']}, "
+                             f"{'+' if pnl >= 0 else '-'}${abs(pnl):,.0f}"))
+    if not items:
+        note = f"{', '.join(skipped)}: this row stands for the whole structure and cannot be undone exit by exit (edit its trades instead)."
+        return True, [html.Div(note, style={"color": "#f0b429"})], [], {"display": "none"}, True
+    repository = container.repository
+    reset_active = bool(repository.get_setting(KEY_PNL_BASELINE, 0.0) or repository.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0))
+    body = [
+        html.P(f"Remove {len(items)} exit(s) and put their lots back open? The entries and the other exits stay; a closed structure moves back to the open list."),
+        html.Ul(lines, style={"maxHeight": "180px", "overflowY": "auto"}),
+        html.P(f"Home's realized PnL will drop by about {'+' if total >= 0 else '-'}${abs(total):,.0f} (the exit's result and cost); the entry cost stays.",
+               style={"fontWeight": "bold"}),
+        html.P("This cannot be undone.", style={"color": "#f0b429"}),
+    ]
+    if skipped:
+        body.insert(1, html.P(f"Not undone (whole-structure row): {', '.join(skipped)}.", style={"color": "#f0b429"}))
+    return True, body, items, ({"display": "block", "marginTop": "10px"} if reset_active else {"display": "none"}), False
+
+
+def cancel_undo(n_clicks):
+    if not n_clicks:
+        raise PreventUpdate
+    return False
+
+
+def confirm_undo(n_clicks, items, shift_baseline, counter):
+    if not n_clicks or not items:
+        raise PreventUpdate
+    try:
+        report = undo_archived_exits(container.repository, items, bool(shift_baseline))
+    except Exception as exc:  # noqa: BLE001 - nothing was changed when the replay failed
+        logger.exception("Undo exit failed")
+        return False, f"Could not undo; nothing was changed ({exc}).", no_update, no_update, no_update
+    names = ", ".join(f"{name} is {status.replace('_', ' ').lower()}" for name, status in report["undone"]) or "nothing changed"
+    message = f"Exit removed: {names}. Realized PnL {'+' if report['removed_pnl'] >= 0 else '-'}${abs(report['removed_pnl']):,.0f} no longer counted."
+    if report["skipped"]:
+        message += f" Not undone: {', '.join(report['skipped'])}."
+    return False, message, [], None, (counter or 0) + 1
+
+
 def register_archive_callbacks(app) -> None:
     """Attach the Archive tab callbacks to the Dash app."""
     app.callback(
@@ -424,6 +481,38 @@ def register_archive_callbacks(app) -> None:
         State("archive-table", "derived_virtual_selected_rows"),
         prevent_initial_call=True,
     )(open_delete)
+
+    app.callback(
+        Output("archive-undo-modal", "is_open"),
+        Output("archive-undo-body", "children"),
+        Output("archive-undo-items", "data"),
+        Output("archive-undo-baseline-wrap", "style"),
+        Output("archive-undo-confirm", "disabled"),
+        Input("archive-undo-btn", "n_clicks"),
+        State("archive-table", "derived_virtual_data"),
+        State("archive-table", "derived_virtual_selected_rows"),
+        State("archive-rows", "data"),
+        prevent_initial_call=True,
+    )(open_undo)
+
+    app.callback(
+        Output("archive-undo-modal", "is_open", allow_duplicate=True),
+        Input("archive-undo-cancel", "n_clicks"),
+        prevent_initial_call=True,
+    )(cancel_undo)
+
+    app.callback(
+        Output("archive-undo-modal", "is_open", allow_duplicate=True),
+        Output("archive-delete-status", "children", allow_duplicate=True),
+        Output("archive-table", "selected_rows", allow_duplicate=True),
+        Output("archive-selected", "data", allow_duplicate=True),
+        Output("archive-deleted", "data", allow_duplicate=True),
+        Input("archive-undo-confirm", "n_clicks"),
+        State("archive-undo-items", "data"),
+        State("archive-undo-baseline", "value"),
+        State("archive-deleted", "data"),
+        prevent_initial_call=True,
+    )(confirm_undo)
 
     app.callback(
         Output("archive-delete-modal", "is_open", allow_duplicate=True),

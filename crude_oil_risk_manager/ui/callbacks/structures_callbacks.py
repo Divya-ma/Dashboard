@@ -91,6 +91,15 @@ def handle_closed_structure_action(
     return (rows, *toast_update(f"Structure '{shell.name}' ready as new shell", header="Structure reused"))
 
 
+def handle_closed_structure_view(cell_data):
+    """'Trade log' on a closed row: open the detail modal, which lists every trade made in the structure."""
+    payload = (cell_data or {}).get("value") or {}
+    structure_id = payload.get("structure_id") or (cell_data or {}).get("rowId")
+    if payload.get("action") != ACTION_VIEW or not structure_id:
+        raise PreventUpdate
+    return True, structure_id
+
+
 def close_detail_modal(n_clicks):
     if not n_clicks:
         raise PreventUpdate
@@ -130,6 +139,13 @@ def register_structures_callbacks(app) -> None:
         Input("structures-active-grid", "cellRendererData"),
         prevent_initial_call=True,
     )(handle_structure_action)
+
+    app.callback(
+        Output("modal-structure-detail", "is_open", allow_duplicate=True),
+        Output("store-selected-structure-id", "data", allow_duplicate=True),
+        Input("structures-closed-grid", "cellRendererData"),
+        prevent_initial_call=True,
+    )(handle_closed_structure_view)
 
     app.callback(
         Output("modal-structure-detail", "is_open", allow_duplicate=True),

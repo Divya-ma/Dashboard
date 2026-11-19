@@ -15,6 +15,7 @@ import logging
 from dash import ALL, MATCH, Input, Output, State, callback_context, html, no_update
 from dash.exceptions import PreventUpdate
 
+from core.archive import delete_trades_and_recompute
 from core.fifo import open_queue
 from core.models import StructureStatus, TradeEventType
 from core.pnl import entry_cost_for_lots
@@ -658,21 +659,8 @@ def start_trade_alert(n_clicks_list, structure_id, live_prices):
 
 
 def _delete_trade_and_recompute(structure_id: str, trade_id: str) -> None:
-    """Remove one trade and replay every remaining trade so lots, entry price, status and
-    any surviving exit's realized PnL land exactly where they'd be without it."""
-    repository = container.repository
-    structure = repository.get_structure(structure_id)
-    if structure is None:
-        return
-    remaining = [t for t in repository.get_trades_for_structure(structure_id) if t.trade_id != trade_id]
-    result = recompute_structure_from_trades(structure, remaining)
-    repository.delete_trade(trade_id)
-    repository.update_structure_legs(structure_id, result.structure.legs, result.audit_note)
-    repository.set_structure_lifecycle(
-        structure_id, result.structure.status, result.structure.closed_at, result.structure.close_trigger
-    )
-    for exit_trade_id, (realized_pnl, transaction_cost) in result.exit_trade_updates.items():
-        repository.update_trade_realized_pnl(exit_trade_id, realized_pnl, transaction_cost)
+    """Remove one trade and replay every remaining trade (see core.archive.delete_trades_and_recompute)."""
+    delete_trades_and_recompute(container.repository, structure_id, [trade_id])
 
 
 def execute_delete(

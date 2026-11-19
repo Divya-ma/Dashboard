@@ -12,7 +12,7 @@ from dash.exceptions import PreventUpdate
 from core.positions import filter_open_structures
 from core.structure_builder import EVENT_ADD, EVENT_REMOVE, EVENT_TEMPLATE, next_leg_rows
 from core.structure_utils import STRUCTURE_TEMPLATES, decompose_to_outrights, normalize_symbol
-from core.structure_view import prices_from_store, statuses_for_filter
+from core.structure_view import statuses_for_filter
 from core.trade_analysis import (
     MAX_HORIZON, TradeAnalysisError, TradeSpec, analyse, outright_weights, portfolio_effect, save_risk_per_trade,
 )
@@ -124,7 +124,7 @@ def _empty():
     return (blank, blank, blank, empty_figure(PLACEHOLDER), blank, portfolio_panel(None), blank)
 
 
-def run_analysis(n_clicks, template, symbols, ratios, side, lots, entry, risk_trade, horizon, window, stop, target, live_prices):
+def run_analysis(n_clicks, template, symbols, ratios, side, lots, entry, risk_trade, horizon, window, stop, target):
     """(status, verdict, cards, grid, fan, context, portfolio, years + notes) for the form."""
     if not n_clicks:
         raise PreventUpdate
@@ -133,7 +133,7 @@ def run_analysis(n_clicks, template, symbols, ratios, side, lots, entry, risk_tr
         return (html.Div("Settlement history is not available.", style=_ERROR), *_empty())
     try:
         spec = build_spec(template, symbols, ratios, side, lots, entry, risk_trade, horizon, window, stop, target)
-        analysis = analyse(settlements, spec, _today(), _live_for(spec, live_prices))
+        analysis = analyse(settlements, spec, _today())
     except ValueError as exc:
         return (html.Div(f"⚠️ {exc}", style=_ERROR), *_empty())
     except TradeAnalysisError as exc:
@@ -152,16 +152,6 @@ def run_analysis(n_clicks, template, symbols, ratios, side, lots, entry, risk_tr
         status, html.Div(verdict(analysis)), summary_cards(analysis), grid, build_fan_figure(analysis), context,
         portfolio_panel(effect), html.Div([years, notes]),
     )
-
-
-def _live_for(spec: TradeSpec, live_prices) -> dict[str, float] | None:
-    """Live prices of the structure's outrights from the app's price store (None if the structure cannot be split)."""
-    try:
-        outrights = outright_weights(spec.legs)
-    except TradeAnalysisError:
-        return None
-    prices = prices_from_store(live_prices)
-    return {o: prices[o] for o in outrights if o in prices} or None
 
 
 def _portfolio(spec: TradeSpec):
@@ -209,7 +199,6 @@ def register_trade_analyzer_callbacks(app) -> None:
         State("ta-window", "value"),
         State("ta-stop", "value"),
         State("ta-target", "value"),
-        State("store-live-prices", "data"),
         prevent_initial_call=True,
     )(run_analysis)
 

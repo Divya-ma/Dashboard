@@ -146,6 +146,7 @@ def _exit_row(structure: Structure, match, exits_in_total: int, journal: dict | 
         "id": _row_id(structure.structure_id, match.index),
         "structure_id": structure.structure_id,
         "exit_trade_id": exit_trade.trade_id,
+        "per_exit": True,  # one exit of the structure: it can be undone on its own (undo_archived_exits)
         "exit_number": match.index,
         "exits_of_structure": exits_in_total,
         "open_lots": 0.0 if closed else (structure.legs[0].lots if structure.legs else 0.0),
@@ -186,6 +187,7 @@ def _closed_structure_row(structure: Structure, trades: list[Trade], journals: d
         "id": structure.structure_id,
         "structure_id": structure.structure_id,
         "exit_trade_id": exits[-1].trade_id if exits else None,
+        "per_exit": False,  # the whole structure in one row (per-leg exits or unmatched trades): not undone exit by exit
         "exit_number": 1,
         "exits_of_structure": 1,
         "open_lots": 0.0,
@@ -428,3 +430,65 @@ def delete_archived_structures(repository, structure_ids: list[str], shift_reset
             if current:
                 repository.set_setting(key, current - removed)
     return {"deleted": deleted, "skipped": skipped, "removed_pnl": removed}
+
+
+# ----------------------------------------------------------------------
+# Undoing exits (the structure comes back)
+# ----------------------------------------------------------------------
+
+
+def delete_trades_and_recompute(repository, structure_id: str, trade_ids: list[str]) -> None:
+    """Remove trades and replay every remaining trade, so lots, entry price, status (a closed structure may be OPEN again) and every
+    surviving exit's realized PnL land exactly where they would be had the removed trades never happened. Raises TradeError when
+    the remaining history cannot be replayed (nothing is changed then)."""
+    from core.trade_entry import recompute_structure_from_trades
+
+    structure = repository.get_structure(structure_id)
+    if structure is None:
+        return
+    gone = set(trade_ids)
+    remaining = [t for t in repository.get_trades_for_structure(structure_id) if t.trade_id not in gone]
+    result = recompute_structure_from_trades(structure, remaining)
+    for trade_id in gone:
+        repository.delete_trade(trade_id)
+    repository.update_structure_legs(structure_id, result.structure.legs, result.audit_note)
+    repository.set_structure_lifecycle(structure_id, result.structure.status, result.structure.closed_at, result.structure.close_trigger)
+    for exit_trade_id, (realized_pnl, transaction_cost) in result.exit_trade_updates.items():
+        repository.update_trade_realized_pnl(exit_trade_id, realized_pnl, transaction_cost)
+
+
+def undo_archived_exits(repository, items: list, shift_reset_baseline: bool = False) -> dict:
+    """Delete the given exit trades (pairs of structure id and exit trade id) and reopen what they closed.
+
+    The lots of a deleted exit are open again: a closed structure becomes OPEN (or PARTIALLY CLOSED if other exits remain) and
+    leaves the closed list; its entries and its other exits stay. Realized PnL (Home, today's, the Archive) drops by what the exit
+    had earned, and `shift_reset_baseline` moves the Account Reset baselines by the same amount, as for delete_archived_structures.
+
+    Returns {"undone": [(name, status value)], "skipped": [names], "removed_pnl": net realized PnL taken out}."""
+    from core.user_settings import KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE
+
+    wanted: dict[str, list[str]] = defaultdict(list)
+    for structure_id, trade_id in items:
+        if trade_id and trade_id not in wanted[structure_id]:
+            wanted[structure_id].append(trade_id)
+    undone, skipped, removed = [], [], 0.0
+    for structure_id, trade_ids in wanted.items():
+        structure = repository.get_structure(structure_id)
+        if structure is None:
+            skipped.append(structure_id)
+            continue
+        trades = repository.get_trades_for_structure(structure_id)
+        exit_ids = [t.trade_id for t in trades if t.trade_id in trade_ids and t.event_type in _EXIT_EVENTS]
+        if not exit_ids:
+            skipped.append(structure.name)
+            continue
+        before = calculate_net_realized_pnl(trades)
+        delete_trades_and_recompute(repository, structure_id, exit_ids)
+        removed += before - calculate_net_realized_pnl(repository.get_trades_for_structure(structure_id))
+        undone.append((structure.name, repository.get_structure(structure_id).status.value))
+    if shift_reset_baseline and undone:
+        for key in (KEY_PNL_BASELINE, KEY_PNL_REALIZED_BASELINE):
+            current = repository.get_setting(key, 0.0) or 0.0
+            if current:
+                repository.set_setting(key, current - removed)
+    return {"undone": undone, "skipped": skipped, "removed_pnl": removed}
