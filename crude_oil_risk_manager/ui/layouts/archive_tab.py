@@ -437,7 +437,7 @@ def _journal_editor() -> html.Div:
 def _delete_modal() -> dbc.Modal:
     return dbc.Modal(
         [
-            dbc.ModalHeader(dbc.ModalTitle("Delete from the archive")),
+            dbc.ModalHeader(dbc.ModalTitle("Delete the WHOLE structure")),
             dbc.ModalBody(
                 [
                     html.Div(id="archive-delete-body"),
@@ -465,7 +465,7 @@ def _delete_modal() -> dbc.Modal:
 def _undo_modal() -> dbc.Modal:
     return dbc.Modal(
         [
-            dbc.ModalHeader(dbc.ModalTitle("Undo exit")),
+            dbc.ModalHeader(dbc.ModalTitle("Delete the selected exit(s)")),
             dbc.ModalBody(
                 [
                     html.Div(id="archive-undo-body"),
@@ -481,7 +481,7 @@ def _undo_modal() -> dbc.Modal:
             dbc.ModalFooter(
                 [
                     dbc.Button("Cancel", id="archive-undo-cancel", color="secondary", outline=True),
-                    dbc.Button("Undo exit", id="archive-undo-confirm", color="warning"),
+                    dbc.Button("Delete the exit(s)", id="archive-undo-confirm", color="danger"),
                 ]
             ),
         ],
@@ -527,12 +527,13 @@ def _trades_tab() -> html.Div:
                                 dbc.Button("⬇ Export to Excel", id="archive-export-btn", color="success", outline=True, size="sm", className="me-2",
                                            title="Every trade the table shows now (after the filters), with its legs and the summary"),
                                 dcc.Download(id="archive-export-download"),
-                                dbc.Button("🗑 Delete selected", id="archive-delete-btn", color="danger", outline=True, size="sm"),
-                                dbc.Button("↩ Undo exit", id="archive-undo-btn", color="warning", outline=True, size="sm", className="ms-2",
-                                           title="Remove only the ticked exit(s): those lots come back and the structure is open again (an exit made by mistake)"),
+                                dbc.Button("🗑 Delete selected", id="archive-undo-btn", color="danger", outline=True, size="sm",
+                                           title="Delete only the ticked exit(s): the rest of the structure stays and its lots are open again"),
+                                dbc.Button("⚠ Delete whole structure", id="archive-delete-btn", color="secondary", outline=True, size="sm", className="ms-2",
+                                           title="Permanently deletes the structure behind each ticked row with ALL of its trades, ticked or not"),
                                 dbc.Button("📊 Fill market data for old trades", id="archive-backfill-btn", color="info", outline=True, size="sm", className="ms-2",
                                            title="Market prices, movement, curve shape and ATR at the entry and exit of trades that have none (a few per click)"),
-                                html.Span("Tick the trades: Delete removes the whole structure for good; Undo exit removes only that exit and reopens its lots.", style={**_MUTED, "marginLeft": "12px"}),
+                                html.Span("Tick the exits to delete: only those are removed. A structure is deleted whole only with the grey button.", style={**_MUTED, "marginLeft": "12px"}),
                                 html.Span(id="archive-delete-status", style={"marginLeft": "12px", "fontSize": "13px"}),
                                 dcc.Loading(html.Span(id="archive-backfill-status", style={"marginLeft": "12px", "fontSize": "13px"}), type="dot"),
                             ],

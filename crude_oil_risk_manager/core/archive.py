@@ -357,11 +357,11 @@ def rows_closed_this_week(rows: list[dict], today: date) -> list[dict]:
 
 
 def week_summary(rows: list[dict]) -> dict:
-    """summarize()'s figures for one week, plus the week's number of distinct structures and its profit factor before/after rebates."""
+    """summarize()'s figures for one week, plus the week's number of trades (instances: one per exit row) and its profit factor before/after rebates."""
     stats = summarize(rows)
     pnls = [cents(row["realized_pnl"]) for row in rows]
     after = [cents(row.get("pnl_after_rebate", row["realized_pnl"])) for row in rows]
-    stats["trades"] = len({row["structure_id"] for row in rows})
+    stats["trades"] = len(rows)
     stats["profit_factor"] = _profit_factor(pnls)
     stats["profit_factor_rebate"] = _profit_factor(after)
     return stats
@@ -372,11 +372,11 @@ def contract_summary(rows: list[dict]) -> list[dict]:
     strip_reuse_suffix), grouped together as the one contract they really are (e.g. "BZ May27 DFly" and "BZ May27 DFly
     (reuse)" are the same contract traded twice). For each contract:
 
-      trades       distinct structures traded (an original and each later reuse of it each count once)
-      round_trips  archive rows (one per exit, see the module docstring) across every one of those structures
+      trades       instances: archive rows (one per exit, see the module docstring) across every structure traded under the name
+      structures   distinct structures traded (an original and each later reuse of it each count once)
       win_rate / win_rate_rebate, total_pnl / total_pnl_rebate   the same figures as summarize(), over all of them together
 
-    Sorted by round trips, most-traded contract first; ties broken by name. Rows with no name are their own contract (kept,
+    Sorted by trades, most-traded contract first; ties broken by name. Rows with no name are their own contract (kept,
     not dropped)."""
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
@@ -385,11 +385,11 @@ def contract_summary(rows: list[dict]) -> list[dict]:
     for contract, group in groups.items():
         stats = summarize(group)
         out.append({
-            "contract": contract, "trades": len({row["structure_id"] for row in group}), "round_trips": stats["total"],
+            "contract": contract, "trades": stats["total"], "structures": len({row["structure_id"] for row in group}),
             "win_rate": stats["win_rate"], "win_rate_rebate": stats["win_rate_rebate"],
             "total_pnl": stats["total_pnl"], "total_pnl_rebate": stats["total_pnl_rebate"],
         })
-    return sorted(out, key=lambda r: (-r["round_trips"], r["contract"]))
+    return sorted(out, key=lambda r: (-r["trades"], r["contract"]))
 
 
 # ----------------------------------------------------------------------

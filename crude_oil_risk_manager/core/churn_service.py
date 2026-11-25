@@ -68,6 +68,7 @@ from core.atr_calc import atr_frame
 from core.churn_archive import compare, fit_settings, real_trips, row_key
 from core.churn_costs import ProductCost, load_costs, load_use_rebates, round_trip_cost, save_costs, tick_of, without_rebates
 from core.churn_data import ChurnStore, derive_dfly_bars, dfly_instruments, tracked_instruments
+from core.churn_scan import DEFAULT_MAX_RANGE_ATR, DEFAULT_MIN_OSC, build_scan
 from core.churn_engine import (
     SPLIT_MIN_DAYS, TRAIN_SHARE, WORSE_FILLS, InstrumentSpec, Settings, analyse, hours_for, target_grid, count_oscillations, day_ladder, london_now_hour, prepare, result_of, state_of, trading_calendar,
 )
@@ -629,6 +630,25 @@ class ChurnService:
             stats = self._recent_stats(spec, legs, detail["bars_per_day"])
             out.append(self._row_live(r, spec, detail, price, stats, now.timestamp(), int(hour), inside, params, self._ranges(spec, legs)))
         return pd.DataFrame(out)
+
+    def morning_scan(self, params: ChurnParams, min_osc: float = DEFAULT_MIN_OSC, max_range_atr: float = DEFAULT_MAX_RANGE_ATR,
+                     product: str = "all", family: str = "all") -> pd.DataFrame | None:
+        """The morning scan (core.churn_scan): the profitable, oscillating, tight-range rows with levels to churn from. None until the simulation exists."""
+        table = self.live_table(params, product, family, "all")
+        if table is None:
+            return None
+        if table.empty:
+            return build_scan(table, {}, min_osc, max_range_atr)
+        results, today = self.cached(params), pd.Timestamp(self._clock().date())
+        extras = {}
+        for symbol in table["symbol"].unique():
+            first = table[table["symbol"] == symbol].iloc[0]
+            spec: InstrumentSpec = results.details[(symbol, first["direction"])]["spec"]
+            legs = tuple(symbol.split("/")) if first["family"] == "dfly" else None
+            bars = self._symbol_bars(spec, legs)
+            before = bars[bars["ts"] < today] if bars is not None and len(bars) else None
+            extras[symbol] = {"tick": spec.tick, "prior_close": float(before["close"].iloc[-1]) if before is not None and len(before) else None}
+        return build_scan(table, extras, min_osc, max_range_atr)
 
     @staticmethod
     def _why_negative(r, params: ChurnParams) -> tuple[str, str]:

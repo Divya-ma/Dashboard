@@ -513,14 +513,14 @@ def test_contracts_traded_more_than_once_are_grouped_by_their_name_with_reuse_st
     summary = {r["contract"]: r for r in contract_summary([*rows, *more])}
     assert set(summary) == {"Z spread", "F outright", "Flat fly"}
     z = summary["Z spread"]
-    assert (z["trades"], z["round_trips"]) == (2, 2)  # two distinct structures (the original and its reuse), one round trip each
+    assert (z["trades"], z["structures"]) == (2, 2)  # two instances (one exit each) across two distinct structures (the original and its reuse)
     assert z["win_rate"] == pytest.approx(50.0) and z["total_pnl"] == pytest.approx(400.0)  # 500 - 100, one win one loss
     assert z["win_rate_rebate"] == z["win_rate"] and z["total_pnl_rebate"] == z["total_pnl"]  # no RebateBook passed in: unchanged
-    assert summary["F outright"]["trades"] == 1 and summary["F outright"]["round_trips"] == 1
+    assert summary["F outright"]["trades"] == 1 and summary["F outright"]["structures"] == 1
     assert contract_summary([]) == []
 
 
-def test_contract_summary_is_sorted_by_round_trips_then_name():
+def test_contract_summary_is_sorted_by_trades_then_name():
     busy = build(closed("Busy", [("CLZ25", 1, "buy")], exit_=(2026, 8, 1), pnl=10),
                  closed("Busy (reuse)", [("CLZ25", 1, "buy")], exit_=(2026, 8, 2), pnl=10))
     quiet = build(closed("Quiet", [("CLZ25", 1, "buy")], exit_=(2026, 8, 3), pnl=10))
@@ -533,7 +533,7 @@ def test_a_multi_leg_structure_keeps_its_own_round_trips_per_partial_exit():
     trades[1] = trades[1].model_copy(update={"lots": 2.0})  # a partial exit: a second exit still owes 3 lots, but this test only checks what happened
     rows = build_archive_rows([structure], {structure.structure_id: trades})
     summary = contract_summary(rows)
-    assert summary[0]["round_trips"] == len(rows) == summary[0]["trades"]  # one structure, one exit so far: one trade, one round trip
+    assert summary[0]["trades"] == len(rows) and summary[0]["structures"] == 1  # one structure, one exit so far: one instance
 
 
 def test_the_analysis_tab_fills_the_contract_table(repo, env):
@@ -542,7 +542,7 @@ def test_the_analysis_tab_fills_the_contract_table(repo, env):
     rows = build(closed("A", [("CLZ25", 1, "buy")], pnl=500), closed("A (reuse)", [("CLZ25", 1, "buy")], pnl=-100, exit_=(2026, 8, 12)))
     records = ac.render_contracts(rows)
     assert {c["id"] for c in CONTRACT_COLUMNS} == set(records[0])
-    assert records[0]["contract"] == "A" and records[0]["trades"] == 2 and records[0]["round_trips"] == 2
+    assert records[0]["contract"] == "A" and records[0]["trades"] == 2 and records[0]["structures"] == 2
     assert records[0]["win_rate"] == pytest.approx(0.5) and records[0]["total_pnl"] == pytest.approx(400.0)  # a fraction, for the percentage format
     assert ac.render_contracts([]) == contract_records(contract_summary([])) == []
     assert "analysis-contract-table" in str(archive_layout())
@@ -592,11 +592,15 @@ def test_the_analysis_tab_fills_the_week_cards_and_table(repo, env, monkeypatch)
 
     monkeypatch.setattr(ac, "london_today", lambda: date(2026, 8, 10))  # the Monday of the week both rows exit in
     rows = build(closed("A", [("CLZ25", 1, "buy")], pnl=500, exit_=(2026, 8, 11)), closed("A (reuse)", [("CLZ25", 1, "buy")], pnl=-100, exit_=(2026, 8, 12)))
-    cards, records = ac.render_week(rows)
+    cards, records, label = ac.render_week(rows)
+    assert label.startswith("Week 10 Aug 2026 to 16 Aug 2026") and label.endswith("(this week)")
+    _, earlier, earlier_label = ac.render_week(rows, "2026-08-03")  # a previous week holds none of these exits
+    assert earlier == [] and "(this week)" not in earlier_label
+    assert ac.render_week(rows, "2026-08-12")[1] == records  # any day of the week picks the same week
     assert len(cards) == 7  # trades, net pnl x2, win rate x2, profit factor x2
     assert records[0]["contract"] == "A" and records[0]["trades"] == 2
     assert {c["id"] for c in WEEK_CONTRACT_COLUMNS} == set(records[0])
-    assert "round_trips" not in records[0]
-    empty_cards, empty_records = ac.render_week([])
+    assert "structures" not in records[0]
+    empty_cards, empty_records, _ = ac.render_week([])
     assert len(empty_cards) == 7 and empty_records == []
     assert "analysis-week-contract-table" in str(archive_layout())

@@ -241,7 +241,7 @@ def test_deleting_keeps_a_structure_that_still_has_lots_open_and_counts_a_closed
     assert ac._ticked_ids(table, [0, 1, 2]) == [open_sid, closed_sid]
     opened, body, ids, _wrap, confirm_disabled = ac.open_delete(1, table, [0, 1, 2])
     assert ids == [closed_sid] and confirm_disabled is False and "Still open" in str(body) and "lots still open" in str(body)
-    assert "all of its exits" in str(body)
+    assert "every exit, ticked or not" in str(body)
     _opened, body, ids, _wrap, confirm_disabled = ac.open_delete(1, table, [0])
     assert ids == [] and confirm_disabled is True and "still has lots open" in str(body)
 

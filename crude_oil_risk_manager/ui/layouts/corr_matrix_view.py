@@ -67,7 +67,7 @@ def corr_matrix_section(rolling: int, lookback: int) -> html.Div:
         dcc.Graph(id="cm-matrix", figure=empty_figure("Loading the matrix"), config={"displayModeBar": False}),
         _section("How the clicked correlation changed", "The daily rolling-window correlation of the two structures you clicked in the matrix.",
                  html.Div([
-                     dbc.Row([_field("Days shown", dbc.Input(id="cm-chart-days", type="number", value=DEFAULT_CHART_DAYS, min=5, step=10, debounce=True, size="sm"), 2)], className="g-2"),
+                     dbc.Row([_field("Days shown", dbc.Input(id="cm-chart-days", type="number", value=DEFAULT_CHART_DAYS, min=5, step=5, debounce=True, size="sm"), 2)], className="g-2"),
                      dcc.Graph(id="cm-chart", figure=empty_figure("Click a cell of the matrix"), config={"displayModeBar": False}, style={"height": "380px"}),
                  ])),
         _section("Hedge ratio of two structures", "Pick one structure of the target list and one of the base list: lots of the base per lot of the target (minimum variance: the beta of the target's daily changes on the base's, scaled for contract size across products).",
@@ -75,7 +75,7 @@ def corr_matrix_section(rolling: int, lookback: int) -> html.Div:
                      dbc.Row([
                          _field("Target structure (held)", dcc.Dropdown(id="cm-hedge-target", options=[], clearable=False), 3),
                          _field("Base structure (hedge)", dcc.Dropdown(id="cm-hedge-base", options=[], clearable=False), 3),
-                         _field("Days shown", dbc.Input(id="cm-hedge-days", type="number", value=DEFAULT_HEDGE_DAYS, min=5, step=10, debounce=True, size="sm"), 2),
+                         _field("Days shown", dbc.Input(id="cm-hedge-days", type="number", value=DEFAULT_HEDGE_DAYS, min=5, step=5, debounce=True, size="sm"), 2),
                          _field("Beta window (days)", dbc.Input(id="cm-beta-window", type="number", value=None, min=5, step=5, debounce=True, size="sm", placeholder="auto"), 2,
                                 "Days each beta is measured over. Empty: the span the rest of the app uses (rolling + lookback - 1, at least 30)"),
                      ], className="g-2"),

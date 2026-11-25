@@ -16,6 +16,7 @@ from dash import dcc, html
 from dash.dash_table.Format import Format, Group, Scheme
 
 from core.churn_costs import DEFAULT_COMBO_REBATES, DEFAULT_COSTS, STRUCTURE_LOTS, breakeven_ticks, round_trip_cost
+from core.churn_scan import DEFAULT_MAX_RANGE_ATR, DEFAULT_MIN_OSC
 from core.churn_service import ChurnParams
 from ui.container import container
 from ui.layouts.curve_tab import _CARD, _LABEL, _MUTED, _layout, _table, empty_figure
@@ -223,6 +224,46 @@ def table_styles() -> list[dict]:
     ]
 
 
+SCAN_COLUMNS = [
+    _col("Contract", "contract"), _col("Side", "direction"), _col("Live Price", "price", _THREE), _col("Week range (ATRs)", "range_atr", _ONE),
+    _col("Number of oscillation", "osc", _INT), _col("Score", "score", _ONE), _col("Nearest level", "level"), _col("Level price", "level_price", _THREE),
+    _col("Ticks to level", "distance", _ONE), _col("Where", "status"), _col("Best hours (London)", "hours"),
+]
+
+
+def scan_data(scan) -> list[dict]:
+    """The morning scan's rows (core.churn_scan.build_scan) as table records."""
+    return [{
+        "contract": r.contract, "direction": r.direction, "price": _num(r.price, 3), "range_atr": _num(r.range_atr, 1), "osc": None if not np.isfinite(r.osc) else int(r.osc),
+        "score": _num(r.score, 1), "level": r.level, "level_price": _num(r.level_price, 3), "distance": _num(r.distance, 1), "status": r.status, "hours": r.hours,
+    } for r in scan.itertuples()]
+
+
+def scan_section() -> html.Div:
+    """The morning scan: what to churn in a quiet market, with levels built from the stored candles."""
+    table = _table("churn-scan-table", SCAN_COLUMNS, [], [
+        {"if": {"filter_query": '{status} = "AT LEVEL"'}, "backgroundColor": "#1f3a2a"},
+        {"if": {"column_id": "status", "filter_query": '{status} = "AT LEVEL"'}, "color": "#3cb371", "fontWeight": "bold"},
+    ], page_size=25)
+    return html.Div([
+        html.H6("Morning scan: what to churn when nothing is at your level", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "22px"}),
+        html.Div(
+            "Contracts whose side makes money after costs, that came back to their live price often enough, in a tight week range. Each gets levels to churn from "
+            "that do not depend on where you usually enter: yesterday's close (the last stored candle close), the middle of the week's range and its edges. "
+            "Tightest range first. A range of 1.5 means the whole week fitted in one and a half daily ATRs.",
+            style={**_MUTED, "marginBottom": "8px"},
+        ),
+        dbc.Row([
+            _field("Minimum oscillations", dbc.Input(id="churn-scan-osc", type="number", value=DEFAULT_MIN_OSC, min=0, step="any", debounce=True, size="sm"), 2,
+                   "Keep rows whose live price level was reached again and then the target at least this many times in the oscillation range"),
+            _field("Widest week range (ATRs)", dbc.Input(id="churn-scan-range", type="number", value=DEFAULT_MAX_RANGE_ATR, min=0, step="any", debounce=True, size="sm"), 2,
+                   "Keep rows whose week's low-to-high is at most this many daily ATRs (rows with no ATR are kept)"),
+        ], className="mb-2"),
+        html.Div(id="churn-scan-note", style={**_MUTED, "marginBottom": "6px"}),
+        table,
+    ])
+
+
 def churn_table():
     """The one table of the page. It stays in the layout and only its data is replaced, so the sorting you chose survives a refresh."""
     table = _table("churn-table", COLUMNS, [], table_styles(), page_size=40)
@@ -390,6 +431,7 @@ def churn_layout() -> html.Div:
         dcc.Interval(id="churn-live-refresh", interval=LIVE_REFRESH_MS, n_intervals=0),
         dcc.Loading(html.Div(id="churn-note", style={**_MUTED, "margin": "6px 0 8px", "minHeight": "20px"}), type="dot"),
         churn_table(),
+        scan_section(),
         html.H6("One contract: does it still churn with a worse fill?", style={"color": COLORS["TEXT_PRIMARY"], "marginTop": "22px"}),
         html.Div("Pick a row's contract and direction. Each line is the same trade with the entry fill that many ticks worse than planned.", style={**_MUTED, "marginBottom": "8px"}),
         dbc.Row([dbc.Col([html.Div("Contract and direction", style=_LABEL), dcc.Dropdown(id="churn-contract", options=[], clearable=False)], md=4)], className="mb-2"),

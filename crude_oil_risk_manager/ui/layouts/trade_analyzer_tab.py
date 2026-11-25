@@ -222,7 +222,7 @@ def trade_analyzer_layout() -> html.Div:
             _field("Side", dcc.Dropdown(id="ta-side", options=SIDE_OPTIONS, value=1, clearable=False), 2),
             _field("Lots", _number_input("ta-lots", 5, min=1, step=1), 2),
             _field("Entry price (blank = last settlement)", _number_input("ta-entry", None, step="any"), 2),
-            _field("Risk per trade ($)", _number_input("ta-risk-trade", risk_trade, min=1, step=100), 2),
+            _field("Risk per trade ($)", _number_input("ta-risk-trade", risk_trade, min=1, step="any"), 2),
         ]),
         dbc.Row([
             _field(f"Days to give the trade (1-{MAX_HORIZON})", _number_input("ta-horizon", DEFAULT_HORIZON, min=1, max=MAX_HORIZON, step=1), 3),

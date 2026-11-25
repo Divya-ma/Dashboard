@@ -6,9 +6,9 @@ The row building, filtering and statistics live in core.archive.
 """
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
-from dash import Input, Output, State, callback_context, dcc, html, no_update
+from dash import Input, Output, State, callback_context, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from core.archive_edit import ArchiveEditError, edit_legs, edit_structure, edit_trades, trade_rows
@@ -19,7 +19,7 @@ from ui.layouts.archive_analysis import (
 )
 from core.archive import (
     ATR_DISPLAY_SCALE, build_archive_rows, contract_summary, delete_archived_structures, display_atr, undo_archived_exits, filter_archive_rows,
-    journal_columns, rows_closed_this_week, structure_id_of, summarize, week_summary,
+    journal_columns, rows_closed_this_week, structure_id_of, summarize, week_bounds, week_summary,
 )
 from core.models import StructureStatus
 from core.rebates import RebateBook
@@ -124,10 +124,33 @@ def render_contracts(rows):
     return contract_records(contract_summary(rows or []))
 
 
-def render_week(rows):
-    """This week's closed trades: the filtered rows exited Monday-Sunday (London time) this week, as headline cards and a per-contract table."""
-    week_rows = rows_closed_this_week(rows or [], london_today())
-    return build_week_cards(week_summary(week_rows)), week_contract_records(contract_summary(week_rows))
+def _chosen_day(picked) -> date:
+    """The day picked on the weekly analysis (any day of the week wanted), today when nothing is picked."""
+    try:
+        return date.fromisoformat(str(picked)[:10]) if picked else london_today()
+    except ValueError:
+        return london_today()
+
+
+def render_week(rows, picked=None):
+    """The chosen week's closed trades (this week when no day is picked): the filtered rows exited Monday-Sunday (London time),
+    as headline cards, a per-contract table and a label naming the week."""
+    day = _chosen_day(picked)
+    week_rows = rows_closed_this_week(rows or [], day)
+    start, end = week_bounds(day)
+    label = f"Week {start:%d %b %Y} to {end:%d %b %Y}" + (" (this week)" if start == week_bounds(london_today())[0] else "")
+    return build_week_cards(week_summary(week_rows)), week_contract_records(contract_summary(week_rows)), label
+
+
+def move_week(prev_clicks, next_clicks, now_clicks, picked):
+    """Previous / next week buttons (a week either side of the picked day) and This week (clears the pick)."""
+    trigger = ctx.triggered_id
+    if trigger is None:
+        raise PreventUpdate
+    if trigger == "analysis-week-now":
+        return None
+    day = _chosen_day(picked)
+    return (day + timedelta(days=-7 if trigger == "analysis-week-prev" else 7)).isoformat()
 
 
 def render_two_way(rows, dim_a, dim_b):
@@ -336,14 +359,14 @@ def open_delete(n_clicks, virtual_data, selected_rows):
         deletable.append(sid)
         pnl = calculate_net_realized_pnl(repository.get_trades_for_structure(sid))
         total += pnl
-        lines.append(html.Li(f"{structure.name}: {'+' if pnl >= 0 else '-'}${abs(pnl):,.0f} (all of its exits)"))
+        lines.append(html.Li(f"{structure.name}: ALL {len(repository.get_trades_for_structure(sid))} trades, {'+' if pnl >= 0 else '-'}${abs(pnl):,.0f} (every exit, ticked or not)"))
     ids = deletable
     if not ids:
         note = f"{', '.join(kept)} still has lots open, so it is not deleted; exit the rest first." if kept else "Nothing to delete."
         return True, [html.Div(note, style={"color": "#f0b429"})], [], {"display": "none"}, True
     reset_active = bool(repository.get_setting(KEY_PNL_BASELINE, 0.0) or repository.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0))
     body = [
-        html.P(f"Delete {len(lines)} closed trade(s) for good, with their trades and history?"),
+        html.P(f"Delete {len(lines)} WHOLE closed structure(s) for good, with every trade and all history? To delete just one exit, cancel and use Delete selected."),
         html.Ul(lines, style={"maxHeight": "180px", "overflowY": "auto"}),
         html.P(f"Home's realized PnL (all time and today's) will drop by {'+' if total >= 0 else '-'}${abs(total):,.0f}: their PnL is no longer counted.",
                style={"fontWeight": "bold"}),
@@ -399,7 +422,7 @@ def open_undo(n_clicks, virtual_data, selected_rows, rows):
     repository = container.repository
     reset_active = bool(repository.get_setting(KEY_PNL_BASELINE, 0.0) or repository.get_setting(KEY_PNL_REALIZED_BASELINE, 0.0))
     body = [
-        html.P(f"Remove {len(items)} exit(s) and put their lots back open? The entries and the other exits stay; a closed structure moves back to the open list."),
+        html.P(f"Delete only these {len(items)} exit(s)? Everything else of the structure stays (entries and its other exits); their lots are open again and a closed structure moves back to the open list."),
         html.Ul(lines, style={"maxHeight": "180px", "overflowY": "auto"}),
         html.P(f"Home's realized PnL will drop by about {'+' if total >= 0 else '-'}${abs(total):,.0f} (the exit's result and cost); the entry cost stays.",
                style={"fontWeight": "bold"}),
@@ -624,8 +647,19 @@ def register_archive_callbacks(app) -> None:
     app.callback(
         Output("analysis-week-cards", "children"),
         Output("analysis-week-contract-table", "data"),
+        Output("analysis-week-label", "children"),
         Input("archive-rows", "data"),
+        Input("analysis-week-date", "date"),
     )(render_week)
+
+    app.callback(
+        Output("analysis-week-date", "date"),
+        Input("analysis-week-prev", "n_clicks"),
+        Input("analysis-week-next", "n_clicks"),
+        Input("analysis-week-now", "n_clicks"),
+        State("analysis-week-date", "date"),
+        prevent_initial_call=True,
+    )(move_week)
 
     app.callback(
         Output("archive-export-download", "data"),

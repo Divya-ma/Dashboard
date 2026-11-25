@@ -19,7 +19,7 @@ from core.churn_engine import FOLDS
 from core.churn_service import validate_params
 from ui.container import container
 from ui.layouts.churn_tab import (
-    COST_FIELDS, FIT_INPUTS, FIT_LABELS, PARAM_INPUTS, archive_section, breakeven_table, build_session_figure, build_worse_fill_figures, fit_section, table_data,
+    COST_FIELDS, FIT_INPUTS, FIT_LABELS, PARAM_INPUTS, archive_section, breakeven_table, build_session_figure, build_worse_fill_figures, fit_section, scan_data, table_data,
 )
 from ui.layouts.curve_tab import empty_figure
 from ui.layouts.shell import COLORS
@@ -202,6 +202,22 @@ def save_costs_callback(n_clicks, *values):
     return html.Span("Saved.", style={"color": COLORS["ACCENT_GREEN"]}), n_clicks
 
 
+def render_scan(_n, params_dict, _version, product, family, min_osc, max_range):
+    """The morning scan: profitable, oscillating, tight-range rows with levels to churn from. Reads the built simulation; never builds it."""
+    service = container.churn_service
+    if service is None or not params_dict:
+        return no_update, no_update
+    try:
+        scan = service.morning_scan(validate_params(params_dict), 3.0 if min_osc is None else float(min_osc), 3.0 if max_range is None else float(max_range), product or "all", family or "all")
+    except Exception:  # noqa: BLE001
+        logger.exception("Churn morning scan failed")
+        return no_update, no_update
+    if scan is None:
+        return no_update, no_update
+    note = f"{len(scan)} contract(s) pass." if len(scan) else "Nothing passes these filters: lower the minimum oscillations or widen the week range."
+    return scan_data(scan), note
+
+
 def render_breakeven(_costs_version):
     service = container.churn_service
     if service is None:
@@ -242,6 +258,18 @@ def register_churn_callbacks(app) -> None:
         Input("churn-family", "value"),
         Input("churn-direction", "value"),
     )(render_table)
+
+    app.callback(
+        Output("churn-scan-table", "data"),
+        Output("churn-scan-note", "children"),
+        Input("churn-live-refresh", "n_intervals"),
+        Input("churn-params", "data"),
+        Input("churn-version", "data"),
+        Input("churn-product", "value"),
+        Input("churn-family", "value"),
+        Input("churn-scan-osc", "value"),
+        Input("churn-scan-range", "value"),
+    )(render_scan)
 
     app.callback(
         Output("churn-net-chart", "figure"),

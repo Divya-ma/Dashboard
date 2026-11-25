@@ -193,7 +193,7 @@ def build_week_cards(stats: dict) -> list:
 
 CONTRACT_COLUMNS = [
     {"id": "contract", "name": "Contract"}, {"id": "trades", "name": "Trades", "type": "numeric"},
-    {"id": "round_trips", "name": "Round trips", "type": "numeric"},
+    {"id": "structures", "name": "Structures", "type": "numeric"},
     {"id": "win_rate", "name": "Win rate", "type": "numeric", "format": Format(precision=0, scheme=Scheme.percentage)},
     {"id": "win_rate_rebate", "name": "Win rate (with rebates)", "type": "numeric", "format": Format(precision=0, scheme=Scheme.percentage)},
     {"id": "total_pnl", "name": "Net PnL ($)", "type": "numeric", "format": _MONEY},
@@ -204,18 +204,18 @@ CONTRACT_COLUMNS = [
 def contract_records(table: list[dict]) -> list[dict]:
     """core.archive.contract_summary's rows as DataTable records (win rates as a 0-1 fraction for the percentage format)."""
     return [{
-        "contract": row["contract"], "trades": row["trades"], "round_trips": row["round_trips"],
+        "contract": row["contract"], "trades": row["trades"], "structures": row["structures"],
         "win_rate": row["win_rate"] / 100.0, "win_rate_rebate": row["win_rate_rebate"] / 100.0,
         "total_pnl": row["total_pnl"], "total_pnl_rebate": row["total_pnl_rebate"],
     } for row in table]
 
 
-WEEK_CONTRACT_COLUMNS = [c for c in CONTRACT_COLUMNS if c["id"] != "round_trips"]
+WEEK_CONTRACT_COLUMNS = [c for c in CONTRACT_COLUMNS if c["id"] != "structures"]
 
 
 def week_contract_records(table: list[dict]) -> list[dict]:
-    """core.archive.contract_summary's rows (for the week's rows) as DataTable records, without the round-trips column."""
-    return [{k: v for k, v in record.items() if k != "round_trips"} for record in contract_records(table)]
+    """core.archive.contract_summary's rows (for the week's rows) as DataTable records, without the structures column."""
+    return [{k: v for k, v in record.items() if k != "structures"} for record in contract_records(table)]
 
 
 def _table_style(left_columns: tuple) -> dict:
@@ -240,10 +240,21 @@ def analysis_tab() -> html.Div:
             dbc.Card(
                 dbc.CardBody(
                     [
-                        html.Div("This week's closed trades", style=_LABEL),
+                        html.Div("Weekly analysis: closed trades", style=_LABEL),
                         html.Div(
-                            "Every trade exited this week (Monday to Sunday, London time) — by when it was CLOSED, not when it was opened. "
-                            "A position opened last week but exited this week counts here; one opened this week but still open does not.",
+                            [
+                                dbc.Button("◀ Previous week", id="analysis-week-prev", color="secondary", outline=True, size="sm"),
+                                dcc.DatePickerSingle(id="analysis-week-date", date=None, display_format="YYYY-MM-DD", placeholder="Any day of the week",
+                                                     clearable=True, className="mx-2"),
+                                dbc.Button("Next week ▶", id="analysis-week-next", color="secondary", outline=True, size="sm"),
+                                dbc.Button("This week", id="analysis-week-now", color="primary", outline=True, size="sm", className="ms-2"),
+                                html.Span(id="analysis-week-label", style={**_MUTED, "marginLeft": "12px"}),
+                            ],
+                            style={"display": "flex", "alignItems": "center", "marginBottom": "8px", "flexWrap": "wrap"},
+                        ),
+                        html.Div(
+                            "Every trade exited in the chosen week (Monday to Sunday, London time; this week unless you pick another day) — by when it was CLOSED, not when it was opened. "
+                            "A position opened the week before but exited in the chosen week counts here; one still open does not.",
                             style={**_MUTED, "marginBottom": "8px"},
                         ),
                         dbc.Row(id="analysis-week-cards"),
@@ -272,8 +283,8 @@ def analysis_tab() -> html.Div:
                         html.Div(
                             "Every contract you have traded (an outright, spread, fly, d-fly or CL-BZ box), by name. A contract traded again under "
                             "a name ending \"(reuse)\" (the Structures page's \"Reuse as Shell\") is grouped with the one it was reused from: "
-                            "Trades is how many separate times you entered it, Round trips is every exit across all of them (a partial exit counts "
-                            "on its own). Win rate and Net PnL are shown before and after rebates.",
+                            "Trades is the number of instances: every exit across all of them (a partial exit counts on its own); Structures is how many "
+                            "separate times you entered it. Win rate and Net PnL are shown before and after rebates.",
                             style={**_MUTED, "marginBottom": "8px"},
                         ),
                         dash_table.DataTable(

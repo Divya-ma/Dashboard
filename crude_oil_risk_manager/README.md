@@ -678,6 +678,15 @@ stretch (z)** (default 1: a new price is taken only when it is at least one stan
 average; 0 = any price), **Targets up to ATR share** (default 0.5: also tries bigger targets, up to that share of the daily ATR)
 and **Best hours only** (default 0 = off). Saved settings that still hold the old defaults take the new ones.
 
+**Morning scan (`core/churn_scan.py`, under the table).** For a quiet market where nothing is at your usual level. Keeps the rows
+whose side makes money after costs (score above 0), whose live price level came back at least *Minimum oscillations* times (default
+3) and whose week's low-to-high is at most *Widest week range* daily ATRs (default 3; a contract with no ATR is kept and sorts
+last; a row with no live price is kept without a level). Each gets levels that do not depend on where you usually enter:
+yesterday's close (the last stored five-minute candle close before today, not the exchange settlement), the middle of the week's
+range and the week's low and high. The nearest one to the live price is shown with its signed distance in ticks (positive = the
+level is above the price) and **AT LEVEL** within 2 ticks. Tightest range first, then best score; the best hours are the table's
+own. It follows the Product and Curve filters and reads the built simulation (it never builds it).
+
 **Table columns:** Contract, Live Price, Volume/day, ATR, Cost, Per-lot net profit, Number of oscillations, Score, Other Side
 Score, Side, Worse price score, Week Range, Month Range. *Oscillations* = from the live price, how many times in the last N trading
 days the market came back to that level and then moved the target in the trade's favour, in one day. *Other Side Score* is the
@@ -732,10 +741,10 @@ legs, entry and exit date, days held, entry and exit price, lots, transaction co
 columns below. Row detail shows the legs, the facts, the journal, and an editor for ideas, payups, conviction, exit reason and
 mistakes.
 
-- **Delete selected** permanently deletes ticked closed trades (with their legs, trades and history). Home's realized P&L (all
+- **⚠ Delete whole structure** permanently deletes the structure behind each ticked row (with ALL its legs, trades and history, ticked or not). Home's realized P&L (all
   time and today's) drops by their net P&L automatically. If an Account Reset is active, a tickbox keeps the shown figure
   unchanged for trades closed before the reset (the baseline moves with them).
-- **↩ Undo exit** removes only the ticked exit(s) (an exit made by mistake): the structure's other trades stay, the lots come
+- **🗑 Delete selected** removes only the ticked exit(s) (an exit made by mistake): the structure's other trades stay, the lots come
   back, and a closed structure moves from Closed Structures back to the open list. Every remaining trade is replayed, as when a
   trade is deleted on the Structures page, and Home's realized P&L drops by what the exit had earned. A row that stands for a whole
   structure (per-leg exits) cannot be undone exit by exit.
@@ -809,17 +818,17 @@ the fee sheet and editable. How a trade's rebate is worked out (`core/rebates.py
   gross losses), payoff (average win ÷ average loss), total net P&L and costs paid, worst drawdown with the longest losing and
   winning runs, average payups.
 - *Equity curve and drawdown* (cumulative net P&L in exit order; the start counts as a peak).
-- **This week's closed trades** (`core.archive.week_summary` / `rows_closed_this_week`): every trade **exited** Monday-to-Sunday
-  this week, London time — closing date, not entry date, so a position opened last week and exited this week counts, and one
+- **Weekly analysis** (`core.archive.week_summary` / `rows_closed_this_week`): every trade **exited** Monday-to-Sunday
+  in the chosen week (this week by default; ◀ Previous week / Next week ▶ or any day in the date box pick another, *This week* resets), London time — closing date, not entry date, so a position opened last week and exited this week counts, and one
   opened this week but still open does not. Cards: trades closed, net PnL, win rate and profit factor (gross wins ÷ gross
   losses), each **before and after rebates**. Below the cards, the same per-contract breakdown as Contract-wise analysis
-  (reuse-merged, see below) but for the week only, with the Round trips column left out.
+  (reuse-merged, see below) but for the week only, with the Structures column left out. The *trades* figure counts instances (one per exit), not distinct structures.
 - **Contract-wise analysis** (`core.archive.contract_summary`): every contract traded (an outright, spread, fly, d-fly or CL-BZ
-  box), by name — **Trades** (distinct structures entered), **Round trips** (every exit across them: see *one row per exit*
-  above), **Win rate** and **Net PnL**, each **before and after rebates**. A structure traded again under a name ending
+  box), by name — **Trades** (the number of instances: every exit across them, see *one row per exit* above), **Structures** (distinct
+  structures entered), **Win rate** and **Net PnL**, each **before and after rebates**. A structure traded again under a name ending
   `(reuse)` — the Structures page's *Reuse as Shell* copies the closed structure's own name unless you type a new one — is
   grouped with the one it was reused from, however many times `(reuse)` was appended, so the contract's full history is one
-  row, not one per copy. Sorted by round trips, most-traded first.
+  row, not one per copy. Sorted by trades, most-traded first.
 - *Group-by table and chart:* pick one column — structure type, product, trade idea, curve shape, outright price range (thirds
   of each product's own prices), day move, 1-minute move, stop distance in ATRs, planned risk:reward, conviction, exit reason,
   mistake tag, entry hour (London), weekday, days held, payups, volatility, volume, bid-ask, Brent–WTI, gasoil crack, and whether
